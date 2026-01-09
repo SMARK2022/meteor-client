@@ -36,7 +36,7 @@ public class NametagUtils {
 
     public static void onRender(Matrix4f modelView) {
         model.set(modelView);
-        NametagUtils.projection.set(RenderSystem.getProjectionMatrix());
+        NametagUtils.projection.set(RenderUtils.projection);
 
         Utils.set(camera, mc.gameRenderer.getCamera().getPos());
         cameraNegated.set(camera);
@@ -94,6 +94,7 @@ public class NametagUtils {
 
         MatrixStack matrices = drawContext.getMatrices();
         matrices.push();
+        matrices.scale((float) (1.0f / mc.getWindow().getScaleFactor()), (float) (1.0f / mc.getWindow().getScaleFactor()), 1);
         matrices.translate((float) pos.x, (float) pos.y, 0);
         matrices.scale((float) scale, (float) scale, 1);
     }
