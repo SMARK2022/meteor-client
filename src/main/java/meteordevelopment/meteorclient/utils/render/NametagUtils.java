@@ -23,7 +23,6 @@ public class NametagUtils {
     private static final Vector3d cameraNegated = new Vector3d();
     private static final Matrix4f model = new Matrix4f();
     private static final Matrix4f projection = new Matrix4f();
-    private static double windowScale;
 
     public static double scale;
 
@@ -37,8 +36,6 @@ public class NametagUtils {
         Utils.set(camera, mc.gameRenderer.getCamera().getCameraPos());
         cameraNegated.set(camera);
         cameraNegated.negate();
-
-        windowScale = mc.getWindow().calculateScaleFactor(1, false);
     }
 
     public static boolean to2D(Vector3d pos, double scale) {
@@ -66,6 +63,7 @@ public class NametagUtils {
         if (behind && !allowBehind) return false;
 
         toScreen(pmMat4);
+
         double x = pmMat4.x * mc.getWindow().getFramebufferWidth();
         double y = pmMat4.y * mc.getWindow().getFramebufferHeight();
 
@@ -76,7 +74,12 @@ public class NametagUtils {
 
         if (Double.isInfinite(x) || Double.isInfinite(y)) return false;
 
-        pos.set(x / windowScale, mc.getWindow().getFramebufferHeight() - y / windowScale, allowBehind ? pmMat4.w : pmMat4.z);
+        // Use getScaleFactor() to match the scaling in begin(DrawContext)
+        float guiScale = mc.getWindow().getScaleFactor();
+        double finalX = x / guiScale;
+        double finalY = mc.getWindow().getFramebufferHeight() / guiScale - y / guiScale;
+
+        pos.set(finalX, finalY, allowBehind ? pmMat4.w : pmMat4.z);
         return true;
     }
 
