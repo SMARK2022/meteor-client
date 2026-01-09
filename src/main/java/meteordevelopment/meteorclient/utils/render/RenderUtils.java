@@ -29,7 +29,7 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 public class RenderUtils {
     public static Vec3d center;
-    public static final Matrix4f projection = new Matrix4f();
+    public static Matrix4f projection = new Matrix4f();
 
     private static final Pool<RenderBlock> renderBlockPool = new Pool<>(RenderBlock::new);
     private static final List<RenderBlock> renderBlocks = new ArrayList<>();
