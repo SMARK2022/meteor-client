@@ -34,7 +34,7 @@ public class NametagUtils {
 
     // 调试用：每秒只打印一次日志
     private static long lastLogTime = 0;
-    private static final boolean DEBUG_ENABLED = true;
+    private static final boolean DEBUG_ENABLED = false; // 已修复，禁用调试日志
 
     private NametagUtils() {
     }
@@ -89,9 +89,10 @@ public class NametagUtils {
         double originalX = x;
         double originalY = y;
 
-        // 计算最终的屏幕坐标
-        double finalX = x / windowScale;
-        double finalY = mc.getWindow().getFramebufferHeight() - y / windowScale;
+        // 计算最终的屏幕坐标（转换为GUI缩放坐标系）
+        double guiScale = mc.getWindow().getScaleFactor();
+        double finalX = x / guiScale;
+        double finalY = (mc.getWindow().getFramebufferHeight() - y) / guiScale;
 
         // 调试日志 - 每500ms打印一次
         if (DEBUG_ENABLED && System.currentTimeMillis() - lastLogTime > 500) {
@@ -101,13 +102,12 @@ public class NametagUtils {
             int fbHeight = mc.getWindow().getFramebufferHeight();
             int winWidth = mc.getWindow().getWidth();
             int winHeight = mc.getWindow().getHeight();
-            double guiScale = mc.getWindow().getScaleFactor();
             int scaledWidth = mc.getWindow().getScaledWidth();
             int scaledHeight = mc.getWindow().getScaledHeight();
 
-            // 屏幕中心坐标
-            double screenCenterX = fbWidth / 2.0 / windowScale;
-            double screenCenterY = fbHeight / 2.0 / windowScale;
+            // 屏幕中心坐标（使用GUI缩放）
+            double screenCenterX = scaledWidth / 2.0;
+            double screenCenterY = scaledHeight / 2.0;
 
             MeteorClient.LOG.info("=== NametagUtils Debug ===");
             MeteorClient.LOG.info("Window: fbWidth={}, fbHeight={}, winWidth={}, winHeight={}", fbWidth, fbHeight, winWidth, winHeight);
