@@ -102,13 +102,12 @@ public class NametagUtils {
             int fbHeight = mc.getWindow().getFramebufferHeight();
             int winWidth = mc.getWindow().getWidth();
             int winHeight = mc.getWindow().getHeight();
-            double guiScale = mc.getWindow().getScaleFactor();
             int scaledWidth = mc.getWindow().getScaledWidth();
             int scaledHeight = mc.getWindow().getScaledHeight();
 
-            // 屏幕中心坐标
-            double screenCenterX = fbWidth / 2.0 / windowScale;
-            double screenCenterY = fbHeight / 2.0 / windowScale;
+            // 屏幕中心坐标（使用GUI缩放）
+            double screenCenterX = scaledWidth / 2.0;
+            double screenCenterY = scaledHeight / 2.0;
 
             MeteorClient.LOG.info("=== NametagUtils Debug ===");
             MeteorClient.LOG.info("Window: fbWidth={}, fbHeight={}, winWidth={}, winHeight={}", fbWidth, fbHeight, winWidth, winHeight);
