@@ -34,7 +34,7 @@ public class NametagUtils {
 
     // 调试用：每秒只打印一次日志
     private static long lastLogTime = 0;
-    private static final boolean DEBUG_ENABLED = true;
+    private static final boolean DEBUG_ENABLED = false; // 已修复，禁用调试日志
 
     private NametagUtils() {
     }
@@ -89,9 +89,10 @@ public class NametagUtils {
         double originalX = x;
         double originalY = y;
 
-        // 计算最终的屏幕坐标
-        double finalX = x / windowScale;
-        double finalY = mc.getWindow().getFramebufferHeight() - y / windowScale;
+        // 计算最终的屏幕坐标（转换为GUI缩放坐标系）
+        double guiScale = mc.getWindow().getScaleFactor();
+        double finalX = x / guiScale;
+        double finalY = (mc.getWindow().getFramebufferHeight() - y) / guiScale;
 
         // 调试日志 - 每500ms打印一次
         if (DEBUG_ENABLED && System.currentTimeMillis() - lastLogTime > 500) {
