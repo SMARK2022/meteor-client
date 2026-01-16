@@ -29,7 +29,6 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 public class RenderUtils {
     public static Vec3d center;
-    public static final Matrix4f projection = new Matrix4f();
 
     private static final Pool<RenderBlock> renderBlockPool = new Pool<>(RenderBlock::new);
     private static final List<RenderBlock> renderBlocks = new ArrayList<>();
@@ -63,8 +62,6 @@ public class RenderUtils {
     }
 
     public static void updateScreenCenter(Matrix4f projection, Matrix4f view) {
-        RenderUtils.projection.set(projection);
-
         Matrix4f invProjection = new Matrix4f(projection).invert();
         Matrix4f invView = new Matrix4f(view).invert();
 

@@ -88,7 +88,7 @@ public abstract class GameRendererMixin {
         // Call utility classes
 
         RenderUtils.updateScreenCenter(projection, view);
-        NametagUtils.onRender(view);
+        NametagUtils.onRender(view, projection);
 
         // Update model view matrix
 

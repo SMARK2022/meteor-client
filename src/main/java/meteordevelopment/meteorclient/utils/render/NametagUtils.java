@@ -39,9 +39,9 @@ public class NametagUtils {
     private NametagUtils() {
     }
 
-    public static void onRender(Matrix4f modelView) {
+    public static void onRender(Matrix4f modelView, Matrix4f projectionMatrix) {
         model.set(modelView);
-        NametagUtils.projection.set(RenderUtils.projection);
+        NametagUtils.projection.set(projectionMatrix);
 
         Utils.set(camera, mc.gameRenderer.getCamera().getPos());
         cameraNegated.set(camera);
@@ -91,8 +91,8 @@ public class NametagUtils {
 
         // 计算最终的屏幕坐标（转换为GUI缩放坐标系）
         double guiScale = mc.getWindow().getScaleFactor();
-        double finalX = x / guiScale;
-        double finalY = (mc.getWindow().getFramebufferHeight() - y) / guiScale;
+        double finalX = x;
+        double finalY = (mc.getWindow().getFramebufferHeight() - y);
 
         // 调试日志 - 每500ms打印一次
         if (DEBUG_ENABLED && System.currentTimeMillis() - lastLogTime > 500) {
@@ -119,7 +119,7 @@ public class NametagUtils {
             MeteorClient.LOG.info("World pos: x={}, y={}, z={}", pos.x, pos.y, pos.z);
             MeteorClient.LOG.info("Camera pos: x={}, y={}, z={}", camera.x, camera.y, camera.z);
             MeteorClient.LOG.info("Projection matrix valid: {}", !projection.equals(new Matrix4f()));
-            MeteorClient.LOG.info("RenderUtils.projection valid: {}", !RenderUtils.projection.equals(new Matrix4f()));
+            MeteorClient.LOG.info("RenderUtils.projection valid: {}", !projection.equals(new Matrix4f()));
             MeteorClient.LOG.info("==========================");
         }
 
