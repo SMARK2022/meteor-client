@@ -1,5 +1,5 @@
 plugins {
-    id("fabric-loom") version "1.10.1"
+    id("fabric-loom") version "1.14.10"
     id("maven-publish")
     id("com.gradleup.shadow") version "9.0.0-beta4"
 }
@@ -34,6 +34,9 @@ repositories {
         name = "ViaVersion"
         url = uri("https://repo.viaversion.com")
     }
+
+    maven { url = uri("https://api.modrinth.com/maven") }
+
     mavenCentral()
 
     exclusiveContent {
@@ -89,6 +92,10 @@ dependencies {
     modCompileOnly("meteordevelopment:baritone:${properties["baritone_version"] as String}-SNAPSHOT")
     // ModMenu (https://github.com/TerraformersMC/ModMenu)
     modCompileOnly("com.terraformersmc:modmenu:${properties["modmenu_version"] as String}")
+
+    // Litematica
+    modImplementation("maven.modrinth:litematica:0.21.5")
+    modImplementation("maven.modrinth:malilib:0.23.5")
 
     // Libraries
     library("meteordevelopment:orbit:${properties["orbit_version"] as String}")
