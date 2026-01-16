@@ -458,6 +458,7 @@ public class Modules extends System<Modules> {
         add(new Portals());
         add(new PotionSaver());
         add(new PotionSpoof());
+        add(new Printer());
         add(new Reach());
         add(new Rotation());
         add(new SpeedMine());
