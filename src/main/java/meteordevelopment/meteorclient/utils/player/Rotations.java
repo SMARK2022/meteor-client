@@ -52,7 +52,7 @@ public class Rotations {
 
         int i = 0;
         for (; i < rotations.size(); i++) {
-            if (priority > rotations.get(i).priority) break;
+            if (priority <= rotations.get(i).priority) break;
         }
 
         rotations.add(i, rotation);
