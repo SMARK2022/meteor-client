@@ -49,6 +49,8 @@ import net.minecraft.world.RaycastContext;
 
 import java.util.*;
 
+import javax.swing.Box;
+
 /**
  * Printer Module - Automatically places blocks based on Litematica schematic.
  *
@@ -248,17 +250,18 @@ public class Printer extends Module {
     private boolean placeBlockStrict(BlockPos pos, FindItemResult findResult, BlockState requiredState) {
         if (!findResult.isHotbar() && !findResult.isOffhand()) return false;
 
-        // Get the interaction direction with NCP checks
+        // 关键概念：获取可以点击的方向
+        // 返回值是"相邻固体方块相对于目标pos的方向"
         Direction direction = getInteractDirectionStrict(pos);
         if (direction == null) return false;
 
-        // Check line of sight if enabled
+        // 检查线性视距
         if (checkLineOfSight.get() && !canSeeBlock(pos, direction)) {
             return false;
         }
 
-        // The neighbor is the block we're clicking on (that we're placing against)
-        BlockPos neighbor = pos.offset(direction.getOpposite());
+        // 获取要点击的方块位置（那个solid方块）
+        BlockPos neighborPos = pos.offset(direction);
 
         // Swap to the correct item
         if (findResult.isHotbar()) {
@@ -266,30 +269,33 @@ public class Printer extends Module {
         }
 
         // Check if we need to sneak
-        BlockState neighborState = mc.world.getBlockState(neighbor);
+        BlockState neighborState = mc.world.getBlockState(neighborPos);
         boolean shouldSneak = BlockUtilHelper.SNEAK_BLOCKS.contains(neighborState.getBlock()) && !mc.player.isSneaking();
 
         if (shouldSneak) {
             mc.player.setSneaking(true);
         }
 
-        // Calculate the hitVec based on the direction we're clicking from
-        // This is critical: hitVec determines which face player is clicking,
-        // which determines block orientation for directional blocks
-        Vec3d hitVec = BlockUtilHelper.getHitVec(neighbor, direction);
+        // 计算hitVec：这是关键！
+        // hitVec = 被点击方块的中心 + 方向向量 * 0.5
+        // 这样我们就点击了被点击方块的某个面的中心
+        Vec3d hitVec = Vec3d.ofCenter(neighborPos).add(
+            direction.getOffsetX() * 0.5,
+            direction.getOffsetY() * 0.5,
+            direction.getOffsetZ() * 0.5
+        );
 
-        // Calculate rotation to the hit position (not the block center!)
-        // This ensures proper rotation angle for directional blocks
+        // Calculate rotation to the hit position
         double yaw = Rotations.getYaw(hitVec);
         double pitch = Rotations.getPitch(hitVec);
 
         // Rotate and place - rotation will complete before placement
         if (rotate.get()) {
             Rotations.rotate(yaw, pitch, 50, () -> {
-                placeBlockInternal(neighbor, direction, hitVec);
+                placeBlockInternal(neighborPos, direction, hitVec);
             });
         } else {
-            placeBlockInternal(neighbor, direction, hitVec);
+            placeBlockInternal(neighborPos, direction, hitVec);
         }
 
         if (shouldSneak) {
@@ -304,11 +310,16 @@ public class Printer extends Module {
 
     /**
      * Internal block placement using BlockHitResult.
-     * The hitVec (click position) is critical for determining block orientation.
+     *
+     * BlockHitResult参数说明：
+     * - hitPos: 玩家点击的具体位置（决定方块朝向和半砖类型）
+     * - side: 点击的是neighborPos的哪个面
+     * - blockPos: 被点击的方块位置（neighborPos）
+     * - inside: false（点击方块外部）
      */
     private void placeBlockInternal(BlockPos neighborPos, Direction direction, Vec3d hitVec) {
-        // Create hit result with correct neighbor position
-        // direction here is the direction we're clicking FROM (the block face we're clicking on)
+        // BlockHitResult: 我们点击neighborPos的某个面（由direction指定）
+        // 新方块会在neighborPos.offset(direction)处放置
         BlockHitResult hitResult = new BlockHitResult(hitVec, direction, neighborPos, false);
         ActionResult result = mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hitResult);
 
@@ -374,8 +385,14 @@ public class Printer extends Module {
             BlockState requiredState = worldSchematic.getBlockState(pos);
             BlockState currentState = mc.world.getBlockState(pos);
 
-            // Skip if schematic wants air or block is already correct
-            if (requiredState.isAir() || requiredState.getBlock() == currentState.getBlock()) {
+            // Skip if schematic wants air
+            if (requiredState.isAir()) {
+                continue;
+            }
+
+            // Skip if block is already correct (same type)
+            // 关键修复：应该比较Block类型，而不是整个BlockState
+            if (requiredState.getBlock() == currentState.getBlock()) {
                 continue;
             }
 
@@ -384,8 +401,9 @@ public class Printer extends Module {
                 continue;
             }
 
-            // Check if position is replaceable
-            if (!currentState.isReplaceable()) {
+            // 关键修复：对于能够替换的方块（空气、水、某些方块）才能放置
+            // 检查是否可以替换：空气、replaceable的方块都可以
+            if (!currentState.isAir() && !currentState.isLiquid() && !currentState.isReplaceable()) {
                 continue;
             }
 

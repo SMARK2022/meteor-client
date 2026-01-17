@@ -80,10 +80,18 @@ public class BlockUtilHelper {
 
     /**
      * 获取可以放置方块的交互方向
-     * 逻辑：检查方向的相反方向上是否有固体方块可以放置
      *
-     * @param blockPos 目标放置位置
-     * @param world 世界对象（通过mc.world获取）
+     * 关键概念：
+     * - 我们要在pos位置放置方块
+     * - 需要找到pos周围哪个相邻方块是solid的（可以点击）
+     * - 返回的direction表示"solid方块相对于目标pos的方向"
+     *
+     * 例如：
+     * - 如果pos的右边(East)有solid方块，返回EAST
+     * - 这意味着我们要点击East方向的那个方块，从而在pos放置新方块
+     *
+     * @param blockPos 目标位置（要放置方块的地方）
+     * @param world 世界对象
      * @param eyePos 玩家眼睛位置
      * @param strictDirection 是否使用NCP风格的严格方向检查
      * @return 可以交互的方向，如果没有则返回null
@@ -92,16 +100,20 @@ public class BlockUtilHelper {
         Set<Direction> ncpDirections = strictDirection ? getPlaceDirectionsNCP(eyePos, Vec3d.ofCenter(blockPos)) : null;
         Direction resultDirection = null;
 
-        // 遍历所有方向，找到可以放置的方向
+        // 遍历所有方向，找到可以点击的方向
         for (Direction direction : Direction.values()) {
+            // 获取这个方向的相邻方块位置
             BlockPos neighborPos = blockPos.offset(direction);
             net.minecraft.block.BlockState state = world.getBlockState(neighborPos);
 
-            // 检查相邻方块是否为空且是固体（可以从中放置）
+            // 检查这个方向的相邻方块是否为solid（可以点击）
             if (!state.isAir() && state.getFluidState().isEmpty() && state.isSolidBlock(world, neighborPos)) {
-                // 如果是严格模式，还需要检查NCP方向
+                // 如果是严格模式，还需要检查NCP方向是否允许
                 if (strictDirection) {
-                    if (ncpDirections.contains(direction.getOpposite())) {
+                    // ncpDirections中的方向表示"玩家相对于目标的方向"
+                    // 如果我们要点击East的方块，意味着东方有solid方块
+                    // 这在ncpDirections中应该是允许的
+                    if (ncpDirections != null && ncpDirections.contains(direction)) {
                         resultDirection = direction;
                         break;
                     }
