@@ -30,6 +30,7 @@ import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
+import meteordevelopment.meteorclient.utils.world.BlockUtilHelper;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.*;
 import net.minecraft.entity.Entity;
@@ -157,18 +158,6 @@ public class Printer extends Module {
     private final Map<BlockPos, Item> placeItems = new HashMap<>();
     private int tickDelay = 0;
 
-    // List of blocks that require sneaking to interact
-    private static final Set<Block> SNEAK_BLOCKS = Set.of(
-        Blocks.CHEST, Blocks.TRAPPED_CHEST, Blocks.ENDER_CHEST,
-        Blocks.CRAFTING_TABLE, Blocks.FURNACE, Blocks.BLAST_FURNACE, Blocks.SMOKER,
-        Blocks.BREWING_STAND, Blocks.ANVIL, Blocks.CHIPPED_ANVIL, Blocks.DAMAGED_ANVIL,
-        Blocks.ENCHANTING_TABLE, Blocks.GRINDSTONE, Blocks.STONECUTTER, Blocks.LOOM,
-        Blocks.CARTOGRAPHY_TABLE, Blocks.SMITHING_TABLE, Blocks.BARREL,
-        Blocks.DISPENSER, Blocks.DROPPER, Blocks.HOPPER,
-        Blocks.LEVER, Blocks.REPEATER, Blocks.COMPARATOR, Blocks.NOTE_BLOCK,
-        Blocks.JUKEBOX, Blocks.BEACON, Blocks.BELL
-    );
-
     public Printer() {
         super(Categories.Player, "printer", "Automatically places blocks based on Litematica schematic.");
     }
@@ -252,7 +241,9 @@ public class Printer extends Module {
 
     /**
      * Places a block using STRICT mode with anti-cheat bypass.
-     * Uses direction checking and proper block orientation.
+     * Uses direction checking and proper block orientation based on hit position.
+     *
+     * Critical: The hitVec (click position) determines block orientation for directional blocks
      */
     private boolean placeBlockStrict(BlockPos pos, FindItemResult findResult, BlockState requiredState) {
         if (!findResult.isHotbar() && !findResult.isOffhand()) return false;
@@ -266,6 +257,7 @@ public class Printer extends Module {
             return false;
         }
 
+        // The neighbor is the block we're clicking on (that we're placing against)
         BlockPos neighbor = pos.offset(direction.getOpposite());
 
         // Swap to the correct item
@@ -275,25 +267,29 @@ public class Printer extends Module {
 
         // Check if we need to sneak
         BlockState neighborState = mc.world.getBlockState(neighbor);
-        boolean shouldSneak = SNEAK_BLOCKS.contains(neighborState.getBlock()) && !mc.player.isSneaking();
+        boolean shouldSneak = BlockUtilHelper.SNEAK_BLOCKS.contains(neighborState.getBlock()) && !mc.player.isSneaking();
 
         if (shouldSneak) {
             mc.player.setSneaking(true);
         }
 
-        // Calculate rotation to the block center (NOT offset position)
-        // This ensures proper rotation angle for placing directional blocks
-        Vec3d blockCenter = Vec3d.ofCenter(pos);
-        double yaw = Rotations.getYaw(blockCenter);
-        double pitch = Rotations.getPitch(blockCenter);
+        // Calculate the hitVec based on the direction we're clicking from
+        // This is critical: hitVec determines which face player is clicking,
+        // which determines block orientation for directional blocks
+        Vec3d hitVec = BlockUtilHelper.getHitVec(neighbor, direction);
+
+        // Calculate rotation to the hit position (not the block center!)
+        // This ensures proper rotation angle for directional blocks
+        double yaw = Rotations.getYaw(hitVec);
+        double pitch = Rotations.getPitch(hitVec);
 
         // Rotate and place - rotation will complete before placement
         if (rotate.get()) {
             Rotations.rotate(yaw, pitch, 50, () -> {
-                placeBlockInternal(pos, neighbor, direction);
+                placeBlockInternal(neighbor, direction, hitVec);
             });
         } else {
-            placeBlockInternal(pos, neighbor, direction);
+            placeBlockInternal(neighbor, direction, hitVec);
         }
 
         if (shouldSneak) {
@@ -308,16 +304,12 @@ public class Printer extends Module {
 
     /**
      * Internal block placement using BlockHitResult.
+     * The hitVec (click position) is critical for determining block orientation.
      */
-    private void placeBlockInternal(BlockPos pos, BlockPos neighbor, Direction direction) {
-        // Construct hit position from the block center with direction offset
-        Vec3d hitPos = Vec3d.ofCenter(pos).add(
-            direction.getOffsetX() * 0.5,
-            direction.getOffsetY() * 0.5,
-            direction.getOffsetZ() * 0.5
-        );
-
-        BlockHitResult hitResult = new BlockHitResult(hitPos, direction, neighbor, false);
+    private void placeBlockInternal(BlockPos neighborPos, Direction direction, Vec3d hitVec) {
+        // Create hit result with correct neighbor position
+        // direction here is the direction we're clicking FROM (the block face we're clicking on)
+        BlockHitResult hitResult = new BlockHitResult(hitVec, direction, neighborPos, false);
         ActionResult result = mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hitResult);
 
         if (result.isAccepted()) {
@@ -329,123 +321,33 @@ public class Printer extends Module {
         }
     }
 
-    /**
-     * Gets the hit position for block placement, considering block orientation.
-     * Note: This is mainly for visual hit position; block orientation is handled by Minecraft itself
-     * based on the BlockHitResult and player position.
-     */
-    private Vec3d getHitPos(BlockPos pos, Direction direction, BlockState requiredState) {
-        // Just return the hit position based on the interaction direction
-        // Block orientation (FACING, SLAB_TYPE, etc.) is automatically handled by Minecraft
-        // based on where we click and player position - we don't need special handling
-        return Vec3d.ofCenter(pos).add(
-            direction.getOffsetX() * 0.5,
-            direction.getOffsetY() * 0.5,
-            direction.getOffsetZ() * 0.5
-        );
-    }
 
     /**
-     * Gets the interaction direction using NCP-style direction checks.
+     * 获取NCP风格的交互方向（严格模式）
      */
     private Direction getInteractDirectionStrict(BlockPos blockPos) {
-        Set<Direction> ncpDirections = getPlaceDirectionsNCP(mc.player.getEyePos(), Vec3d.ofCenter(blockPos));
-        Direction interactDirection = null;
-
-        for (Direction direction : Direction.values()) {
-            BlockPos neighborPos = blockPos.offset(direction);
-            BlockState state = mc.world.getBlockState(neighborPos);
-
-            // Check if neighbor is valid to place against
-            if (!state.isAir() && state.getFluidState().isEmpty() && state.isSolidBlock(mc.world, neighborPos)) {
-                // Check if direction is valid according to NCP
-                if (ncpDirections.contains(direction.getOpposite())) {
-                    interactDirection = direction;
-                    break;
-                }
-            }
-        }
-
-        if (interactDirection == null) {
-            // Fallback: try any valid direction
-            for (Direction direction : Direction.values()) {
-                BlockPos neighborPos = blockPos.offset(direction);
-                BlockState state = mc.world.getBlockState(neighborPos);
-                if (!state.isAir() && state.isSolidBlock(mc.world, neighborPos)) {
-                    interactDirection = direction;
-                    break;
-                }
-            }
-        }
-
-        return interactDirection != null ? interactDirection.getOpposite() : null;
+        return BlockUtilHelper.getInteractDirection(blockPos, mc.world, mc.player.getEyePos(), true);
     }
 
     /**
-     * Gets valid placement directions according to NCP anti-cheat.
-     * Based on player eye position relative to block position.
+     * 获取半砖的NCP风格交互方向（严格模式）
+     */
+    private Direction getInteractDirectionSlabStrict(BlockPos blockPos) {
+        return BlockUtilHelper.getInteractDirectionForSlab(blockPos, mc.world, mc.player.getEyePos(), true);
+    }
+
+    /**
+     * 获取NCP有效方向集合
      */
     private Set<Direction> getPlaceDirectionsNCP(Vec3d eyePos, Vec3d blockPos) {
-        double xDiff = eyePos.x - blockPos.x;
-        double yDiff = eyePos.y - blockPos.y;
-        double zDiff = eyePos.z - blockPos.z;
-
-        Set<Direction> directions = new HashSet<>(6);
-
-        // Y axis
-        if (yDiff > 0.5) {
-            directions.add(Direction.UP);
-        } else if (yDiff < -0.5) {
-            directions.add(Direction.DOWN);
-        } else {
-            directions.add(Direction.UP);
-            directions.add(Direction.DOWN);
-        }
-
-        // X axis
-        if (xDiff > 0.5) {
-            directions.add(Direction.EAST);
-        } else if (xDiff < -0.5) {
-            directions.add(Direction.WEST);
-        } else {
-            directions.add(Direction.EAST);
-            directions.add(Direction.WEST);
-        }
-
-        // Z axis
-        if (zDiff > 0.5) {
-            directions.add(Direction.SOUTH);
-        } else if (zDiff < -0.5) {
-            directions.add(Direction.NORTH);
-        } else {
-            directions.add(Direction.SOUTH);
-            directions.add(Direction.NORTH);
-        }
-
-        return directions;
+        return BlockUtilHelper.getPlaceDirectionsNCP(eyePos, blockPos);
     }
 
     /**
      * Checks if a block face is visible to the player (line of sight check).
      */
     private boolean canSeeBlock(BlockPos pos, Direction side) {
-        if (side == null) return false;
-
-        Vec3d testVec = Vec3d.ofCenter(pos).add(
-            side.getOffsetX() * 0.5,
-            side.getOffsetY() * 0.5,
-            side.getOffsetZ() * 0.5
-        );
-
-        BlockHitResult hitResult = mc.world.raycast(new RaycastContext(
-            mc.player.getEyePos(),
-            testVec,
-            RaycastContext.ShapeType.COLLIDER,
-            RaycastContext.FluidHandling.NONE,
-            mc.player
-        ));
-
-        return hitResult == null || hitResult.getType() == HitResult.Type.MISS;
+        return BlockUtilHelper.canSeeBlock(pos, side, mc.world, mc.player);
     }
 
     /**
