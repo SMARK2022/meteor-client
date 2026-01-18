@@ -33,6 +33,7 @@ import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.meteorclient.utils.world.BlockUtilHelper;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.*;
+import net.minecraft.block.enums.SlabType;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.decoration.EndCrystalEntity;
@@ -250,25 +251,19 @@ public class Printer extends Module {
     private boolean placeBlockStrict(BlockPos pos, FindItemResult findResult, BlockState requiredState) {
         if (!findResult.isHotbar() && !findResult.isOffhand()) return false;
 
-        // 关键概念：获取可以点击的方向
-        // 返回值是"相邻固体方块相对于目标pos的方向"
         Direction direction = getInteractDirectionStrict(pos);
         if (direction == null) return false;
 
-        // 获取要点击的方块位置（那个solid方块）
         BlockPos neighborPos = pos.offset(direction);
 
-        // 检查线性视距 - 检查是否能看到neighborPos
         if (checkLineOfSight.get() && !canSeeBlock(neighborPos, direction.getOpposite())) {
             return false;
         }
 
-        // Swap to the correct item
         if (findResult.isHotbar()) {
             InvUtils.swap(findResult.slot(), true);
         }
 
-        // Check if we need to sneak
         BlockState neighborState = mc.world.getBlockState(neighborPos);
         boolean shouldSneak = BlockUtilHelper.SNEAK_BLOCKS.contains(neighborState.getBlock()) && !mc.player.isSneaking();
 
@@ -276,33 +271,59 @@ public class Printer extends Module {
             mc.player.setSneaking(true);
         }
 
-        // 计算hitVec：这是关键！
-        // hitVec = 被点击方块的中心 + 方向向量 * 0.5
-        // 这样我们就点击了被点击方块的某个面的中心
-        Vec3d hitVec = Vec3d.ofCenter(neighborPos).add(
-            direction.getOffsetX() * 0.5,
-            direction.getOffsetY() * 0.5,
-            direction.getOffsetZ() * 0.5
-        );
+        // The side of the neighbor block we are clicking on.
+        Direction clickedSide = direction.getOpposite();
 
-        // Calculate rotation to the hit position
+        // Calculate hitVec, which is critical for block orientation (e.g., slabs).
+        Vec3d hitVec;
+        Block block = requiredState.getBlock();
+
+        // Special handling for slabs to place them as top or bottom slabs.
+        if (block instanceof SlabBlock && requiredState.contains(SlabBlock.TYPE)) {
+            SlabType slabType = requiredState.get(SlabBlock.TYPE);
+            Vec3d neighborCenter = Vec3d.ofCenter(neighborPos);
+
+            // If clicking a horizontal face, adjust the Y-position of the click.
+            if (clickedSide.getAxis().isHorizontal()) {
+                double yOffset = (slabType == SlabType.TOP) ? 0.9 : 0.1;
+                hitVec = new Vec3d(
+                    neighborPos.getX() + 0.5,
+                    neighborPos.getY() + yOffset,
+                    neighborPos.getZ() + 0.5
+                ).add(Vec3d.of(clickedSide.getVector()).multiply(0.5));
+            } else {
+                 // Clicking top or bottom face.
+                 // A top click (UP) places a BOTTOM slab. A bottom click (DOWN) places a TOP slab.
+                 // If the required slab type is incompatible with the only available click direction, we can't place it.
+                 if ((slabType == SlabType.TOP && clickedSide == Direction.UP) ||
+                     (slabType == SlabType.BOTTOM && clickedSide == Direction.DOWN)) {
+                      // We can't place this slab from this direction, so we should skip.
+                      // In a more advanced implementation, updatePlacePositions should filter this out.
+                      if (shouldSneak) mc.player.setSneaking(false);
+                      InvUtils.swapBack();
+                      return false;
+                 }
+                 // Use the center of the face for vertical clicks.
+                 hitVec = neighborCenter.add(Vec3d.of(clickedSide.getVector()).multiply(0.5));
+            }
+        } else {
+            // Default logic for other blocks: click the center of the face.
+            hitVec = Vec3d.ofCenter(neighborPos).add(Vec3d.of(clickedSide.getVector()).multiply(0.5));
+        }
+
         double yaw = Rotations.getYaw(hitVec);
         double pitch = Rotations.getPitch(hitVec);
 
-        // Rotate and place - rotation will complete before placement
         if (rotate.get()) {
-            Rotations.rotate(yaw, pitch, 50, () -> {
-                placeBlockInternal(neighborPos, direction, hitVec);
-            });
+            Rotations.rotate(yaw, pitch, 50, () -> placeBlockInternal(neighborPos, clickedSide, hitVec));
         } else {
-            placeBlockInternal(neighborPos, direction, hitVec);
+            placeBlockInternal(neighborPos, clickedSide, hitVec);
         }
 
         if (shouldSneak) {
             mc.player.setSneaking(false);
         }
 
-        // Swap back
         InvUtils.swapBack();
 
         return true;
@@ -311,16 +332,12 @@ public class Printer extends Module {
     /**
      * Internal block placement using BlockHitResult.
      *
-     * BlockHitResult参数说明：
-     * - hitPos: 玩家点击的具体位置（决定方块朝向和半砖类型）
-     * - side: 点击的是neighborPos的哪个面
-     * - blockPos: 被点击的方块位置（neighborPos）
-     * - inside: false（点击方块外部）
+     * @param neighborPos The block being interacted with.
+     * @param side The face of the neighbor block being clicked.
+     * @param hitVec The exact position of the click.
      */
-    private void placeBlockInternal(BlockPos neighborPos, Direction direction, Vec3d hitVec) {
-        // BlockHitResult: 我们点击neighborPos的某个面（由direction指定）
-        // 新方块会在neighborPos.offset(direction)处放置
-        BlockHitResult hitResult = new BlockHitResult(hitVec, direction, neighborPos, false);
+    private void placeBlockInternal(BlockPos neighborPos, Direction side, Vec3d hitVec) {
+        BlockHitResult hitResult = new BlockHitResult(hitVec, side, neighborPos, false);
         ActionResult result = mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hitResult);
 
         if (result.isAccepted()) {

@@ -110,8 +110,13 @@ dependencies {
     shadow(project(":launch"))
 }
 
+tasks.withType<JavaCompile> {
+    options.encoding = "UTF-8"
+}
+
 loom {
     accessWidenerPath = file("src/main/resources/meteor-client.accesswidener")
+
 }
 
 afterEvaluate {

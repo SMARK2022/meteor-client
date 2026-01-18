@@ -97,7 +97,6 @@ public class BlockUtilHelper {
      * @return 可以交互的方向，如果没有则返回null
      */
     public static Direction getInteractDirection(BlockPos blockPos, net.minecraft.world.World world, Vec3d eyePos, boolean strictDirection) {
-        Set<Direction> ncpDirections = strictDirection ? getPlaceDirectionsNCP(eyePos, Vec3d.ofCenter(blockPos)) : null;
         Direction resultDirection = null;
 
         // 遍历所有方向，找到可以点击的方向
@@ -110,11 +109,12 @@ public class BlockUtilHelper {
             if (!state.isAir() && state.getFluidState().isEmpty() && state.isSolidBlock(world, neighborPos)) {
                 // 如果是严格模式，还需要检查NCP方向是否允许
                 if (strictDirection) {
+                    // NCP check should be against the neighbor block that is being clicked.
+                    Set<Direction> ncpDirections = getPlaceDirectionsNCP(eyePos, Vec3d.ofCenter(neighborPos));
                     // GGBoy逻辑：检查方向的相反方向
-                    // 如果支撑方块在EAST方向，意味着我们要点击东边的方块
-                    // 这需要玩家能看到东边，即玩家在西边
-                    // 所以检查direction.getOpposite()是否在ncpDirections中
-                    if (ncpDirections != null && ncpDirections.contains(direction.getOpposite())) {
+                    // The side of the neighbor we are clicking is direction.getOpposite().
+                    // This direction must be one of the valid NCP directions.
+                    if (ncpDirections.contains(direction.getOpposite())) {
                         resultDirection = direction;
                         break;
                     }
@@ -125,8 +125,8 @@ public class BlockUtilHelper {
             }
         }
 
-        // 如果没找到严格模式的方向，使用fallback
-        if (resultDirection == null) {
+        // 如果严格模式没找到，则进行非严格的fallback搜索
+        if (resultDirection == null && !strictDirection) {
             for (Direction direction : Direction.values()) {
                 BlockPos neighborPos = blockPos.offset(direction);
                 net.minecraft.block.BlockState state = world.getBlockState(neighborPos);
@@ -136,6 +136,8 @@ public class BlockUtilHelper {
                 }
             }
         }
+        // If strict mode is on and we didn't find a direction, we don't fallback.
+        // The original implementation had a fallback loop that ignored strictness, which could cause issues.
 
         return resultDirection;
     }
