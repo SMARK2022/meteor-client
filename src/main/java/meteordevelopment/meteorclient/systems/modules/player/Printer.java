@@ -49,7 +49,7 @@ import net.minecraft.world.RaycastContext;
 
 import java.util.*;
 
-import javax.swing.Box;
+import net.minecraft.util.math.Box;
 
 /**
  * Printer Module - Automatically places blocks based on Litematica schematic.
@@ -255,13 +255,13 @@ public class Printer extends Module {
         Direction direction = getInteractDirectionStrict(pos);
         if (direction == null) return false;
 
-        // 检查线性视距
-        if (checkLineOfSight.get() && !canSeeBlock(pos, direction)) {
-            return false;
-        }
-
         // 获取要点击的方块位置（那个solid方块）
         BlockPos neighborPos = pos.offset(direction);
+
+        // 检查线性视距 - 检查是否能看到neighborPos
+        if (checkLineOfSight.get() && !canSeeBlock(neighborPos, direction.getOpposite())) {
+            return false;
+        }
 
         // Swap to the correct item
         if (findResult.isHotbar()) {
@@ -436,9 +436,13 @@ public class Printer extends Module {
                     continue;
                 }
 
-                // Optional line of sight check
-                if (checkLineOfSight.get() && !canSeeBlock(pos, direction)) {
-                    continue;
+                // Optional line of sight check - 检查支撑方块位置的可见性
+                // direction.getOpposite() 是从支撑方块指向目标的方向
+                if (checkLineOfSight.get()) {
+                    BlockPos neighborPos = pos.offset(direction);
+                    if (!canSeeBlock(neighborPos, direction.getOpposite())) {
+                        continue;
+                    }
                 }
             }
 
@@ -476,7 +480,7 @@ public class Printer extends Module {
      * Checks if there's an entity blocking placement at the given position.
      */
     private boolean hasBlockingEntity(BlockPos pos) {
-        Box box = new Box(pos);
+        net.minecraft.util.math.Box box = new net.minecraft.util.math.Box(pos);
         for (Entity entity : mc.world.getEntitiesByClass(Entity.class, box, e -> true)) {
             if (entity.isAlive() &&
                 !(entity instanceof ItemFrameEntity) &&

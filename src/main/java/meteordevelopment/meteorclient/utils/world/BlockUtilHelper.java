@@ -110,10 +110,11 @@ public class BlockUtilHelper {
             if (!state.isAir() && state.getFluidState().isEmpty() && state.isSolidBlock(world, neighborPos)) {
                 // 如果是严格模式，还需要检查NCP方向是否允许
                 if (strictDirection) {
-                    // ncpDirections中的方向表示"玩家相对于目标的方向"
-                    // 如果我们要点击East的方块，意味着东方有solid方块
-                    // 这在ncpDirections中应该是允许的
-                    if (ncpDirections != null && ncpDirections.contains(direction)) {
+                    // GGBoy逻辑：检查方向的相反方向
+                    // 如果支撑方块在EAST方向，意味着我们要点击东边的方块
+                    // 这需要玩家能看到东边，即玩家在西边
+                    // 所以检查direction.getOpposite()是否在ncpDirections中
+                    if (ncpDirections != null && ncpDirections.contains(direction.getOpposite())) {
                         resultDirection = direction;
                         break;
                     }
@@ -163,7 +164,8 @@ public class BlockUtilHelper {
 
             if (!state.isAir() && state.getFluidState().isEmpty() && state.isSolidBlock(world, neighborPos)) {
                 if (strictDirection) {
-                    if (ncpDirections.contains(direction.getOpposite())) {
+                    // 半砖也使用相同的NCP检查逻辑：检查direction.getOpposite()
+                    if (ncpDirections != null && ncpDirections.contains(direction.getOpposite())) {
                         resultDirection = direction;
                         break;
                     }
