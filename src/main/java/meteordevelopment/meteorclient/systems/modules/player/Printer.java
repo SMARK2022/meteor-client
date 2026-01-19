@@ -220,111 +220,114 @@ public class Printer extends Module {
             if (i >= placePositions.size()) break;
 
             BlockPos pos = placePositions.get(i);
-            Item item = placeItems.get(pos);
+            Item targetItem = placeItems.get(pos);
 
-            if (item == null) continue;
+            if (targetItem == null) continue;
 
-            // Find the item in hotbar
-            FindItemResult findResult = InvUtils.findInHotbar(item);
+            // 实时查找物品，优先查找快捷栏
+            FindItemResult findResult = InvUtils.findInHotbar(targetItem);
+
+            // 如果快捷栏没有，查找整个物品栏（包括offhand）
+            if (!findResult.found()) {
+                findResult = InvUtils.find(targetItem);
+            }
+
             if (!findResult.found()) continue;
 
-            // Get the required block state from schematic for orientation
+            // 获取该位置的目标方块状态（用于确定朝向）
             BlockState requiredState = worldSchematic.getBlockState(pos);
 
-            // Place the block based on mode
+            // 根据模式选择放置方法
             if (placeMode.get() == PlaceMode.LEGIT) {
-                // Standard placement using BlockUtils
+                // 普通模式：使用BlockUtils，自动处理物品栏、潜行等
                 BlockUtils.place(pos, findResult, rotate.get(), 50, swingHand.get(), true);
             } else {
-                // STRICT mode - placement with NCP direction checks and orientation support
+                // STRICT模式：手动处理所有细节（反作弊绕过）
                 placeBlockStrict(pos, findResult, requiredState);
             }
         }
     }
 
     /**
-     * Places a block using STRICT mode with anti-cheat bypass.
-     * Uses direction checking and proper block orientation based on hit position.
+     * 使用STRICT模式放置方块，包含反作弊绕过和方向检查
+     * 关键：hitVec（点击位置）决定了方块的朝向，特别是对半砖至关重要
      *
-     * Critical: The hitVec (click position) determines block orientation for directional blocks
+     * @param pos 目标位置（要放置的方块位置）
+     * @param findResult 物品栏查找结果
+     * @param requiredState 目标方块状态（包含朝向属性）
+     * @return 放置是否成功
      */
     private boolean placeBlockStrict(BlockPos pos, FindItemResult findResult, BlockState requiredState) {
         if (!findResult.isHotbar() && !findResult.isOffhand()) return false;
 
+        // 获取可以放置的方向
         Direction direction = getInteractDirectionStrict(pos);
         if (direction == null) return false;
 
         BlockPos neighborPos = pos.offset(direction);
 
+        // 线性视距检查（检查支撑方块的可见性）
         if (checkLineOfSight.get() && !canSeeBlock(neighborPos, direction.getOpposite())) {
             return false;
         }
 
+        // ==================== 第一步：切换物品到主手 ====================
+        boolean swappedItem = false;
         if (findResult.isHotbar()) {
             InvUtils.swap(findResult.slot(), true);
+            swappedItem = true;
         }
 
+        // ==================== 第二步：检查是否需要潜行 ====================
         BlockState neighborState = mc.world.getBlockState(neighborPos);
         boolean shouldSneak = BlockUtilHelper.SNEAK_BLOCKS.contains(neighborState.getBlock()) && !mc.player.isSneaking();
 
-        if (shouldSneak) {
-            mc.player.setSneaking(true);
-        }
-
-        // The side of the neighbor block we are clicking on.
+        // 点击的邻居方块的哪个面
         Direction clickedSide = direction.getOpposite();
 
-        // Calculate hitVec, which is critical for block orientation (e.g., slabs).
+        // 计算hitVec（点击位置）
         Vec3d hitVec;
         Block block = requiredState.getBlock();
 
-        // Special handling for slabs to place them as top or bottom slabs.
         if (block instanceof SlabBlock && requiredState.contains(SlabBlock.TYPE)) {
             SlabType slabType = requiredState.get(SlabBlock.TYPE);
-            Vec3d neighborCenter = Vec3d.ofCenter(neighborPos);
-
-            // If clicking a horizontal face, adjust the Y-position of the click.
-            if (clickedSide.getAxis().isHorizontal()) {
-                double yOffset = (slabType == SlabType.TOP) ? 0.9 : 0.1;
-                hitVec = new Vec3d(
-                    neighborPos.getX() + 0.5,
-                    neighborPos.getY() + yOffset,
-                    neighborPos.getZ() + 0.5
-                ).add(Vec3d.of(clickedSide.getVector()).multiply(0.5));
-            } else {
-                 // Clicking top or bottom face.
-                 // A top click (UP) places a BOTTOM slab. A bottom click (DOWN) places a TOP slab.
-                 // If the required slab type is incompatible with the only available click direction, we can't place it.
-                 if ((slabType == SlabType.TOP && clickedSide == Direction.UP) ||
-                     (slabType == SlabType.BOTTOM && clickedSide == Direction.DOWN)) {
-                      // We can't place this slab from this direction, so we should skip.
-                      // In a more advanced implementation, updatePlacePositions should filter this out.
-                      if (shouldSneak) mc.player.setSneaking(false);
-                      InvUtils.swapBack();
-                      return false;
-                 }
-                 // Use the center of the face for vertical clicks.
-                 hitVec = neighborCenter.add(Vec3d.of(clickedSide.getVector()).multiply(0.5));
-            }
+            hitVec = BlockUtilHelper.getHitVecForSlab(neighborPos, clickedSide, slabType);
         } else {
-            // Default logic for other blocks: click the center of the face.
-            hitVec = Vec3d.ofCenter(neighborPos).add(Vec3d.of(clickedSide.getVector()).multiply(0.5));
+            hitVec = BlockUtilHelper.getHitVec(neighborPos, clickedSide);
         }
 
+        // 计算旋转角度
         double yaw = Rotations.getYaw(hitVec);
         double pitch = Rotations.getPitch(hitVec);
 
+        // ==================== 第三步：执行放置（通过rotation回调确保潜行状态同步） ====================
         if (rotate.get()) {
-            Rotations.rotate(yaw, pitch, 50, () -> placeBlockInternal(neighborPos, clickedSide, hitVec));
+            // 使用rotate回调，在旋转完成后执行交互
+            // 这个回调延迟确保潜行状态有足够的同步时间
+            Rotations.rotate(yaw, pitch, 50, () -> {
+                if (shouldSneak) {
+                    mc.player.setSneaking(true);
+                }
+                placeBlockInternal(neighborPos, clickedSide, hitVec);
+                if (shouldSneak) {
+                    mc.player.setSneaking(false);
+                }
+            });
         } else {
+            // 不旋转的情况下，直接设置潜行、交互、恢复潜行
+            if (shouldSneak) {
+                mc.player.setSneaking(true);
+            }
             placeBlockInternal(neighborPos, clickedSide, hitVec);
+            if (shouldSneak) {
+                mc.player.setSneaking(false);
+            }
         }
 
-        if (shouldSneak) {
-            mc.player.setSneaking(false);
+        // ==================== 第四步：恢复物品栏 ====================
+        if (swappedItem) {
+            InvUtils.swapBack();
         }
-
-        InvUtils.swapBack();
 
         return true;
     }
@@ -379,7 +382,8 @@ public class Printer extends Module {
     }
 
     /**
-     * Updates the list of positions that need blocks placed.
+     * 更新需要放置方块的位置列表
+     * 从Litematica原理图和世界进行对比，找出所有需要放置的方块
      */
     private void updatePlacePositions(WorldSchematic worldSchematic) {
         placePositions.clear();
@@ -390,71 +394,101 @@ public class Printer extends Module {
         Vec3d playerPos = mc.player.getEyePos();
         int range = placeRange.get();
 
-        // Get blocks in sphere around player
+        // 获取玩家周围球形范围内的所有方块位置
         List<BlockPos> sphere = getSphere(range, playerPos);
 
         for (BlockPos pos : sphere) {
-            // Check if within render layer range
+            // 检查是否在渲染层范围内
             if (!DataManager.getRenderLayerRange().isPositionWithinRange(pos)) {
                 continue;
             }
 
+            // 从原理图获取目标方块状态
             BlockState requiredState = worldSchematic.getBlockState(pos);
+            // 从世界获取当前方块状态
             BlockState currentState = mc.world.getBlockState(pos);
 
-            // Skip if schematic wants air
+            // 原理图要求是空气，跳过
             if (requiredState.isAir()) {
                 continue;
             }
 
-            // Skip if block is already correct (same type)
+            // 方块已经正确放置（相同类型的方块），跳过
             // 关键修复：应该比较Block类型，而不是整个BlockState
+            // 因为朝向等属性会在放置时自动设置
             if (requiredState.getBlock() == currentState.getBlock()) {
                 continue;
             }
 
-            // Skip liquids
+            // 跳过流体
             if (requiredState.isLiquid()) {
                 continue;
             }
 
-            // 关键修复：对于能够替换的方块（空气、水、某些方块）才能放置
-            // 检查是否可以替换：空气、replaceable的方块都可以
+            // 检查当前位置是否可以被替换
+            // 只有空气、流体和可替换方块才能被放置覆盖
             if (!currentState.isAir() && !currentState.isLiquid() && !currentState.isReplaceable()) {
                 continue;
             }
 
-            // Check for entity collision
+            // 检查是否有实体阻挡
             if (hasBlockingEntity(pos)) {
                 continue;
             }
 
-            // Get the item for this block
+            // 获取该方块对应的物品
             Item item = requiredState.getBlock().asItem();
             if (item == Items.AIR) {
                 continue;
             }
 
-            // Check if we have the item
+            // 检查物品栏中是否有该物品
             if (!InvUtils.findInHotbar(item).found()) {
                 continue;
             }
 
-            // Mode-specific placement checks
+            // ==================== 模式特定的检查 ====================
+
             if (placeMode.get() == PlaceMode.LEGIT) {
-                // LEGIT mode: use standard canPlace check
+                // LEGIT模式：使用标准的BlockUtils.canPlace检查
+                // 这个方法会检查邻接、碰撞、方块支撑等基础检查
                 if (!BlockUtils.canPlace(pos)) {
                     continue;
                 }
             } else {
-                // STRICT mode: check for valid interaction direction
+                // STRICT模式：反作弊绕过模式
+                // 需要进行详细的方向检查和反作弊可放置性检查
+
+                // 检查是否有有效的放置方向
                 Direction direction = getInteractDirectionStrict(pos);
                 if (direction == null) {
                     continue;
                 }
 
-                // Optional line of sight check - 检查支撑方块位置的可见性
-                // direction.getOpposite() 是从支撑方块指向目标的方向
+                // 特殊处理：对于半砖，需要额外的可放置性检查
+                if (requiredState.getBlock() instanceof SlabBlock &&
+                    requiredState.contains(SlabBlock.TYPE)) {
+                    SlabType slabType = requiredState.get(SlabBlock.TYPE);
+
+                    // 根据半砖类型检查是否可以放置
+                    if (slabType == SlabType.TOP) {
+                        if (!BlockUtilHelper.canPlaceTopSlab(pos, mc.world)) {
+                            continue;
+                        }
+                    } else if (slabType == SlabType.BOTTOM) {
+                        if (!BlockUtilHelper.canPlaceBottomSlab(pos, mc.world)) {
+                            continue;
+                        }
+                    } else {
+                        // DOUBLE半砖，检查是否有任何支撑
+                        if (!BlockUtilHelper.canPlaceTopSlab(pos, mc.world) &&
+                            !BlockUtilHelper.canPlaceBottomSlab(pos, mc.world)) {
+                            continue;
+                        }
+                    }
+                }
+
+                // 可选的线性视距检查
                 if (checkLineOfSight.get()) {
                     BlockPos neighborPos = pos.offset(direction);
                     if (!canSeeBlock(neighborPos, direction.getOpposite())) {
@@ -463,11 +497,12 @@ public class Printer extends Module {
                 }
             }
 
+            // 将该位置加入放置列表
             placePositions.add(pos);
             placeItems.put(pos, item);
         }
 
-        // Sort by distance (closest first)
+        // 按距离排序（最近的优先）
         placePositions.sort(Comparator.comparingDouble(pos ->
             mc.player.getEyePos().squaredDistanceTo(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5)
         ));
