@@ -232,25 +232,24 @@ public class Printer extends Module {
             if (placeMode.get() == PlaceMode.LEGIT) {
                 // ==================== 普通模式 ====================
                 // 尝试切换到目标物品（允许从背包切换）
-                if (!ItemSwitchHelper.switchToItem(targetItem, true, true)) {
+                // 使用 trackSwap=false，不需要恢复槽位（打印机应该保持在正确物品上）
+                if (!ItemSwitchHelper.switchToItem(targetItem, true, false)) {
                     continue; // 物品不存在或切换失败
                 }
 
                 // 使用普通放置逻辑
-                if (placeBlockLegit(pos, requiredState)) {
-                    ItemSwitchHelper.swapBack(); // 放置成功后恢复
-                }
+                placeBlockLegit(pos, requiredState);
+                // 不恢复槽位 - 让物品保持在当前位置，下一个相同物品可以直接使用
             } else {
                 // ==================== STRICT模式 ====================
                 // STRICT模式也允许从背包切换（与Litematica一致）
-                if (!ItemSwitchHelper.switchToItem(targetItem, true, true)) {
+                if (!ItemSwitchHelper.switchToItem(targetItem, true, false)) {
                     continue; // 物品不存在或切换失败
                 }
 
                 // 使用严格放置逻辑
-                if (placeBlockStrict(pos, requiredState)) {
-                    ItemSwitchHelper.swapBack(); // 放置成功后恢复
-                }
+                placeBlockStrict(pos, requiredState);
+                // 不恢复槽位 - 让物品保持在当前位置
             }
         }
     }
@@ -486,8 +485,9 @@ public class Printer extends Module {
                 continue;
             }
 
-            // 检查物品栏中是否有该物品
-            if (!InvUtils.findInHotbar(item).found()) {
+            // 检查物品栏中是否有该物品（包括背包）
+            // 关键修复：使用 find() 而不是 findInHotbar()，允许背包物品
+            if (!InvUtils.find(item).found()) {
                 continue;
             }
 

@@ -35,6 +35,12 @@ repositories {
         url = uri("https://repo.viaversion.com")
     }
 
+    maven {
+        name = "MaLiLib Maven"
+        url = uri("https://masa.dy.fi/maven/sakura-ryoko")
+        content { includeGroupAndSubgroups("fi.dy.masa") }
+    }
+
     maven { url = uri("https://api.modrinth.com/maven") }
 
     mavenCentral()
@@ -94,8 +100,10 @@ dependencies {
     modCompileOnly("com.terraformersmc:modmenu:${properties["modmenu_version"] as String}")
 
     // Litematica
-    modImplementation("maven.modrinth:litematica:0.21.5")
-    modImplementation("maven.modrinth:malilib:0.23.5")
+    modImplementation("maven.modrinth:litematica:${properties["litematica_version"] as String}")
+
+    // MaLiLib - Required by Litematica as a transitive dependency
+    modImplementation("fi.dy.masa.malilib:malilib-fabric-${properties["minecraft_version"] as String}:${properties["malilib_version"] as String}")
 
     // Libraries
     library("meteordevelopment:orbit:${properties["orbit_version"] as String}")

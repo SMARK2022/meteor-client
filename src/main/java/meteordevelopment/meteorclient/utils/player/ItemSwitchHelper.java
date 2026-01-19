@@ -9,29 +9,29 @@ import meteordevelopment.meteorclient.mixininterface.IClientPlayerInteractionMan
 import net.minecraft.entity.player.PlayerInventory;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
-import net.minecraft.screen.slot.SlotActionType;
 
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 /**
- * 物品切换辅助工具类 - 参考Litematica InventoryUtils的实现
+ * 物品切换辅助工具类 - 使用 Meteor 原生方法
  *
- * 核心改进点：
- * 1. 不依赖meteor的quickSwap（有问题）
- * 2. 直接进行shift-click操作，让物品从背包转移到快捷栏
- * 3. 完整同步到服务器
+ * 功能说明：
+ * 1. 快捷栏物品：使用 InvUtils.swap() 直接切换 selectedSlot
+ * 2. 背包物品：使用 InvUtils.shiftClick() (QUICK_MOVE) 转移到快捷栏
+ * 3. 副手物品：无需切换，直接可用
+ *
+ * 关键修复：
+ * - 使用 Meteor 的 InvUtils.swap() 进行快捷栏切换（已验证可用）
+ * - 使用 shiftClick() 进行背包到快捷栏的转移
  */
 public class ItemSwitchHelper {
+    // 记录切换前的槽位
     private static int previousSlot = -1;
+    // 记录是否执行过背包转移（用于决定是否需要恢复）
+    private static boolean didInventoryTransfer = false;
 
     /**
      * 查找并切换到指定物品
-     *
-     * 逻辑流程（参考Litematica）：
-     * 1. 快捷栏中找到 → 直接切换 selectedSlot
-     * 2. 背包中找到 → Shift-click 转移到快捷栏 → 再切换 selectedSlot
-     * 3. 副手中找到 → 返回成功（副手自动可用）
-     * 4. 都未找到 → 返回失败
      *
      * @param targetItem 目标物品
      * @param allowInventory 是否允许从背包转移
@@ -39,139 +39,136 @@ public class ItemSwitchHelper {
      * @return 切换是否成功
      */
     public static boolean switchToItem(Item targetItem, boolean allowInventory, boolean trackSwap) {
-        if (mc.player == null) return false;
+        if (mc.player == null) {
+            return false;
+        }
+
+        // 先检查物品是否已经在主手
+        if (isItemInMainHand(targetItem)) {
+            return true;
+        }
+
+        // 检查副手
+        if (mc.player.getOffHandStack().getItem() == targetItem) {
+            return true; // 副手物品可以直接使用
+        }
 
         PlayerInventory inventory = mc.player.getInventory();
         int currentSlot = inventory.selectedSlot;
 
-        // 第一步：查找物品位置
-        FindItemResult result = allowInventory ?
-            InvUtils.find(targetItem) :
-            InvUtils.findInHotbar(targetItem);
+        // 查找物品位置
+        // 优先在快捷栏中查找，然后在背包中查找
+        FindItemResult hotbarResult = InvUtils.findInHotbar(targetItem);
 
-        if (!result.found()) {
-            return false;
-        }
+        // 情况1：物品在快捷栏中 (0-8)
+        if (hotbarResult.found() && hotbarResult.slot() >= 0 && hotbarResult.slot() <= 8) {
+            int targetSlot = hotbarResult.slot();
 
-        int targetSlot = result.slot();
+            // 记录原始槽位
+            if (trackSwap && previousSlot == -1) {
+                previousSlot = currentSlot;
+            }
 
-        // 记录原始槽位（如果需要恢复）
-        if (trackSwap && previousSlot == -1) {
-            previousSlot = currentSlot;
-        }
-
-        // 第二步：根据位置执行切换/转移
-
-        // 情况1：快捷栏 (0-8) - 直接切换
-        if (targetSlot >= 0 && targetSlot <= 8) {
-            inventory.selectedSlot = targetSlot;
-            syncSelectedSlot();
+            // 使用 InvUtils.swap() 切换到目标槽位
+            InvUtils.swap(targetSlot, false);
             return true;
         }
 
-        // 情况2：副手 (40) - 无需切换，副手自动可用
-        if (targetSlot == SlotUtils.OFFHAND) {
-            return true;
+        // 情况2：物品在副手 (槽位 45)
+        if (hotbarResult.found() && hotbarResult.slot() == SlotUtils.OFFHAND) {
+            return true; // 副手物品无需切换
         }
 
-        // 情况3：背包 (9-35) - 需要转移到快捷栏
-        if (allowInventory && targetSlot >= 9 && targetSlot <= 35) {
-            return transferInventoryItemToHotbar(targetSlot);
+        // 情况3：物品在背包中 (9-35)
+        if (allowInventory) {
+            FindItemResult inventoryResult = InvUtils.find(targetItem);
+
+            if (inventoryResult.found() && inventoryResult.slot() >= 9 && inventoryResult.slot() <= 35) {
+                int inventorySlot = inventoryResult.slot();
+
+                // 记录原始槽位
+                if (trackSwap && previousSlot == -1) {
+                    previousSlot = currentSlot;
+                }
+
+                // 将背包物品转移到快捷栏
+                return transferInventoryItemToHotbar(inventorySlot, targetItem);
+            }
         }
 
         return false;
     }
 
     /**
-     * 将背包物品转移到快捷栏
+     * 将背包物品转移到快捷栏并选中
      *
-     * 参考Litematica逻辑：
-     * 1. 找一个空的快捷栏位，或使用当前选中位置
-     * 2. 通过Shift-Click将物品转移
-     * 3. 设置快捷栏选中
-     * 4. 同步到服务器
+     * 使用 Shift-Click (QUICK_MOVE) 操作：
+     * - Shift-Click 背包物品会自动转移到快捷栏的空槽位
+     * - 如果快捷栏已满，转移会失败
      *
-     * @param inventorySlot 背包槽位 (9-35)
+     * @param inventorySlot 背包槽位索引 (9-35)
+     * @param targetItem 目标物品（用于验证）
      * @return 转移是否成功
      */
-    private static boolean transferInventoryItemToHotbar(int inventorySlot) {
-        if (mc.player == null || mc.world == null) {
+    private static boolean transferInventoryItemToHotbar(int inventorySlot, Item targetItem) {
+        if (mc.player == null || mc.interactionManager == null) {
             return false;
         }
 
         PlayerInventory inventory = mc.player.getInventory();
-        int currentSlot = inventory.selectedSlot;
 
-        // 获取物品堆栈（用于后续验证）
+        // 检查源物品是否存在
         ItemStack sourceStack = inventory.getStack(inventorySlot);
-        if (sourceStack.isEmpty()) {
+        if (sourceStack.isEmpty() || sourceStack.getItem() != targetItem) {
             return false;
         }
 
-        // 第一步：找一个合适的快捷栏位置
-        int targetHotbarSlot = findBestHotbarSlot(currentSlot);
-        if (targetHotbarSlot == -1) {
-            return false;  // 无法找到合适位置
+        // 方案1：找一个空的快捷栏槽位，使用 SWAP 操作交换
+        int emptyHotbarSlot = findEmptyHotbarSlot();
+
+        if (emptyHotbarSlot != -1) {
+            // 使用 quickSwap 将背包物品与空快捷栏槽位交换
+            // quickSwap 使用 SWAP 操作，from 是快捷栏索引(0-8)，to 是容器槽位ID
+            InvUtils.quickSwap().fromHotbar(emptyHotbarSlot).to(inventorySlot);
+
+            // 切换到该槽位
+            InvUtils.swap(emptyHotbarSlot, false);
+            didInventoryTransfer = true;
+            return true;
         }
 
-        // 第二步：通过Shift-Click进行物品转移
-        // 在容器菜单中进行shift-click操作
-        // inventorySlot是背包中的真实槽位ID
-        if (mc.interactionManager != null && mc.player.currentScreenHandler != null) {
-            // 获取容器中对应背包槽位的实际槽位ID
-            // 背包槽位 9-35 在容器菜单中的槽位对应关系
-            int containerSlotId = inventorySlot;
+        // 方案2：没有空槽位，使用 Shift-Click 尝试转移
+        // Shift-Click 会把物品移动到快捷栏的第一个可用槽位
+        InvUtils.shiftClick().slot(inventorySlot);
 
-            // 执行Shift-Click操作，让物品自动转移到快捷栏
-            mc.interactionManager.clickSlot(
-                mc.player.currentScreenHandler.syncId,
-                containerSlotId,
-                0,  // mouseButton
-                SlotActionType.QUICK_MOVE,  // Shift-Click
-                mc.player
-            );
-
-            // 给服务器一点时间处理操作
-            try {
-                Thread.sleep(5);  // 5ms延迟
-            } catch (InterruptedException ignored) {}
+        // 等待一个刻让转移完成，然后查找物品在快捷栏的位置
+        // 由于这是同步操作，物品应该已经转移了
+        FindItemResult newResult = InvUtils.findInHotbar(targetItem);
+        if (newResult.found() && newResult.slot() >= 0 && newResult.slot() <= 8) {
+            InvUtils.swap(newResult.slot(), false);
+            didInventoryTransfer = true;
+            return true;
         }
 
-        // 第三步：切换快捷栏选中
-        inventory.selectedSlot = targetHotbarSlot;
-        syncSelectedSlot();
-
-        return true;
+        return false;
     }
 
     /**
-     * 查找最合适的快捷栏槽位
+     * 查找快捷栏中的空槽位
      *
-     * 优先级（参考Litematica）：
-     * 1. 空位 - 优先使用空位
-     * 2. 当前选中位置 - 其次覆盖当前位置
-     *
-     * @param currentSlot 当前选中的快捷栏位置
-     * @return 槽位索引(0-8)，未找到返回-1
+     * @return 空槽位索引 (0-8)，如果没有空槽位返回 -1
      */
-    private static int findBestHotbarSlot(int currentSlot) {
-        if (mc.player == null) {
-            return -1;
-        }
+    private static int findEmptyHotbarSlot() {
+        if (mc.player == null) return -1;
 
-        // 优先级1：找空的快捷栏位
-        for (int i = 0; i < 9; i++) {
-            if (mc.player.getInventory().getStack(i).isEmpty()) {
+        PlayerInventory inventory = mc.player.getInventory();
+
+        for (int i = 0; i <= 8; i++) {
+            if (inventory.getStack(i).isEmpty()) {
                 return i;
             }
         }
 
-        // 优先级2：使用当前选中位置
-        if (currentSlot >= 0 && currentSlot < 9) {
-            return currentSlot;
-        }
-
-        // 无法找到合适位置
         return -1;
     }
 
@@ -185,20 +182,11 @@ public class ItemSwitchHelper {
             return false;
         }
 
-        mc.player.getInventory().selectedSlot = previousSlot;
-        syncSelectedSlot();
+        InvUtils.swap(previousSlot, false);
         previousSlot = -1;
+        didInventoryTransfer = false;
 
         return true;
-    }
-
-    /**
-     * 同步快捷栏选中到服务器
-     */
-    private static void syncSelectedSlot() {
-        if (mc.interactionManager != null) {
-            ((IClientPlayerInteractionManager) mc.interactionManager).meteor$syncSelected();
-        }
     }
 
     /**
@@ -224,9 +212,21 @@ public class ItemSwitchHelper {
     }
 
     /**
+     * 获取当前主手物品
+     */
+    public static Item getMainHandItem() {
+        if (mc.player == null) {
+            return null;
+        }
+        return mc.player.getMainHandStack().getItem();
+    }
+
+    /**
      * 重置切换状态
      */
     public static void reset() {
         previousSlot = -1;
+        didInventoryTransfer = false;
     }
 }
+
