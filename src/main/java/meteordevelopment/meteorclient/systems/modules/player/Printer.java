@@ -27,6 +27,7 @@ import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
+import meteordevelopment.meteorclient.utils.player.ItemSwitchHelper;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
@@ -224,28 +225,88 @@ public class Printer extends Module {
 
             if (targetItem == null) continue;
 
-            // 实时查找物品，优先查找快捷栏
-            FindItemResult findResult = InvUtils.findInHotbar(targetItem);
-
-            // 如果快捷栏没有，查找整个物品栏（包括offhand）
-            if (!findResult.found()) {
-                findResult = InvUtils.find(targetItem);
-            }
-
-            if (!findResult.found()) continue;
-
             // 获取该位置的目标方块状态（用于确定朝向）
             BlockState requiredState = worldSchematic.getBlockState(pos);
 
             // 根据模式选择放置方法
             if (placeMode.get() == PlaceMode.LEGIT) {
-                // 普通模式：使用BlockUtils，自动处理物品栏、潜行等
-                BlockUtils.place(pos, findResult, rotate.get(), 50, swingHand.get(), true);
+                // ==================== 普通模式 ====================
+                // 尝试切换到目标物品（允许从背包切换）
+                if (!ItemSwitchHelper.switchToItem(targetItem, true, true)) {
+                    continue; // 物品不存在或切换失败
+                }
+
+                // 使用普通放置逻辑
+                if (placeBlockLegit(pos, requiredState)) {
+                    ItemSwitchHelper.swapBack(); // 放置成功后恢复
+                }
             } else {
-                // STRICT模式：手动处理所有细节（反作弊绕过）
-                placeBlockStrict(pos, findResult, requiredState);
+                // ==================== STRICT模式 ====================
+                // STRICT模式也允许从背包切换（与Litematica一致）
+                if (!ItemSwitchHelper.switchToItem(targetItem, true, true)) {
+                    continue; // 物品不存在或切换失败
+                }
+
+                // 使用严格放置逻辑
+                if (placeBlockStrict(pos, requiredState)) {
+                    ItemSwitchHelper.swapBack(); // 放置成功后恢复
+                }
             }
         }
+    }
+
+    /**
+     * 普通模式放置方块（LEGIT模式）
+     * 使用简化的逻辑，不进行严格的反作弊检查
+     *
+     * @param pos 目标位置
+     * @param requiredState 目标方块状态
+     * @return 放置是否成功
+     */
+    private boolean placeBlockLegit(BlockPos pos, BlockState requiredState) {
+        // 确认物品已在手中
+        Item targetItem = requiredState.getBlock().asItem();
+        if (!ItemSwitchHelper.isItemInMainHand(targetItem) && !ItemSwitchHelper.isItemInHands(targetItem)) {
+            return false;
+        }
+
+        // 获取可交互方向（使用标准查询，不进行NCP检查）
+        Direction direction = BlockUtilHelper.getInteractDirection(pos, mc.world, mc.player.getEyePos(), false);
+        if (direction == null) return false;
+
+        BlockPos neighborPos = pos.offset(direction);
+        Direction clickedSide = direction.getOpposite();
+
+        // 计算hitVec
+        Vec3d hitVec;
+        Block block = requiredState.getBlock();
+        if (block instanceof SlabBlock && requiredState.contains(SlabBlock.TYPE)) {
+            SlabType slabType = requiredState.get(SlabBlock.TYPE);
+            hitVec = BlockUtilHelper.getHitVecForSlab(neighborPos, clickedSide, slabType);
+        } else {
+            hitVec = BlockUtilHelper.getHitVec(neighborPos, clickedSide);
+        }
+
+        // 检查是否需要潜行
+        BlockState neighborState = mc.world.getBlockState(neighborPos);
+        boolean shouldSneak = BlockUtilHelper.SNEAK_BLOCKS.contains(neighborState.getBlock()) && !mc.player.isSneaking();
+
+        // 执行放置
+        if (rotate.get()) {
+            double yaw = Rotations.getYaw(hitVec);
+            double pitch = Rotations.getPitch(hitVec);
+            Rotations.rotate(yaw, pitch, 50, () -> {
+                if (shouldSneak) mc.player.setSneaking(true);
+                placeBlockInternal(neighborPos, clickedSide, hitVec);
+                if (shouldSneak) mc.player.setSneaking(false);
+            });
+        } else {
+            if (shouldSneak) mc.player.setSneaking(true);
+            placeBlockInternal(neighborPos, clickedSide, hitVec);
+            if (shouldSneak) mc.player.setSneaking(false);
+        }
+
+        return true;
     }
 
     /**
@@ -253,14 +314,17 @@ public class Printer extends Module {
      * 关键：hitVec（点击位置）决定了方块的朝向，特别是对半砖至关重要
      *
      * @param pos 目标位置（要放置的方块位置）
-     * @param findResult 物品栏查找结果
      * @param requiredState 目标方块状态（包含朝向属性）
      * @return 放置是否成功
      */
-    private boolean placeBlockStrict(BlockPos pos, FindItemResult findResult, BlockState requiredState) {
-        if (!findResult.isHotbar() && !findResult.isOffhand()) return false;
+    private boolean placeBlockStrict(BlockPos pos, BlockState requiredState) {
+        // 确认物品已在手中
+        Item targetItem = requiredState.getBlock().asItem();
+        if (!ItemSwitchHelper.isItemInMainHand(targetItem) && !ItemSwitchHelper.isItemInHands(targetItem)) {
+            return false;
+        }
 
-        // 获取可以放置的方向
+        // 获取可以放置的方向（使用严格检查）
         Direction direction = getInteractDirectionStrict(pos);
         if (direction == null) return false;
 
@@ -271,14 +335,7 @@ public class Printer extends Module {
             return false;
         }
 
-        // ==================== 第一步：切换物品到主手 ====================
-        boolean swappedItem = false;
-        if (findResult.isHotbar()) {
-            InvUtils.swap(findResult.slot(), true);
-            swappedItem = true;
-        }
-
-        // ==================== 第二步：检查是否需要潜行 ====================
+        // ==================== 第一步：检查是否需要潜行 ====================
         BlockState neighborState = mc.world.getBlockState(neighborPos);
         boolean shouldSneak = BlockUtilHelper.SNEAK_BLOCKS.contains(neighborState.getBlock()) && !mc.player.isSneaking();
 
@@ -300,33 +357,20 @@ public class Printer extends Module {
         double yaw = Rotations.getYaw(hitVec);
         double pitch = Rotations.getPitch(hitVec);
 
-        // ==================== 第三步：执行放置（通过rotation回调确保潜行状态同步） ====================
+        // ==================== 第二步：执行放置（通过rotation回调确保潜行状态同步） ====================
         if (rotate.get()) {
             // 使用rotate回调，在旋转完成后执行交互
             // 这个回调延迟确保潜行状态有足够的同步时间
             Rotations.rotate(yaw, pitch, 50, () -> {
-                if (shouldSneak) {
-                    mc.player.setSneaking(true);
-                }
+                if (shouldSneak) mc.player.setSneaking(true);
                 placeBlockInternal(neighborPos, clickedSide, hitVec);
-                if (shouldSneak) {
-                    mc.player.setSneaking(false);
-                }
+                if (shouldSneak) mc.player.setSneaking(false);
             });
         } else {
             // 不旋转的情况下，直接设置潜行、交互、恢复潜行
-            if (shouldSneak) {
-                mc.player.setSneaking(true);
-            }
+            if (shouldSneak) mc.player.setSneaking(true);
             placeBlockInternal(neighborPos, clickedSide, hitVec);
-            if (shouldSneak) {
-                mc.player.setSneaking(false);
-            }
-        }
-
-        // ==================== 第四步：恢复物品栏 ====================
-        if (swappedItem) {
-            InvUtils.swapBack();
+            if (shouldSneak) mc.player.setSneaking(false);
         }
 
         return true;
