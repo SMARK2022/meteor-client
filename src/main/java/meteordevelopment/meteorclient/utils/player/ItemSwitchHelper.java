@@ -100,11 +100,14 @@ public class ItemSwitchHelper {
     }
 
     /**
-     * 将背包物品转移到快捷栏并选中
+     * 将背包物品转移到快捷栏第9格（槽位8）并选中
      *
-     * 使用 Shift-Click (QUICK_MOVE) 操作：
-     * - Shift-Click 背包物品会自动转移到快捷栏的空槽位
-     * - 如果快捷栏已满，转移会失败
+     * 策略：
+     * - 使用 move() 执行两步操作模拟物品拖拽：
+     *   move() 使用 PICKUP 操作但设置 two=true，会执行两次点击
+     *   第1次：点击背包物品，将其捡起到光标
+     *   第2次：点击快捷栏槽位8，将物品放下
+     * - 然后切换到槽位8选中该物品
      *
      * @param inventorySlot 背包槽位索引 (9-35)
      * @param targetItem 目标物品（用于验证）
@@ -123,53 +126,14 @@ public class ItemSwitchHelper {
             return false;
         }
 
-        // 方案1：找一个空的快捷栏槽位，使用 SWAP 操作交换
-        int emptyHotbarSlot = findEmptyHotbarSlot();
+        // 执行两步点击操作，模拟从背包拖拽物品到快捷栏槽位8的操作
+        // move() 会执行两次 PICKUP 点击：第一次从来源，第二次到目标
+        InvUtils.move().from(inventorySlot).toHotbar(8);
 
-        if (emptyHotbarSlot != -1) {
-            // 使用 quickSwap 将背包物品与空快捷栏槽位交换
-            // quickSwap 使用 SWAP 操作，from 是快捷栏索引(0-8)，to 是容器槽位ID
-            InvUtils.quickSwap().fromHotbar(emptyHotbarSlot).to(inventorySlot);
-
-            // 切换到该槽位
-            InvUtils.swap(emptyHotbarSlot, false);
-            didInventoryTransfer = true;
-            return true;
-        }
-
-        // 方案2：没有空槽位，使用 Shift-Click 尝试转移
-        // Shift-Click 会把物品移动到快捷栏的第一个可用槽位
-        InvUtils.shiftClick().slot(inventorySlot);
-
-        // 等待一个刻让转移完成，然后查找物品在快捷栏的位置
-        // 由于这是同步操作，物品应该已经转移了
-        FindItemResult newResult = InvUtils.findInHotbar(targetItem);
-        if (newResult.found() && newResult.slot() >= 0 && newResult.slot() <= 8) {
-            InvUtils.swap(newResult.slot(), false);
-            didInventoryTransfer = true;
-            return true;
-        }
-
-        return false;
-    }
-
-    /**
-     * 查找快捷栏中的空槽位
-     *
-     * @return 空槽位索引 (0-8)，如果没有空槽位返回 -1
-     */
-    private static int findEmptyHotbarSlot() {
-        if (mc.player == null) return -1;
-
-        PlayerInventory inventory = mc.player.getInventory();
-
-        for (int i = 0; i <= 8; i++) {
-            if (inventory.getStack(i).isEmpty()) {
-                return i;
-            }
-        }
-
-        return -1;
+        // 立即切换到槽位8选中转移过来的物品
+        InvUtils.swap(8, false);
+        didInventoryTransfer = true;
+        return true;
     }
 
     /**
