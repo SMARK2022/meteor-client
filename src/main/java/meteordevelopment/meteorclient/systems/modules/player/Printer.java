@@ -288,21 +288,17 @@ public class Printer extends Module {
 
         // 检查是否需要潜行
         BlockState neighborState = mc.world.getBlockState(neighborPos);
-        boolean shouldSneak = BlockUtilHelper.SNEAK_BLOCKS.contains(neighborState.getBlock()) && !mc.player.isSneaking();
+        boolean shouldSneak = BlockUtilHelper.SNEAK_BLOCKS.contains(neighborState.getBlock());
 
         // 执行放置
         if (rotate.get()) {
             double yaw = Rotations.getYaw(hitVec);
             double pitch = Rotations.getPitch(hitVec);
             Rotations.rotate(yaw, pitch, 50, () -> {
-                if (shouldSneak) mc.player.setSneaking(true);
-                placeBlockInternal(neighborPos, clickedSide, hitVec);
-                if (shouldSneak) mc.player.setSneaking(false);
+                placeBlockWithSneak(neighborPos, clickedSide, hitVec, shouldSneak);
             });
         } else {
-            if (shouldSneak) mc.player.setSneaking(true);
-            placeBlockInternal(neighborPos, clickedSide, hitVec);
-            if (shouldSneak) mc.player.setSneaking(false);
+            placeBlockWithSneak(neighborPos, clickedSide, hitVec, shouldSneak);
         }
 
         return true;
@@ -336,7 +332,7 @@ public class Printer extends Module {
 
         // ==================== 第一步：检查是否需要潜行 ====================
         BlockState neighborState = mc.world.getBlockState(neighborPos);
-        boolean shouldSneak = BlockUtilHelper.SNEAK_BLOCKS.contains(neighborState.getBlock()) && !mc.player.isSneaking();
+        boolean shouldSneak = BlockUtilHelper.SNEAK_BLOCKS.contains(neighborState.getBlock());
 
         // 点击的邻居方块的哪个面
         Direction clickedSide = direction.getOpposite();
@@ -361,15 +357,11 @@ public class Printer extends Module {
             // 使用rotate回调，在旋转完成后执行交互
             // 这个回调延迟确保潜行状态有足够的同步时间
             Rotations.rotate(yaw, pitch, 50, () -> {
-                if (shouldSneak) mc.player.setSneaking(true);
-                placeBlockInternal(neighborPos, clickedSide, hitVec);
-                if (shouldSneak) mc.player.setSneaking(false);
+                placeBlockWithSneak(neighborPos, clickedSide, hitVec, shouldSneak);
             });
         } else {
-            // 不旋转的情况下，直接设置潜行、交互、恢复潜行
-            if (shouldSneak) mc.player.setSneaking(true);
-            placeBlockInternal(neighborPos, clickedSide, hitVec);
-            if (shouldSneak) mc.player.setSneaking(false);
+            // 不旋转的情况下，直接执行交互
+            placeBlockWithSneak(neighborPos, clickedSide, hitVec, shouldSneak);
         }
 
         return true;
@@ -395,6 +387,28 @@ public class Printer extends Module {
         }
     }
 
+    /**
+     * 使用潜行状态放置方块（参考BlockUtils.interact()的实现）
+     * 正确管理潜行按键状态，确保服务器正确接收潜行信息
+     *
+     * @param neighborPos 被交互的方块位置
+     * @param side 被点击的面
+     * @param hitVec 点击位置
+     * @param shouldSneak 是否需要潜行
+     */
+    private void placeBlockWithSneak(BlockPos neighborPos, Direction side, Vec3d hitVec, boolean shouldSneak) {
+        if (shouldSneak) {
+            // 使用按键控制潜行，而不是直接调用setSneaking()
+            // 这样可以确保服务器正确接收潜行信息
+            mc.options.sneakKey.setPressed(true);
+        }
+
+        placeBlockInternal(neighborPos, side, hitVec);
+
+        if (shouldSneak) {
+            mc.options.sneakKey.setPressed(false);
+        }
+    }
 
     /**
      * 获取NCP风格的交互方向（严格模式）
