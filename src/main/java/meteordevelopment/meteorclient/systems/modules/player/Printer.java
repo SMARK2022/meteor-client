@@ -162,6 +162,10 @@ public class Printer extends Module {
     private final Map<BlockPos, Item> placeItems = new HashMap<>();
     private int tickDelay = 0;
 
+    // 物品切换延迟状态
+    private BlockPos lastSwitchedPos = null;
+    private int switchDelayTicks = 0;
+
     public Printer() {
         super(Categories.Player, "printer", "Automatically places blocks based on Litematica schematic.");
     }
@@ -171,6 +175,8 @@ public class Printer extends Module {
         tickDelay = 0;
         placePositions.clear();
         placeItems.clear();
+        lastSwitchedPos = null;
+        switchDelayTicks = 0;
     }
 
     @Override
@@ -178,6 +184,8 @@ public class Printer extends Module {
         tickDelay = 0;
         placePositions.clear();
         placeItems.clear();
+        lastSwitchedPos = null;
+        switchDelayTicks = 0;
     }
 
     @EventHandler
@@ -228,29 +236,43 @@ public class Printer extends Module {
             // 获取该位置的目标方块状态（用于确定朝向）
             BlockState requiredState = worldSchematic.getBlockState(pos);
 
+            // ==================== 物品切换延迟处理 ====================
+            // 如果这是一个新的位置（或与上次不同），则切换物品并等待一个tick
+            if (!pos.equals(lastSwitchedPos)) {
+                // 切换到目标物品（允许从背包切换）
+                if (!ItemSwitchHelper.switchToItem(targetItem, true, false)) {
+                    continue; // 物品不存在或切换失败
+                }
+
+                // 记录本次切换的位置，并设置延迟计数器
+                lastSwitchedPos = pos;
+                switchDelayTicks = 1;  // 需要至少1个tick的延迟
+
+                // 跳过本次放置，等待下一个tick再放置
+                continue;
+            }
+
+            // 如果延迟计数器未清零，继续等待
+            if (switchDelayTicks > 0) {
+                switchDelayTicks--;
+                continue;
+            }
+
+            // ==================== 物品已切换完毕，现在进行放置 ====================
             // 根据模式选择放置方法
             if (placeMode.get() == PlaceMode.LEGIT) {
                 // ==================== 普通模式 ====================
-                // 尝试切换到目标物品（允许从背包切换）
-                // 使用 trackSwap=false，不需要恢复槽位（打印机应该保持在正确物品上）
-                if (!ItemSwitchHelper.switchToItem(targetItem, true, false)) {
-                    continue; // 物品不存在或切换失败
-                }
-
-                // 使用普通放置逻辑
+                // 此时物品已经在手中，直接放置
                 placeBlockLegit(pos, requiredState);
-                // 不恢复槽位 - 让物品保持在当前位置，下一个相同物品可以直接使用
             } else {
                 // ==================== STRICT模式 ====================
-                // STRICT模式也允许从背包切换（与Litematica一致）
-                if (!ItemSwitchHelper.switchToItem(targetItem, true, false)) {
-                    continue; // 物品不存在或切换失败
-                }
-
-                // 使用严格放置逻辑
+                // 此时物品已经在手中，直接放置
                 placeBlockStrict(pos, requiredState);
-                // 不恢复槽位 - 让物品保持在当前位置
             }
+
+            // 放置完成后，清除切换记录，允许处理下一个物品
+            lastSwitchedPos = null;
+            switchDelayTicks = 0;
         }
     }
 
@@ -263,11 +285,7 @@ public class Printer extends Module {
      * @return 放置是否成功
      */
     private boolean placeBlockLegit(BlockPos pos, BlockState requiredState) {
-        // 确认物品已在手中
-        Item targetItem = requiredState.getBlock().asItem();
-        if (!ItemSwitchHelper.isItemInMainHand(targetItem) && !ItemSwitchHelper.isItemInHands(targetItem)) {
-            return false;
-        }
+        // 注意：物品切换由onTick()保证，此处无需再检查
 
         // 获取可交互方向（使用标准查询，不进行NCP检查）
         Direction direction = BlockUtilHelper.getInteractDirection(pos, mc.world, mc.player.getEyePos(), false);
@@ -313,11 +331,7 @@ public class Printer extends Module {
      * @return 放置是否成功
      */
     private boolean placeBlockStrict(BlockPos pos, BlockState requiredState) {
-        // 确认物品已在手中
-        Item targetItem = requiredState.getBlock().asItem();
-        if (!ItemSwitchHelper.isItemInMainHand(targetItem) && !ItemSwitchHelper.isItemInHands(targetItem)) {
-            return false;
-        }
+        // 注意：物品切换由onTick()保证，此处无需再检查
 
         // 获取可以放置的方向（使用严格检查）
         Direction direction = getInteractDirectionStrict(pos);
