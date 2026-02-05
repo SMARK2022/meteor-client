@@ -1,10 +1,8 @@
 package meteordevelopment.meteorclient.utils.world;
 
-import net.minecraft.block.Block;
-import net.minecraft.block.BlockState;
-import net.minecraft.block.Blocks;
-import net.minecraft.block.SlabBlock;
+import net.minecraft.block.*;
 import net.minecraft.block.enums.SlabType;
+import net.minecraft.registry.Registries;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
@@ -28,17 +26,99 @@ import java.util.Set;
  */
 public class BlockUtilHelper {
 
-    /** 需要潜行才能交互的方块 */
-    public static final Set<Block> SNEAK_BLOCKS = new HashSet<>(Arrays.asList(
-        Blocks.CHEST, Blocks.TRAPPED_CHEST, Blocks.ENDER_CHEST,
-        Blocks.CRAFTING_TABLE, Blocks.FURNACE, Blocks.BLAST_FURNACE, Blocks.SMOKER,
-        Blocks.BREWING_STAND, Blocks.ANVIL, Blocks.CHIPPED_ANVIL, Blocks.DAMAGED_ANVIL,
-        Blocks.ENCHANTING_TABLE, Blocks.GRINDSTONE, Blocks.STONECUTTER, Blocks.LOOM,
-        Blocks.CARTOGRAPHY_TABLE, Blocks.SMITHING_TABLE, Blocks.BARREL,
-        Blocks.DISPENSER, Blocks.DROPPER, Blocks.HOPPER,
-        Blocks.LEVER, Blocks.REPEATER, Blocks.COMPARATOR, Blocks.NOTE_BLOCK,
-        Blocks.JUKEBOX, Blocks.BEACON, Blocks.BELL
-    ));
+    /**
+     * 需要潜行才能交互的方块集合
+     * 包含所有容器、功能性方块、红石元件、门、活板门等
+     * 采用动态注册表扫描 + 硬编码列表的混合方案，适配 Minecraft 1.21.4+
+     */
+    public static final Set<Block> SNEAK_BLOCKS = new HashSet<>();
+
+    static {
+        // 1. 基础硬编码列表 (那些没有特定通用类或容易被遗漏的方块)
+        SNEAK_BLOCKS.addAll(Arrays.asList(
+            // 工作台类
+            Blocks.CRAFTING_TABLE, Blocks.STONECUTTER, Blocks.CARTOGRAPHY_TABLE,
+            Blocks.SMITHING_TABLE, Blocks.GRINDSTONE, Blocks.LOOM,
+
+            // 附魔与炼药
+            Blocks.ENCHANTING_TABLE, Blocks.BREWING_STAND,
+
+            // 特殊功能
+            Blocks.BEACON, Blocks.JUKEBOX, Blocks.BELL,
+            Blocks.COMPOSTER, // 堆肥桶
+            Blocks.RESPAWN_ANCHOR, // 重生锚
+            Blocks.LODESTONE, // 磁石 (可以用指南针交互)
+            Blocks.CAKE, // 蛋糕 (右键会吃掉)
+            Blocks.CANDLE_CAKE,
+            Blocks.DRAGON_EGG, // 龙蛋 (右键瞬移)
+            Blocks.SWEET_BERRY_BUSH, // 甜浆果丛 (右键采集)
+            Blocks.CAVE_VINES, Blocks.CAVE_VINES_PLANT, // 发光浆果
+            Blocks.PUMPKIN, // 南瓜 (虽通常需要剪刀，但潜行更安全)
+            Blocks.BEEHIVE, Blocks.BEE_NEST, // 蜂箱
+            Blocks.COMMAND_BLOCK, Blocks.CHAIN_COMMAND_BLOCK, Blocks.REPEATING_COMMAND_BLOCK,
+            Blocks.STRUCTURE_BLOCK, Blocks.JIGSAW,
+
+            // 1.21+ 新增重要交互方块
+            Blocks.CRAFTER, // 自动合成器 (有GUI)
+            Blocks.TRIAL_SPAWNER, // 试炼刷怪笼 (互动调整)
+            Blocks.VAULT // 宝库 (钥匙互动)
+        ));
+
+        // 2. 动态扫描注册表 (这是适配 1.21.4 的核心，自动覆盖所有变种)
+        for (Block block : Registries.BLOCK) {
+            // 如果已经包含了就不重复处理
+            if (SNEAK_BLOCKS.contains(block)) continue;
+
+            // --- 容器与存储类 ---
+            if (block instanceof AbstractChestBlock || // 箱子、陷阱箱、末影箱
+                block instanceof ShulkerBoxBlock ||    // 所有颜色的潜影盒
+                block instanceof BarrelBlock ||        // 桶
+                block instanceof DispenserBlock ||     // 发射器
+                block instanceof DropperBlock ||       // 投掷器
+                block instanceof HopperBlock ||        // 漏斗
+                block instanceof ChiseledBookshelfBlock) { // 雕纹书架 (1.20+)
+                SNEAK_BLOCKS.add(block);
+            }
+
+            // --- 熔炉与加工类 ---
+            else if (block instanceof AbstractFurnaceBlock || // 熔炉、高炉、烟熏炉
+                     block instanceof AnvilBlock) {           // 所有铁砧
+                SNEAK_BLOCKS.add(block);
+            }
+
+            // --- 红石与开关类 ---
+            else if (block instanceof ButtonBlock ||             // 所有木/石/铜按钮
+                     block instanceof LeverBlock ||              // 拉杆
+                     block instanceof TrapdoorBlock ||           // 所有材质活板门 (含铜)
+                     block instanceof FenceGateBlock ||          // 所有栅栏门
+                     block instanceof DoorBlock ||               // 所有门 (含铁门)
+                     block instanceof NoteBlock ||               // 音符盒
+                     block instanceof AbstractRedstoneGateBlock || // 中继器、比较器
+                     block instanceof RedstoneWireBlock ||       // 红石粉 (右键切换连接形态)
+                     block instanceof DaylightDetectorBlock ||   // 阳光传感器
+                     block instanceof SculkSensorBlock ||        // 幽匿感测体
+                     block instanceof CalibratedSculkSensorBlock) { // 校准幽匿感测体
+                SNEAK_BLOCKS.add(block);
+            }
+
+            // --- 其他交互类 ---
+            else if (block instanceof BedBlock ||            // 所有颜色的床
+                     block instanceof AbstractSignBlock ||   // 所有告示牌 (包括挂牌)
+                     block instanceof CandleBlock ||         // 蜡烛
+                     block instanceof CampfireBlock ||       // 营火 (右键烤肉)
+                     block instanceof FlowerPotBlock ||      // 花盆
+                     block instanceof DecoratedPotBlock) {   // 饰纹陶罐 (1.20+)
+                SNEAK_BLOCKS.add(block);
+            }
+
+            // --- 1.21 特有 ---
+            // 检查铜灯 (Copper Bulb) - 类名可能变动，用模糊匹配
+            else if (block.getClass().getSimpleName().contains("BulbBlock") ||
+                     block.getClass().getSimpleName().contains("CopperBulb")) {
+                SNEAK_BLOCKS.add(block);
+            }
+        }
+    }
 
     // ==================== hitVec计算方法 ====================
 
