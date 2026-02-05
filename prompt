@@ -1,0 +1,61 @@
+我观察到当前的潜行放置方块貌似有问题，潜行机制仍未生效，我未观察到有效的潜行，但是放AFK的操作的潜行可以运行：
+
+如下是AFK的ontick，我观察到其按下与抬起是不同tick进行的，也就是潜行放方块至少需要：按下、放置、抬起三个tick：
+        // Sneak
+        if (sneak.get()) {
+            if (sneakTimer++ >= sneakTime.get()) {
+                mc.options.sneakKey.setPressed(false);
+                if (random.nextInt(99) == 0) sneakTimer = 0; // Sneak after ~5 seconds
+            } else mc.options.sneakKey.setPressed(true);
+        }
+如下是你之前的实现，有问题：
+    /**
+
+     * 使用潜行状态放置方块（参考BlockUtils.interact()的实现）
+
+     * 正确管理潜行按键状态，确保服务器正确接收潜行信息
+
+     *
+
+     * @param neighborPos 被交互的方块位置
+
+     * @param side 被点击的面
+
+     * @param hitVec 点击位置
+
+     * @param shouldSneak 是否需要潜行
+
+     */
+
+    private void placeBlockWithSneak(BlockPos neighborPos, Direction side, Vec3d hitVec, boolean shouldSneak) {
+
+        if (shouldSneak) {
+
+            // 使用按键控制潜行，而不是直接调用setSneaking()
+
+            // 这样可以确保服务器正确接收潜行信息
+
+            mc.options.sneakKey.setPressed(true);
+
+        }
+
+        placeBlockInternal(neighborPos, side, hitVec);
+
+
+        if (shouldSneak) {
+
+            mc.options.sneakKey.setPressed(false);
+
+        }
+
+    }
+
+我觉得代码可能存在的一种问题是：
+
+其潜行操作被并发的其他放置或者流程打断了，同时我尝试了添加潜行开始与结束的延时，但我仍然为观察到玩家的有效潜行操作，我认为这个操作应该是被某些逻辑打乱了，因为当前的代码行为中我仍然观察到了动作之间的冲突问题（指放置的方块可能串了，譬如蓝图有A B两个方块，打印机模块有时候会把A方块直接放在B上面）
+
+请你仔细检查流程与问题，尝试修正这一内容，使得相应的潜行、物品切换等都正常生效，也就是当前我看是基于每一次检测只进行一种操作，且有可能第一次tick在准备A方块，第二次tick在准备B方块，导致放置流程也存在相应的冲突与低效。
+
+如果可行，我的建议是你可以维护一个队列（可放置就加入，如果突然放置不了就移除）亦或是对所有的可放置方块进行排序，使得两个tick的目标方块之间的改动尽量小，且有时候可能存在视线检测的bug，使得认为合法的也无法正确放置，因此对一个方块操作完之后无论是否成功都进行下一个方块的准备（这样如果这个方块放不出来也可以继续下一个方块的放置尝试）
+
+请你完整修改重构代码，优化tick消息机制，单tick内仅执行一个需要同步的操作（世界交互/玩家控制），并完整输出修改后的内容，包含完整中文注释等： @meteor-client/src/main/java/meteordevelopment/meteorclient/systems/modules/player/Printer.java
