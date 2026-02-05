@@ -162,9 +162,24 @@ public class Printer extends Module {
     private final Map<BlockPos, Item> placeItems = new HashMap<>();
     private int tickDelay = 0;
 
-    // 物品切换延迟状态
-    private BlockPos lastSwitchedPos = null;
-    private int switchDelayTicks = 0;
+    // 状态机：当前正在处理的方块及其状态
+    private BlockPos currentTargetPos = null;
+    private Item currentTargetItem = null;
+    private BlockState currentTargetState = null;
+    private PlacementState placementState = PlacementState.IDLE;
+    private int stateTickCounter = 0;
+    private boolean currentBlockNeedsSneak = false;
+    private boolean currentPlayerIsSneaking = false;
+
+    /**
+     * 方块放置状态机
+     */
+    private enum PlacementState {
+        IDLE,           // 空闲状态，等待选择下一个方块
+        SWITCHING_ITEM, // 正在切换物品
+        PRESSING_SNEAK, // 处理潜行状态（按下或抬起）
+        PLACING_BLOCK   // 正在放置方块
+    }
 
     public Printer() {
         super(Categories.Player, "printer", "Automatically places blocks based on Litematica schematic.");
@@ -175,8 +190,7 @@ public class Printer extends Module {
         tickDelay = 0;
         placePositions.clear();
         placeItems.clear();
-        lastSwitchedPos = null;
-        switchDelayTicks = 0;
+        resetStateMachine();
     }
 
     @Override
@@ -184,8 +198,23 @@ public class Printer extends Module {
         tickDelay = 0;
         placePositions.clear();
         placeItems.clear();
-        lastSwitchedPos = null;
-        switchDelayTicks = 0;
+        resetStateMachine();
+        // 确保松开潜行键
+        if (mc.options != null) {
+            mc.options.sneakKey.setPressed(false);
+        }
+    }
+
+    /**
+     * 重置状态机到空闲状态
+     */
+    private void resetStateMachine() {
+        currentTargetPos = null;
+        currentTargetItem = null;
+        currentTargetState = null;
+        currentBlockNeedsSneak = false;
+        placementState = PlacementState.IDLE;
+        stateTickCounter = 0;
     }
 
     @EventHandler
@@ -217,62 +246,177 @@ public class Printer extends Module {
         }
         tickDelay = 0;
 
-        // Update placeable positions
-        updatePlacePositions(worldSchematic);
+        // ==================== 状态机驱动的方块放置流程 ====================
+        // 每个tick只执行一个关键操作，确保服务器正确同步
+        // 优化：物品检测到已拿起立即进入放置状态，潜行状态合并处理，避免不必要的tick浪费
 
-        if (placePositions.isEmpty()) return;
+        switch (placementState) {
+            case IDLE:
+                // 空闲状态：更新可放置方块列表，选择下一个目标
+                updatePlacePositions(worldSchematic);
 
-        // Calculate how many blocks to place this tick
-        int blocksToPlace = Math.min(placeNums.get(), placePositions.size());
-
-        for (int i = 0; i < blocksToPlace; i++) {
-            if (i >= placePositions.size()) break;
-
-            BlockPos pos = placePositions.get(i);
-            Item targetItem = placeItems.get(pos);
-
-            if (targetItem == null) continue;
-
-            // 获取该位置的目标方块状态（用于确定朝向）
-            BlockState requiredState = worldSchematic.getBlockState(pos);
-
-            // ==================== 物品切换延迟处理 ====================
-            // 如果这是一个新的位置（或与上次不同），则切换物品并等待一个tick
-            if (!pos.equals(lastSwitchedPos)) {
-                // 切换到目标物品（允许从背包切换）
-                if (!ItemSwitchHelper.switchToItem(targetItem, true, false)) {
-                    continue; // 物品不存在或切换失败
+                if (placePositions.isEmpty()) {
+                    // 列表为空，取消潜行状态并回到空闲
+                    if (mc.options.sneakKey.isPressed()) {
+                        mc.options.sneakKey.setPressed(false);
+                    }
+                    resetStateMachine();
+                    return;
                 }
 
-                // 记录本次切换的位置，并设置延迟计数器
-                lastSwitchedPos = pos;
-                switchDelayTicks = 1;  // 需要至少1个tick的延迟
+                // 选择第一个方块作为目标（已按距离排序）
+                currentTargetPos = placePositions.get(0);
+                currentTargetItem = placeItems.get(currentTargetPos);
+                currentTargetState = worldSchematic.getBlockState(currentTargetPos);
 
-                // 跳过本次放置，等待下一个tick再放置
-                continue;
-            }
+                if (currentTargetItem == null || currentTargetState == null) {
+                    resetStateMachine();
+                    return;
+                }
 
-            // 如果延迟计数器未清零，继续等待
-            if (switchDelayTicks > 0) {
-                switchDelayTicks--;
-                continue;
-            }
+                // 检查是否需要潜行（预先计算，以便在SWITCHING_ITEM状态使用）
+                Direction direction = getPlacementDirection(currentTargetPos);
+                if (direction == null) {
+                    resetStateMachine();
+                    return;
+                }
 
-            // ==================== 物品已切换完毕，现在进行放置 ====================
-            // 根据模式选择放置方法
-            if (placeMode.get() == PlaceMode.LEGIT) {
-                // ==================== 普通模式 ====================
-                // 此时物品已经在手中，直接放置
-                placeBlockLegit(pos, requiredState);
-            } else {
-                // ==================== STRICT模式 ====================
-                // 此时物品已经在手中，直接放置
-                placeBlockStrict(pos, requiredState);
-            }
+                BlockPos neighborPos = currentTargetPos.offset(direction);
+                BlockState neighborState = mc.world.getBlockState(neighborPos);
+                currentBlockNeedsSneak = BlockUtilHelper.SNEAK_BLOCKS.contains(neighborState.getBlock());
+                currentPlayerIsSneaking = mc.player.isSneaking();
 
-            // 放置完成后，清除切换记录，允许处理下一个物品
-            lastSwitchedPos = null;
-            switchDelayTicks = 0;
+                // 进入物品切换状态
+                placementState = PlacementState.SWITCHING_ITEM;
+                stateTickCounter = 0;
+                break;
+
+            case SWITCHING_ITEM:
+                // 物品切换状态：切换到目标物品
+                // 优化：检测到物品已拿到就立即进入PRESSING_SNEAK或PLACING_BLOCK
+                if (!ItemSwitchHelper.switchToItem(currentTargetItem, true, false)) {
+                    // 物品不存在或切换失败，放弃当前方块，回到空闲状态
+                    resetStateMachine();
+                    return;
+                }
+
+                // 检查物品是否已经拿到（立即生效）
+                if (ItemSwitchHelper.isItemInMainHand(currentTargetItem)) {
+                    // 物品已拿到，立即跳过等待，进入潜行处理状态
+                    if (currentBlockNeedsSneak && !currentPlayerIsSneaking) {
+                        // 需要按下潜行，进入PRESSING_SNEAK状态
+                        placementState = PlacementState.PRESSING_SNEAK;
+                        stateTickCounter = 0;
+                    } else if (!currentBlockNeedsSneak && currentPlayerIsSneaking) {
+                        // 需要抬起潜行，进入PRESSING_SNEAK状态进行抬起
+                        placementState = PlacementState.PRESSING_SNEAK;
+                        stateTickCounter = 0;
+                    } else {
+                        // 潜行状态已符合要求，直接进入放置状态
+                        placementState = PlacementState.PLACING_BLOCK;
+                        stateTickCounter = 0;
+                    }
+                } else {
+                    // 物品未立即生效，等待一个tick
+                    stateTickCounter++;
+                    if (stateTickCounter >= 1) {
+                        // 一个tick后再次检查
+                        if (ItemSwitchHelper.isItemInMainHand(currentTargetItem)) {
+                            // 物品已拿到，进入潜行处理状态
+                            if (currentBlockNeedsSneak && !currentPlayerIsSneaking) {
+                                placementState = PlacementState.PRESSING_SNEAK;
+                                stateTickCounter = 0;
+                            } else if (!currentBlockNeedsSneak && currentPlayerIsSneaking) {
+                                placementState = PlacementState.PRESSING_SNEAK;
+                                stateTickCounter = 0;
+                            } else {
+                                placementState = PlacementState.PLACING_BLOCK;
+                                stateTickCounter = 0;
+                            }
+                        } else {
+                            // 物品仍未获取，放弃
+                            resetStateMachine();
+                        }
+                    }
+                }
+                break;
+
+            case PRESSING_SNEAK:
+                // 潜行状态处理：根据需求按下或抬起潜行键
+                if (currentBlockNeedsSneak && !mc.player.isSneaking()) {
+                    // 需要潜行但玩家未潜行，按下潜行键
+                    mc.options.sneakKey.setPressed(true);
+                    currentPlayerIsSneaking = true;
+                    stateTickCounter++;
+
+                    if (stateTickCounter >= 1) {
+                        // 潜行已按下并等待一个tick，进入放置状态
+                        placementState = PlacementState.PLACING_BLOCK;
+                        stateTickCounter = 0;
+                    }
+                } else if (!currentBlockNeedsSneak && mc.player.isSneaking()) {
+                    // 不需要潜行但玩家正在潜行，抬起潜行键
+                    mc.options.sneakKey.setPressed(false);
+                    currentPlayerIsSneaking = false;
+                    stateTickCounter++;
+
+                    if (stateTickCounter >= 1) {
+                        // 潜行已抬起并等待一个tick，进入放置状态
+                        placementState = PlacementState.PLACING_BLOCK;
+                        stateTickCounter = 0;
+                    }
+                } else {
+                    // 潜行状态已满足要求，直接进入放置状态
+                    placementState = PlacementState.PLACING_BLOCK;
+                    stateTickCounter = 0;
+                }
+                break;
+
+            case PLACING_BLOCK:
+                // 放置状态：执行实际的方块放置
+                boolean placed = executePlacement(currentTargetPos, currentTargetState);
+
+                // 无论放置成功与否，都继续流程
+                // 如果放置失败，可能是视线问题或其他临时问题，不阻塞后续方块
+                stateTickCounter++;
+
+                if (stateTickCounter >= 1) {
+                    // 放置完成（或等待足够的tick），回到空闲状态准备下一个方块
+                    // 注意：不立即取消潜行，因为后续可能有多个连续需要潜行的方块
+                    resetStateMachine();
+                }
+                break;
+        }
+    }
+
+    /**
+     * 获取当前目标方块的放置方向
+     * 根据模式选择使用STRICT或LEGIT的方向检查
+     *
+     * @param pos 目标位置
+     * @return 放置方向，如果无法放置则返回null
+     */
+    private Direction getPlacementDirection(BlockPos pos) {
+        if (placeMode.get() == PlaceMode.STRICT) {
+            return BlockUtilHelper.getInteractDirection(pos, mc.world, mc.player.getEyePos(), true);
+        } else {
+            return BlockUtilHelper.getInteractDirection(pos, mc.world, mc.player.getEyePos(), false);
+        }
+    }
+
+    /**
+     * 执行实际的方块放置操作
+     * 此方法在PLACING_BLOCK状态时调用，假设物品已切换，潜行已按下（如果需要）
+     *
+     * @param pos 目标位置
+     * @param requiredState 目标方块状态
+     * @return 放置是否成功
+     */
+    private boolean executePlacement(BlockPos pos, BlockState requiredState) {
+        if (placeMode.get() == PlaceMode.LEGIT) {
+            return placeBlockLegit(pos, requiredState);
+        } else {
+            return placeBlockStrict(pos, requiredState);
         }
     }
 
@@ -285,7 +429,7 @@ public class Printer extends Module {
      * @return 放置是否成功
      */
     private boolean placeBlockLegit(BlockPos pos, BlockState requiredState) {
-        // 注意：物品切换由onTick()保证，此处无需再检查
+        // 注意：物品切换和潜行状态已由状态机保证
 
         // 获取可交互方向（使用标准查询，不进行NCP检查）
         Direction direction = BlockUtilHelper.getInteractDirection(pos, mc.world, mc.player.getEyePos(), false);
@@ -304,19 +448,15 @@ public class Printer extends Module {
             hitVec = BlockUtilHelper.getHitVec(neighborPos, clickedSide);
         }
 
-        // 检查是否需要潜行
-        BlockState neighborState = mc.world.getBlockState(neighborPos);
-        boolean shouldSneak = BlockUtilHelper.SNEAK_BLOCKS.contains(neighborState.getBlock());
-
-        // 执行放置
+        // 执行放置（不再处理潜行，由状态机负责）
         if (rotate.get()) {
             double yaw = Rotations.getYaw(hitVec);
             double pitch = Rotations.getPitch(hitVec);
             Rotations.rotate(yaw, pitch, 50, () -> {
-                placeBlockWithSneak(neighborPos, clickedSide, hitVec, shouldSneak);
+                placeBlockInternal(neighborPos, clickedSide, hitVec);
             });
         } else {
-            placeBlockWithSneak(neighborPos, clickedSide, hitVec, shouldSneak);
+            placeBlockInternal(neighborPos, clickedSide, hitVec);
         }
 
         return true;
@@ -331,7 +471,7 @@ public class Printer extends Module {
      * @return 放置是否成功
      */
     private boolean placeBlockStrict(BlockPos pos, BlockState requiredState) {
-        // 注意：物品切换由onTick()保证，此处无需再检查
+        // 注意：物品切换和潜行状态已由状态机保证
 
         // 获取可以放置的方向（使用严格检查）
         Direction direction = getInteractDirectionStrict(pos);
@@ -343,10 +483,6 @@ public class Printer extends Module {
         if (checkLineOfSight.get() && !canSeeBlock(neighborPos, direction.getOpposite())) {
             return false;
         }
-
-        // ==================== 第一步：检查是否需要潜行 ====================
-        BlockState neighborState = mc.world.getBlockState(neighborPos);
-        boolean shouldSneak = BlockUtilHelper.SNEAK_BLOCKS.contains(neighborState.getBlock());
 
         // 点击的邻居方块的哪个面
         Direction clickedSide = direction.getOpposite();
@@ -362,20 +498,16 @@ public class Printer extends Module {
             hitVec = BlockUtilHelper.getHitVec(neighborPos, clickedSide);
         }
 
-        // 计算旋转角度
+        // 计算旋转角度并执行放置（不再处理潜行，由状态机负责）
         double yaw = Rotations.getYaw(hitVec);
         double pitch = Rotations.getPitch(hitVec);
 
-        // ==================== 第二步：执行放置（通过rotation回调确保潜行状态同步） ====================
         if (rotate.get()) {
-            // 使用rotate回调，在旋转完成后执行交互
-            // 这个回调延迟确保潜行状态有足够的同步时间
             Rotations.rotate(yaw, pitch, 50, () -> {
-                placeBlockWithSneak(neighborPos, clickedSide, hitVec, shouldSneak);
+                placeBlockInternal(neighborPos, clickedSide, hitVec);
             });
         } else {
-            // 不旋转的情况下，直接执行交互
-            placeBlockWithSneak(neighborPos, clickedSide, hitVec, shouldSneak);
+            placeBlockInternal(neighborPos, clickedSide, hitVec);
         }
 
         return true;
@@ -383,6 +515,7 @@ public class Printer extends Module {
 
     /**
      * Internal block placement using BlockHitResult.
+     * 直接执行方块放置，不处理潜行（由状态机负责）
      *
      * @param neighborPos The block being interacted with.
      * @param side The face of the neighbor block being clicked.
@@ -398,29 +531,6 @@ public class Printer extends Module {
             } else {
                 mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(Hand.MAIN_HAND));
             }
-        }
-    }
-
-    /**
-     * 使用潜行状态放置方块（参考BlockUtils.interact()的实现）
-     * 正确管理潜行按键状态，确保服务器正确接收潜行信息
-     *
-     * @param neighborPos 被交互的方块位置
-     * @param side 被点击的面
-     * @param hitVec 点击位置
-     * @param shouldSneak 是否需要潜行
-     */
-    private void placeBlockWithSneak(BlockPos neighborPos, Direction side, Vec3d hitVec, boolean shouldSneak) {
-        if (shouldSneak) {
-            // 使用按键控制潜行，而不是直接调用setSneaking()
-            // 这样可以确保服务器正确接收潜行信息
-            mc.options.sneakKey.setPressed(true);
-        }
-
-        placeBlockInternal(neighborPos, side, hitVec);
-
-        if (shouldSneak) {
-            mc.options.sneakKey.setPressed(false);
         }
     }
 
@@ -492,13 +602,14 @@ public class Printer extends Module {
             }
 
             // 跳过流体
-            if (requiredState.isLiquid()) {
+            if (requiredState.getFluidState() != null && !requiredState.getFluidState().isEmpty()) {
                 continue;
             }
 
             // 检查当前位置是否可以被替换
             // 只有空气、流体和可替换方块才能被放置覆盖
-            if (!currentState.isAir() && !currentState.isLiquid() && !currentState.isReplaceable()) {
+            boolean isCurrentLiquid = currentState.getFluidState() != null && !currentState.getFluidState().isEmpty();
+            if (!currentState.isAir() && !isCurrentLiquid && !currentState.isReplaceable()) {
                 continue;
             }
 
@@ -638,6 +749,10 @@ public class Printer extends Module {
 
     @Override
     public String getInfoString() {
+        // 显示当前状态和待放置方块数量
+        if (placementState != PlacementState.IDLE) {
+            return placementState.name() + " (" + placePositions.size() + ")";
+        }
         return String.valueOf(placePositions.size());
     }
 
