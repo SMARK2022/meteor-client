@@ -23,6 +23,11 @@ import java.util.Set;
  * 3. 支撑检查 - 包括玻璃等完整方块
  * 4. 可放置性 - 上下半砖支撑规则
  * 5. 视线检查 - 反作弊线性检查
+ *
+ * 修改日志：
+ * - 修复了半砖无法在异种半砖（如 Top Slab 上放 Bottom Slab）上放置的问题。
+ * - 修复了楼梯无法作为支撑方块的问题。
+ * - 优化了 isClickable 判定，不再强制要求完整方块，只要有碰撞箱即可。
  */
 public class BlockUtilHelper {
 
@@ -36,85 +41,86 @@ public class BlockUtilHelper {
     static {
         // 1. 基础硬编码列表 (那些没有特定通用类或容易被遗漏的方块)
         SNEAK_BLOCKS.addAll(Arrays.asList(
-            // 工作台类
-            Blocks.CRAFTING_TABLE, Blocks.STONECUTTER, Blocks.CARTOGRAPHY_TABLE,
-            Blocks.SMITHING_TABLE, Blocks.GRINDSTONE, Blocks.LOOM,
+                // 工作台类
+                Blocks.CRAFTING_TABLE, Blocks.STONECUTTER, Blocks.CARTOGRAPHY_TABLE,
+                Blocks.SMITHING_TABLE, Blocks.GRINDSTONE, Blocks.LOOM,
 
-            // 附魔与炼药
-            Blocks.ENCHANTING_TABLE, Blocks.BREWING_STAND,
+                // 附魔与炼药
+                Blocks.ENCHANTING_TABLE, Blocks.BREWING_STAND,
 
-            // 特殊功能
-            Blocks.BEACON, Blocks.JUKEBOX, Blocks.BELL,
-            Blocks.COMPOSTER, // 堆肥桶
-            Blocks.RESPAWN_ANCHOR, // 重生锚
-            Blocks.LODESTONE, // 磁石 (可以用指南针交互)
-            Blocks.CAKE, // 蛋糕 (右键会吃掉)
-            Blocks.CANDLE_CAKE,
-            Blocks.DRAGON_EGG, // 龙蛋 (右键瞬移)
-            Blocks.SWEET_BERRY_BUSH, // 甜浆果丛 (右键采集)
-            Blocks.CAVE_VINES, Blocks.CAVE_VINES_PLANT, // 发光浆果
-            Blocks.PUMPKIN, // 南瓜 (虽通常需要剪刀，但潜行更安全)
-            Blocks.BEEHIVE, Blocks.BEE_NEST, // 蜂箱
-            Blocks.COMMAND_BLOCK, Blocks.CHAIN_COMMAND_BLOCK, Blocks.REPEATING_COMMAND_BLOCK,
-            Blocks.STRUCTURE_BLOCK, Blocks.JIGSAW,
+                // 特殊功能
+                Blocks.BEACON, Blocks.JUKEBOX, Blocks.BELL,
+                Blocks.COMPOSTER, // 堆肥桶
+                Blocks.RESPAWN_ANCHOR, // 重生锚
+                Blocks.LODESTONE, // 磁石 (可以用指南针交互)
+                Blocks.CAKE, // 蛋糕 (右键会吃掉)
+                Blocks.CANDLE_CAKE,
+                Blocks.DRAGON_EGG, // 龙蛋 (右键瞬移)
+                Blocks.SWEET_BERRY_BUSH, // 甜浆果丛 (右键采集)
+                Blocks.CAVE_VINES, Blocks.CAVE_VINES_PLANT, // 发光浆果
+                Blocks.PUMPKIN, // 南瓜 (虽通常需要剪刀，但潜行更安全)
+                Blocks.BEEHIVE, Blocks.BEE_NEST, // 蜂箱
+                Blocks.COMMAND_BLOCK, Blocks.CHAIN_COMMAND_BLOCK, Blocks.REPEATING_COMMAND_BLOCK,
+                Blocks.STRUCTURE_BLOCK, Blocks.JIGSAW,
 
-            // 1.21+ 新增重要交互方块
-            Blocks.CRAFTER, // 自动合成器 (有GUI)
-            Blocks.TRIAL_SPAWNER, // 试炼刷怪笼 (互动调整)
-            Blocks.VAULT // 宝库 (钥匙互动)
+                // 1.21+ 新增重要交互方块
+                Blocks.CRAFTER, // 自动合成器 (有GUI)
+                Blocks.TRIAL_SPAWNER, // 试炼刷怪笼 (互动调整)
+                Blocks.VAULT // 宝库 (钥匙互动)
         ));
 
         // 2. 动态扫描注册表 (这是适配 1.21.4 的核心，自动覆盖所有变种)
         for (Block block : Registries.BLOCK) {
             // 如果已经包含了就不重复处理
-            if (SNEAK_BLOCKS.contains(block)) continue;
+            if (SNEAK_BLOCKS.contains(block))
+                continue;
 
             // --- 容器与存储类 ---
             if (block instanceof AbstractChestBlock || // 箱子、陷阱箱、末影箱
-                block instanceof ShulkerBoxBlock ||    // 所有颜色的潜影盒
-                block instanceof BarrelBlock ||        // 桶
-                block instanceof DispenserBlock ||     // 发射器
-                block instanceof DropperBlock ||       // 投掷器
-                block instanceof HopperBlock ||        // 漏斗
-                block instanceof ChiseledBookshelfBlock) { // 雕纹书架 (1.20+)
+                    block instanceof ShulkerBoxBlock || // 所有颜色的潜影盒
+                    block instanceof BarrelBlock || // 桶
+                    block instanceof DispenserBlock || // 发射器
+                    block instanceof DropperBlock || // 投掷器
+                    block instanceof HopperBlock || // 漏斗
+                    block instanceof ChiseledBookshelfBlock) { // 雕纹书架 (1.20+)
                 SNEAK_BLOCKS.add(block);
             }
 
             // --- 熔炉与加工类 ---
             else if (block instanceof AbstractFurnaceBlock || // 熔炉、高炉、烟熏炉
-                     block instanceof AnvilBlock) {           // 所有铁砧
+                    block instanceof AnvilBlock) { // 所有铁砧
                 SNEAK_BLOCKS.add(block);
             }
 
             // --- 红石与开关类 ---
-            else if (block instanceof ButtonBlock ||             // 所有木/石/铜按钮
-                     block instanceof LeverBlock ||              // 拉杆
-                     block instanceof TrapdoorBlock ||           // 所有材质活板门 (含铜)
-                     block instanceof FenceGateBlock ||          // 所有栅栏门
-                     block instanceof DoorBlock ||               // 所有门 (含铁门)
-                     block instanceof NoteBlock ||               // 音符盒
-                     block instanceof AbstractRedstoneGateBlock || // 中继器、比较器
-                     block instanceof RedstoneWireBlock ||       // 红石粉 (右键切换连接形态)
-                     block instanceof DaylightDetectorBlock ||   // 阳光传感器
-                     block instanceof SculkSensorBlock ||        // 幽匿感测体
-                     block instanceof CalibratedSculkSensorBlock) { // 校准幽匿感测体
+            else if (block instanceof ButtonBlock || // 所有木/石/铜按钮
+                    block instanceof LeverBlock || // 拉杆
+                    block instanceof TrapdoorBlock || // 所有材质活板门 (含铜)
+                    block instanceof FenceGateBlock || // 所有栅栏门
+                    block instanceof DoorBlock || // 所有门 (含铁门)
+                    block instanceof NoteBlock || // 音符盒
+                    block instanceof AbstractRedstoneGateBlock || // 中继器、比较器
+                    block instanceof RedstoneWireBlock || // 红石粉 (右键切换连接形态)
+                    block instanceof DaylightDetectorBlock || // 阳光传感器
+                    block instanceof SculkSensorBlock || // 幽匿感测体
+                    block instanceof CalibratedSculkSensorBlock) { // 校准幽匿感测体
                 SNEAK_BLOCKS.add(block);
             }
 
             // --- 其他交互类 ---
-            else if (block instanceof BedBlock ||            // 所有颜色的床
-                     block instanceof AbstractSignBlock ||   // 所有告示牌 (包括挂牌)
-                     block instanceof CandleBlock ||         // 蜡烛
-                     block instanceof CampfireBlock ||       // 营火 (右键烤肉)
-                     block instanceof FlowerPotBlock ||      // 花盆
-                     block instanceof DecoratedPotBlock) {   // 饰纹陶罐 (1.20+)
+            else if (block instanceof BedBlock || // 所有颜色的床
+                    block instanceof AbstractSignBlock || // 所有告示牌 (包括挂牌)
+                    block instanceof CandleBlock || // 蜡烛
+                    block instanceof CampfireBlock || // 营火 (右键烤肉)
+                    block instanceof FlowerPotBlock || // 花盆
+                    block instanceof DecoratedPotBlock) { // 饰纹陶罐 (1.20+)
                 SNEAK_BLOCKS.add(block);
             }
 
             // --- 1.21 特有 ---
             // 检查铜灯 (Copper Bulb) - 类名可能变动，用模糊匹配
             else if (block.getClass().getSimpleName().contains("BulbBlock") ||
-                     block.getClass().getSimpleName().contains("CopperBulb")) {
+                    block.getClass().getSimpleName().contains("CopperBulb")) {
                 SNEAK_BLOCKS.add(block);
             }
         }
@@ -151,70 +157,77 @@ public class BlockUtilHelper {
         return Vec3d.ofCenter(neighborPos).add(Vec3d.of(clickedSide.getVector()).multiply(0.5));
     }
 
-    // ==================== 支撑检查方法 ====================
+    // ==================== 核心判定逻辑修正 ====================
 
     /**
-     * 检查方块是否是完整的可作为支撑
-     * 包括：实体方块、完整方块（如玻璃）、DOUBLE半砖
-     * 排除：空气、流体、可替换方块
+     * 判断一个方块是否可以被点击/作为支撑
+     * 修改：不再要求必须是完整方块。只要有碰撞箱且不可替换（如草丛）即可。
+     * 这解决了楼梯、半砖无法作为支撑的问题。
      */
-    private static boolean isCompleteBlock(BlockState state, World world, BlockPos pos) {
-        // 排除空气和流体
-        if (state.isAir() || !state.getFluidState().isEmpty()) {
-            return false;
-        }
-        // DOUBLE半砖视为完整方块
-        if (state.contains(SlabBlock.TYPE) && state.get(SlabBlock.TYPE) == SlabType.DOUBLE) {
-            return true;
-        }
-        // 实体方块或不可替换的完整方块（如玻璃）
-        return state.isSolidBlock(world, pos) || !state.isReplaceable();
+    private static boolean isClickable(BlockState state, World world, BlockPos pos) {
+        if (state.isAir() || !state.getFluidState().isEmpty()) return false;
+
+        // 如果是可替换方块（如草、雪片），则不能依靠
+        if (state.isReplaceable()) return false;
+
+        // 只要有碰撞箱，就可以点击
+        // 这囊括了楼梯、半砖、栅栏等非完整方块
+        return !state.getCollisionShape(world, pos).isEmpty();
     }
 
     /**
      * 检查水平方向邻居是否能支撑半砖
-     * 规则：完整方块 || (半砖 && 类型相同)
+     * 规则：只要邻居是可点击的实体方块即可。
      */
     private static boolean canSupportSlabHorizontal(BlockState neighbor, SlabType targetType, World world, BlockPos neighborPos) {
-        // 检查是否是完整方块
-        if (isCompleteBlock(neighbor, world, neighborPos)) {
-            // DOUBLE或普通实体方块都可以
-            if (neighbor.contains(SlabBlock.TYPE)) {
-                SlabType nType = neighbor.get(SlabBlock.TYPE);
-                return nType == SlabType.DOUBLE || nType == targetType;
-            }
-            return true;
-        }
-        return false;
+        return isClickable(neighbor, world, neighborPos);
     }
 
     /**
-     * 检查垂直方向邻居是否能支撑半砖
-     * 规则：完整方块 || (半砖 && 类型不同)
-     * 原因：同类型会合并成DOUBLE
+     * [关键修复] 检查垂直方向邻居是否能支撑半砖
+     *
+     * 场景 A: 想放 BOTTOM Slab (占 Y=0~0.5)
+     * - 需要下方 (DOWN) 的方块提供一个实体顶面。
+     * - 支持：完整方块、TOP Slab (Y=0.5~1)、Double Slab、Stairs(绝大多数情况)。
+     * - 不支持：BOTTOM Slab (因为它 Y=0.5~1 是空的)。
+     *
+     * 场景 B: 想放 TOP Slab (占 Y=0.5~1)
+     * - 需要上方 (UP) 的方块提供一个实体底面。
+     * - 支持：完整方块、BOTTOM Slab (Y=0~0.5)、Double Slab、Stairs(绝大多数情况)。
+     * - 不支持：TOP Slab (因为它 Y=0~0.5 是空的)。
      */
     private static boolean canSupportSlabVertical(BlockState neighbor, SlabType targetType, World world, BlockPos neighborPos) {
-        // 检查是否是完整方块
-        if (isCompleteBlock(neighbor, world, neighborPos)) {
-            if (neighbor.contains(SlabBlock.TYPE)) {
-                SlabType nType = neighbor.get(SlabBlock.TYPE);
-                return nType == SlabType.DOUBLE || nType != targetType;
+        // 首先必须是个实体方块
+        if (!isClickable(neighbor, world, neighborPos)) return false;
+
+        // 如果邻居是半砖，需要进行几何判断
+        if (neighbor.contains(SlabBlock.TYPE)) {
+            SlabType neighborType = neighbor.get(SlabBlock.TYPE);
+
+            if (neighborType == SlabType.DOUBLE) return true; // 双层半砖等于完整方块
+
+            if (targetType == SlabType.BOTTOM) {
+                // 我们要放 BOTTOM (在上方)，依靠下方方块
+                // 下方方块必须是 TOP 类型（即它的上半部分是实体的，顶面平整）
+                return neighborType == SlabType.TOP;
             }
+            else if (targetType == SlabType.TOP) {
+                // 我们要放 TOP (在下方)，依靠上方方块
+                // 上方方块必须是 BOTTOM 类型（即它的下半部分是实体的，底面平整）
+                return neighborType == SlabType.BOTTOM;
+            }
+        }
+
+        // 如果邻居是楼梯，通常都可以作为支撑
+        if (neighbor.getBlock() instanceof StairsBlock) {
             return true;
         }
-        return false;
+
+        // 对于其他方块，只要它是可点击的（isClickable 已检查），通常都可以作为垂直支撑
+        return true;
     }
 
     // ==================== 方向判定方法 ====================
-
-    /**
-     * 检查邻居是否可点击（为放置提供支撑）
-     * 对于一般方块：必须是完整方块
-     */
-    private static boolean isClickable(BlockState state, World world, BlockPos pos) {
-        return !state.isAir() && state.getFluidState().isEmpty()
-            && (state.isSolidBlock(world, pos) || !state.isReplaceable());
-    }
 
     /**
      * 获取普通方块的所有可交互方向
@@ -342,63 +355,50 @@ public class BlockUtilHelper {
 
     /**
      * 检查上半砖(TOP)是否可放置
-     * 优先级：上方完整块 > 水平完整块/TOP > 无法放置
+     * 逻辑更新：使用 isClickable 替代 isCompleteBlock
      */
     public static boolean canPlaceTopSlab(BlockPos blockPos, World world) {
-        // 优先：上方完整块
+        // 1. 检查上方是否能作为悬挂点
         BlockPos upPos = blockPos.up();
-        if (isCompleteBlock(world.getBlockState(upPos), world, upPos)) {
+        BlockState upState = world.getBlockState(upPos);
+        if (canSupportSlabVertical(upState, SlabType.TOP, world, upPos)) {
             return true;
         }
 
-        // 其次：水平方向的完整块或TOP/DOUBLE
+        // 2. 检查四周是否有依附点
         for (Direction dir : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST}) {
             BlockPos neighborPos = blockPos.offset(dir);
             BlockState neighbor = world.getBlockState(neighborPos);
-            if (isCompleteBlock(neighbor, world, neighborPos)) {
-                if (neighbor.contains(SlabBlock.TYPE)) {
-                    SlabType type = neighbor.get(SlabBlock.TYPE);
-                    if (type == SlabType.DOUBLE || type == SlabType.TOP) return true;
-                } else {
-                    return true;
-                }
+            if (canSupportSlabHorizontal(neighbor, SlabType.TOP, world, neighborPos)) {
+                return true;
             }
         }
-
         return false;
     }
 
     /**
      * 检查下半砖(BOTTOM)是否可放置
-     * 优先级：下方完整块 > 水平完整块/BOTTOM > 无法放置
+     * 逻辑更新：使用 isClickable 替代 isCompleteBlock
      */
     public static boolean canPlaceBottomSlab(BlockPos blockPos, World world) {
-        // 优先：下方完整块
+        // 1. 检查下方是否能作为支撑点
         BlockPos downPos = blockPos.down();
-        if (isCompleteBlock(world.getBlockState(downPos), world, downPos)) {
+        BlockState downState = world.getBlockState(downPos);
+        if (canSupportSlabVertical(downState, SlabType.BOTTOM, world, downPos)) {
             return true;
         }
 
-        // 其次：水平方向的完整块或BOTTOM/DOUBLE
+        // 2. 检查四周是否有依附点
         for (Direction dir : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST}) {
             BlockPos neighborPos = blockPos.offset(dir);
             BlockState neighbor = world.getBlockState(neighborPos);
-            if (isCompleteBlock(neighbor, world, neighborPos)) {
-                if (neighbor.contains(SlabBlock.TYPE)) {
-                    SlabType type = neighbor.get(SlabBlock.TYPE);
-                    if (type == SlabType.DOUBLE || type == SlabType.BOTTOM) return true;
-                } else {
-                    return true;
-                }
+            if (canSupportSlabHorizontal(neighbor, SlabType.BOTTOM, world, neighborPos)) {
+                return true;
             }
         }
-
         return false;
     }
 
-    /**
-     * 检查指定半砖类型是否可放置
-     */
     public static boolean canPlaceSlab(BlockPos blockPos, World world, SlabType slabType) {
         return switch (slabType) {
             case TOP -> canPlaceTopSlab(blockPos, world);
