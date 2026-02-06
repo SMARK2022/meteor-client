@@ -1,8 +1,10 @@
 package meteordevelopment.meteorclient.utils.world;
 
 import net.minecraft.block.*;
+import net.minecraft.block.enums.BlockHalf;
 import net.minecraft.block.enums.SlabType;
 import net.minecraft.registry.Registries;
+import net.minecraft.state.property.Properties;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
@@ -15,20 +17,19 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * BlockUtilHelper - 方块放置工具，支持半砖与反作弊验证
+ * BlockUtilHelper - 方块放置工具，支持半砖、楼梯、轴向方块与反作弊验证
  *
  * 核心功能：
- * 1. hitVec计算 - 确定方块朝向（半砖Y偏移）
- * 2. 方向判定 - 水平优先，支持NCP检查
- * 3. 支撑检查 - 包括玻璃等完整方块
+ * 1. hitVec计算 - 确定方块朝向
+ * 2. 方向判定 - 智能识别 Slab/Stair/Axis 的放置需求
+ * 3. 支撑检查 - 优化了非完整方块的支撑逻辑
  * 4. 可放置性 - 上下半砖支撑规则
  * 5. 视线检查 - 反作弊线性检查
  *
  * 修改日志：
- * - [Fix] 重构双层半砖逻辑：根据当前方块状态分步放置，先放一半，再补另一半。
- * - [Fix] 修复水平放置逻辑：禁止异种半砖依靠（如 Bottom 靠 Top）。
- * - [Fix] 修复垂直放置逻辑：确保依靠面有实体碰撞箱（如 Bottom 必须放在 Top/Full 上）。
- * - [Opt] 优化 isClickable：基于碰撞箱检测，完美支持楼梯等非完整方块。
+ * - [Feature] 新增 Axis 轴向方块逻辑：原木、石英柱、锁链等根据目标轴向自动选择点击面。
+ * - [Fix] isClickable 修复：允许含水方块作为支撑。
+ * - [Fix] 楼梯/半砖逻辑优化。
  */
 public class BlockUtilHelper {
 
@@ -157,7 +158,31 @@ public class BlockUtilHelper {
         return Vec3d.ofCenter(neighborPos).add(Vec3d.of(clickedSide.getVector()).multiply(0.5));
     }
 
-    // ==================== 核心判定逻辑修正 ====================
+    /**
+     * 计算楼梯的点击位置
+     * 核心修复：
+     * - 如果要放倒置楼梯 (TOP)，必须点击侧面的上半部分 (Y + 0.25)。
+     * - 如果要放正置楼梯 (BOTTOM)，点击侧面下半部分 (Y - 0.25)。
+     */
+    public static Vec3d getHitVecForStairs(BlockPos neighborPos, Direction clickedSide,
+            net.minecraft.block.enums.BlockHalf targetHalf) {
+        // 如果点击的是水平侧面 (东南西北)
+        if (clickedSide.getAxis().isHorizontal()) {
+            // TOP(倒置) -> 向上偏移 0.25
+            // BOTTOM(正置) -> 向下偏移 0.25
+            double yOffset = (targetHalf == net.minecraft.block.enums.BlockHalf.TOP) ? 0.25 : -0.25;
+
+            return new Vec3d(
+                    neighborPos.getX() + 0.5,
+                    neighborPos.getY() + 0.5 + yOffset, // <--- 关键修正
+                    neighborPos.getZ() + 0.5).add(Vec3d.of(clickedSide.getVector()).multiply(0.5));
+        }
+
+        // 如果点击的是上下底面，直接点中心即可（Minecraft 机制保证：点底面必倒置，点顶面必正置）
+        return Vec3d.ofCenter(neighborPos).add(Vec3d.of(clickedSide.getVector()).multiply(0.5));
+    }
+
+    // ==================== 支撑与判定核心逻辑 ====================
 
     /**
      * 判断一个方块是否可以被点击/作为支撑
@@ -187,15 +212,18 @@ public class BlockUtilHelper {
      * 检查水平方向的邻居是否合法
      * [修复]：严格检查半砖类型匹配，防止异种半砖（Top靠Bottom）放置。
      */
-    private static boolean canSupportSlabHorizontal(BlockState neighbor, SlabType targetType, World world, BlockPos neighborPos) {
-        if (!isClickable(neighbor, world, neighborPos)) return false;
+    private static boolean canSupportSlabHorizontal(BlockState neighbor, SlabType targetType, World world,
+            BlockPos neighborPos) {
+        if (!isClickable(neighbor, world, neighborPos))
+            return false;
 
         // 如果邻居是半砖，必须保证同层高有实体面
         if (neighbor.contains(SlabBlock.TYPE)) {
             SlabType neighborType = neighbor.get(SlabBlock.TYPE);
 
             // 双层半砖等于完整方块，哪里都能依附
-            if (neighborType == SlabType.DOUBLE) return true;
+            if (neighborType == SlabType.DOUBLE)
+                return true;
 
             // 单层半砖必须类型一致
             // 目标 BOTTOM (0~0.5) <-> 邻居 BOTTOM (0~0.5) : OK
@@ -255,8 +283,20 @@ public class BlockUtilHelper {
         if (requiredState.getBlock() instanceof SlabBlock && requiredState.contains(SlabBlock.TYPE)) {
             SlabType type = requiredState.get(SlabBlock.TYPE);
             candidates = getSlabPlaceDirections(pos, world, type, strict, eyePos);
-        } else {
-            // 普通方块
+        }
+        // 2. 楼梯逻辑
+        else if (requiredState.getBlock() instanceof StairsBlock && requiredState.contains(StairsBlock.HALF)) {
+            BlockHalf half = requiredState.get(StairsBlock.HALF);
+            candidates = getStairsPlaceDirections(pos, world, half, strict, eyePos);
+        }
+        // 3. 轴向方块逻辑 (原木、柱子、干草块、锁链等)
+        // 使用 Properties.AXIS 进行通用判断，只要包含这个属性就适用
+        else if (requiredState.contains(Properties.AXIS)) {
+            Direction.Axis axis = requiredState.get(Properties.AXIS);
+            candidates = getAxisPlaceDirections(pos, world, axis, strict, eyePos);
+        }
+        // 4. 默认逻辑
+        else {
             candidates = getInteractDirections(pos, world, eyePos, strict);
         }
 
@@ -287,6 +327,43 @@ public class BlockUtilHelper {
         return getInteractDirection(blockPos, world, eyePos, strictDir);
     }
 
+    // ==================== 专用放置逻辑 ====================
+
+    /**
+     * [新增] 轴向方块放置逻辑 (Logs, Pillars, Hay Bales, Chain)
+     * Rules:
+     * - Y轴 (Vertical): Must click UP or DOWN face of neighbor.
+     * - X轴 (East/West): Must click EAST or WEST face of neighbor.
+     * - Z轴 (North/South): Must click NORTH or SOUTH face of neighbor.
+     */
+    public static List<Direction> getAxisPlaceDirections(BlockPos blockPos, World world, Direction.Axis targetAxis, boolean strictDir, Vec3d eyePos) {
+        List<Direction> result = new ArrayList<>();
+        Set<Direction> ncpDirs = strictDir ? getPlaceDirectionsNCP(eyePos, Vec3d.ofCenter(blockPos)) : null;
+
+        // 根据目标轴向，确定允许寻找邻居的方向
+        // 例如：想放 X 轴的原木，必须找到位于我 东边(EAST) 或 西边(WEST) 的邻居，并点击它们的 WEST 或 EAST 面。
+        Direction[] searchDirs;
+        switch (targetAxis) {
+            case X -> searchDirs = new Direction[]{Direction.EAST, Direction.WEST};
+            case Z -> searchDirs = new Direction[]{Direction.NORTH, Direction.SOUTH};
+            default -> searchDirs = new Direction[]{Direction.UP, Direction.DOWN}; // Axis.Y
+        }
+
+        for (Direction dir : searchDirs) {
+            // NCP 检查：检查我们要点击的那个面（即 dir.getOpposite()）是否在允许范围内
+            if (strictDir && ncpDirs != null && !ncpDirs.contains(dir.getOpposite())) continue;
+
+            BlockPos neighborPos = blockPos.offset(dir);
+
+            // 只要邻居可点击即可，轴向方块通常不挑剔邻居的具体形态
+            if (isClickable(world.getBlockState(neighborPos), world, neighborPos)) {
+                result.add(dir);
+            }
+        }
+
+        return result;
+    }
+
     /**
      * [重构] 获取半砖放置方向
      * 逻辑：
@@ -294,7 +371,8 @@ public class BlockUtilHelper {
      * 2. 水平扫描：检查同类型支撑。
      * 3. 垂直扫描：严格检查上下邻居的接触面。
      */
-    public static List<Direction> getSlabPlaceDirections(BlockPos blockPos, World world, SlabType targetType, boolean strictDir, Vec3d eyePos) {
+    public static List<Direction> getSlabPlaceDirections(BlockPos blockPos, World world, SlabType targetType,
+            boolean strictDir, Vec3d eyePos) {
 
         // --- 1. 双层半砖特殊逻辑 ---
         // 双层半砖不是一步到位的，需要根据当前世界状态决定放置哪一半
@@ -330,8 +408,9 @@ public class BlockUtilHelper {
         Set<Direction> ncpDirs = strictDir ? getPlaceDirectionsNCP(eyePos, Vec3d.ofCenter(blockPos)) : null;
 
         // 2. 水平扫描 (North, South, East, West)
-        for (Direction dir : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST}) {
-            if (strictDir && ncpDirs != null && !ncpDirs.contains(dir.getOpposite())) continue;
+        for (Direction dir : new Direction[] { Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST }) {
+            if (strictDir && ncpDirs != null && !ncpDirs.contains(dir.getOpposite()))
+                continue;
 
             BlockPos neighborPos = blockPos.offset(dir);
             BlockState neighbor = world.getBlockState(neighborPos);
@@ -354,14 +433,10 @@ public class BlockUtilHelper {
 
                 if (isClickable(neighbor, world, neighborPos)) {
                     // 检查下方邻居是否有实体顶面
+                    // 下方是 BOTTOM 半砖 (0~0.5)，它的顶面 (Y=0.5) 接触不到我们的底面 (Y=0)
+                    // 下方必须是 TOP (0.5~1) 或 DOUBLE
                     boolean hasTopFace = true;
-                    if (neighbor.contains(SlabBlock.TYPE)) {
-                        SlabType nType = neighbor.get(SlabBlock.TYPE);
-                        // 下方是 BOTTOM 半砖 (0~0.5)，它的顶面 (Y=0.5) 接触不到我们的底面 (Y=0)
-                        // 下方必须是 TOP (0.5~1) 或 DOUBLE
-                        if (nType == SlabType.BOTTOM) hasTopFace = false;
-                    }
-
+                    if (neighbor.contains(SlabBlock.TYPE) && neighbor.get(SlabBlock.TYPE) == SlabType.BOTTOM) hasTopFace = false;
                     if (hasTopFace) result.add(dir);
                 }
             }
@@ -373,18 +448,63 @@ public class BlockUtilHelper {
             if (!strictDir || (ncpDirs == null || ncpDirs.contains(dir.getOpposite()))) {
                 BlockPos neighborPos = blockPos.offset(dir);
                 BlockState neighbor = world.getBlockState(neighborPos);
-
                 if (isClickable(neighbor, world, neighborPos)) {
                     // 检查上方邻居是否有实体底面
+                    // 上方是 TOP 半砖 (0.5~1)，它的底面 (Y=0.5) 接触不到我们的顶面 (Y=1)
+                    // 上方必须是 BOTTOM (0~0.5) 或 DOUBLE
                     boolean hasBottomFace = true;
-                    if (neighbor.contains(SlabBlock.TYPE)) {
-                        SlabType nType = neighbor.get(SlabBlock.TYPE);
-                        // 上方是 TOP 半砖 (0.5~1)，它的底面 (Y=0.5) 接触不到我们的顶面 (Y=1)
-                        // 上方必须是 BOTTOM (0~0.5) 或 DOUBLE
-                        if (nType == SlabType.TOP) hasBottomFace = false;
-                    }
-
+                    if (neighbor.contains(SlabBlock.TYPE) && neighbor.get(SlabBlock.TYPE) == SlabType.TOP) hasBottomFace = false;
                     if (hasBottomFace) result.add(dir);
+                }
+            }
+        }
+        return result;
+    }
+
+    // ==================== [新增] 楼梯专用逻辑 ====================
+
+
+
+    /**
+     * 获取楼梯的可行放置方向
+     * 逻辑：
+     * 1. 水平方向：楼梯可以依附在任何实体方块的侧面。
+     * 2. 垂直方向：严格限制。正置只能依靠下方，倒置只能依靠上方。
+     */
+    public static List<Direction> getStairsPlaceDirections(BlockPos blockPos, World world,
+            net.minecraft.block.enums.BlockHalf targetHalf, boolean strictDir, Vec3d eyePos) {
+        List<Direction> result = new ArrayList<>();
+        Set<Direction> ncpDirs = strictDir ? getPlaceDirectionsNCP(eyePos, Vec3d.ofCenter(blockPos)) : null;
+
+        // 1. 水平扫描 (依靠墙壁)
+        for (Direction dir : new Direction[] { Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST }) {
+            if (strictDir && ncpDirs != null && !ncpDirs.contains(dir.getOpposite()))
+                continue;
+
+            BlockPos neighborPos = blockPos.offset(dir);
+            if (isClickable(world.getBlockState(neighborPos), world, neighborPos)) {
+                result.add(dir);
+            }
+        }
+
+        // 2. 垂直扫描 (依靠地面或天花板)
+        if (targetHalf == net.minecraft.block.enums.BlockHalf.BOTTOM) {
+            // 正置楼梯：可以依靠下方的方块 (DOWN)
+            Direction dir = Direction.DOWN;
+            if (!strictDir || (ncpDirs == null || ncpDirs.contains(dir.getOpposite()))) {
+                BlockPos neighborPos = blockPos.offset(dir);
+                // 只要下方方块可点击且不是倒置楼梯/Slab(避免虚空接触)，通常都可以
+                if (isClickable(world.getBlockState(neighborPos), world, neighborPos)) {
+                    result.add(dir);
+                }
+            }
+        } else if (targetHalf == net.minecraft.block.enums.BlockHalf.TOP) {
+            // 倒置楼梯：可以依靠上方的方块 (UP)
+            Direction dir = Direction.UP;
+            if (!strictDir || (ncpDirs == null || ncpDirs.contains(dir.getOpposite()))) {
+                BlockPos neighborPos = blockPos.offset(dir);
+                if (isClickable(world.getBlockState(neighborPos), world, neighborPos)) {
+                    result.add(dir);
                 }
             }
         }

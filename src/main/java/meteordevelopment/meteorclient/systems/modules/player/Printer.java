@@ -402,6 +402,29 @@ public class Printer extends Module {
     }
 
     /**
+     * [新增] 辅助方法：统一计算点击坐标
+     * 解决了楼梯和半砖需要特定点击偏移的问题
+     */
+    private Vec3d calculateHitVec(BlockPos neighborPos, Direction clickedSide, BlockState state) {
+        Block block = state.getBlock();
+
+        // 1. 半砖：根据 Top/Bottom 调整 Y
+        if (block instanceof SlabBlock && state.contains(SlabBlock.TYPE)) {
+            SlabType type = state.get(SlabBlock.TYPE);
+            return BlockUtilHelper.getHitVecForSlab(neighborPos, clickedSide, type);
+        }
+
+        // 2. 楼梯：根据 Half (Top/Bottom) 调整 Y
+        if (block instanceof StairsBlock && state.contains(StairsBlock.HALF)) {
+            net.minecraft.block.enums.BlockHalf half = state.get(StairsBlock.HALF);
+            return BlockUtilHelper.getHitVecForStairs(neighborPos, clickedSide, half);
+        }
+
+        // 3. 默认：点击中心
+        return BlockUtilHelper.getHitVec(neighborPos, clickedSide);
+    }
+
+    /**
      * 普通模式放置方块（LEGIT模式）
      * 使用简化的逻辑，不进行严格的反作弊检查
      *
@@ -419,15 +442,8 @@ public class Printer extends Module {
         BlockPos neighborPos = pos.offset(direction);
         Direction clickedSide = direction.getOpposite();
 
-        // 计算hitVec
-        Vec3d hitVec;
-        Block block = requiredState.getBlock();
-        if (block instanceof SlabBlock && requiredState.contains(SlabBlock.TYPE)) {
-            SlabType slabType = requiredState.get(SlabBlock.TYPE);
-            hitVec = BlockUtilHelper.getHitVecForSlab(neighborPos, clickedSide, slabType);
-        } else {
-            hitVec = BlockUtilHelper.getHitVec(neighborPos, clickedSide);
-        }
+        // [核心修复] 使用统一的 HitVec 计算逻辑，支持楼梯
+        Vec3d hitVec = calculateHitVec(neighborPos, clickedSide, requiredState);
 
         // 执行放置
         if (rotate.get()) {
@@ -462,16 +478,8 @@ public class Printer extends Module {
         BlockPos neighborPos = pos.offset(direction);
         Direction clickedSide = direction.getOpposite();
 
-        // 计算hitVec（点击位置）
-        Vec3d hitVec;
-        Block block = requiredState.getBlock();
-
-        if (block instanceof SlabBlock && requiredState.contains(SlabBlock.TYPE)) {
-            SlabType slabType = requiredState.get(SlabBlock.TYPE);
-            hitVec = BlockUtilHelper.getHitVecForSlab(neighborPos, clickedSide, slabType);
-        } else {
-            hitVec = BlockUtilHelper.getHitVec(neighborPos, clickedSide);
-        }
+        // [核心修复] 使用统一的 HitVec 计算逻辑，支持楼梯
+        Vec3d hitVec = calculateHitVec(neighborPos, clickedSide, requiredState);
 
         // 计算旋转角度并执行放置
         double yaw = Rotations.getYaw(hitVec);
