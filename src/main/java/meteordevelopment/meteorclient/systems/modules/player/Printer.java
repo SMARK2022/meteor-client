@@ -25,6 +25,7 @@ import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.systems.modules.player.Printer.PlaceMode;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.ItemSwitchHelper;
@@ -50,8 +51,6 @@ import net.minecraft.util.math.*;
 import net.minecraft.world.RaycastContext;
 
 import java.util.*;
-
-import net.minecraft.util.math.Box;
 
 /**
  * Printer Module - Automatically places blocks based on Litematica schematic.
@@ -171,6 +170,9 @@ public class Printer extends Module {
     private boolean currentBlockNeedsSneak = false;
     private boolean currentPlayerIsSneaking = false;
 
+    // 【新增】标记变量：记录当前潜行状态是否由打印机强制触发
+    private boolean didPrinterForceSneak = false;
+
     /**
      * 方块放置状态机
      */
@@ -199,9 +201,20 @@ public class Printer extends Module {
         placePositions.clear();
         placeItems.clear();
         resetStateMachine();
-        // 确保松开潜行键
-        if (mc.options != null) {
-            mc.options.sneakKey.setPressed(false);
+        resetSneakState();
+    }
+
+    /**
+     * 安全重置潜行状态
+     * 只有当潜行是由打印机强制开启时，才将其关闭。
+     * 这样可以保护玩家手动按住 Shift 的情况不被干扰。
+     */
+    private void resetSneakState() {
+        if (didPrinterForceSneak) {
+            if (mc.options != null) {
+                mc.options.sneakKey.setPressed(false);
+            }
+            didPrinterForceSneak = false;
         }
     }
 
@@ -247,145 +260,119 @@ public class Printer extends Module {
         tickDelay = 0;
 
         // ==================== 状态机驱动的方块放置流程 ====================
-        // 每个tick只执行一个关键操作，确保服务器正确同步
-        // 优化：物品检测到已拿起立即进入放置状态，潜行状态合并处理，避免不必要的tick浪费
+        // 核心优化：使用 while 循环 + continue 实现状态穿透
+        // 如果某个状态不需要执行（例如不需要潜行），立即跳过并进入下一个状态
+        // 只有在实际需要执行操作时才 break，等待服务端同步
+        // 这样每个 tick 都会尽可能前进，避免空闲 tick
 
-        switch (placementState) {
-            case IDLE:
-                // 空闲状态：更新可放置方块列表，选择下一个目标
-                updatePlacePositions(worldSchematic);
+        while (true) {
+            switch (placementState) {
+                case IDLE:
+                    // 空闲状态：更新可放置方块列表，选择下一个目标
+                    updatePlacePositions(worldSchematic);
 
-                if (placePositions.isEmpty()) {
-                    // 列表为空，取消潜行状态并回到空闲
-                    if (mc.options.sneakKey.isPressed()) {
-                        mc.options.sneakKey.setPressed(false);
+                    if (placePositions.isEmpty()) {
+                        // 【修改】列表为空，任务结束
+                        // 调用安全复位：如果是打印机蹲的，打印机站起来；如果是玩家蹲的，保持蹲着
+                        resetSneakState();
+                        resetStateMachine();
+                        return;
                     }
-                    resetStateMachine();
-                    return;
-                }
 
-                // 选择第一个方块作为目标（已按距离排序）
-                currentTargetPos = placePositions.get(0);
-                currentTargetItem = placeItems.get(currentTargetPos);
-                currentTargetState = worldSchematic.getBlockState(currentTargetPos);
+                    // 选择第一个方块作为目标（已按距离排序）
+                    currentTargetPos = placePositions.get(0);
+                    currentTargetItem = placeItems.get(currentTargetPos);
+                    currentTargetState = worldSchematic.getBlockState(currentTargetPos);
 
-                if (currentTargetItem == null || currentTargetState == null) {
-                    resetStateMachine();
-                    return;
-                }
-
-                // 检查是否需要潜行（预先计算，以便在SWITCHING_ITEM状态使用）
-                Direction direction = getPlacementDirection(currentTargetPos);
-                if (direction == null) {
-                    resetStateMachine();
-                    return;
-                }
-
-                BlockPos neighborPos = currentTargetPos.offset(direction);
-                BlockState neighborState = mc.world.getBlockState(neighborPos);
-                currentBlockNeedsSneak = BlockUtilHelper.SNEAK_BLOCKS.contains(neighborState.getBlock());
-                currentPlayerIsSneaking = mc.player.isSneaking();
-
-                // 进入物品切换状态
-                placementState = PlacementState.SWITCHING_ITEM;
-                stateTickCounter = 0;
-                break;
-
-            case SWITCHING_ITEM:
-                // 物品切换状态：切换到目标物品
-                // 优化：检测到物品已拿到就立即进入PRESSING_SNEAK或PLACING_BLOCK
-                if (!ItemSwitchHelper.switchToItem(currentTargetItem, true, false)) {
-                    // 物品不存在或切换失败，放弃当前方块，回到空闲状态
-                    resetStateMachine();
-                    return;
-                }
-
-                // 检查物品是否已经拿到（立即生效）
-                if (ItemSwitchHelper.isItemInMainHand(currentTargetItem)) {
-                    // 物品已拿到，立即跳过等待，进入潜行处理状态
-                    if (currentBlockNeedsSneak && !currentPlayerIsSneaking) {
-                        // 需要按下潜行，进入PRESSING_SNEAK状态
-                        placementState = PlacementState.PRESSING_SNEAK;
-                        stateTickCounter = 0;
-                    } else if (!currentBlockNeedsSneak && currentPlayerIsSneaking) {
-                        // 需要抬起潜行，进入PRESSING_SNEAK状态进行抬起
-                        placementState = PlacementState.PRESSING_SNEAK;
-                        stateTickCounter = 0;
-                    } else {
-                        // 潜行状态已符合要求，直接进入放置状态
-                        placementState = PlacementState.PLACING_BLOCK;
-                        stateTickCounter = 0;
+                    if (currentTargetItem == null || currentTargetState == null) {
+                        resetStateMachine();
+                        return;
                     }
-                } else {
-                    // 物品未立即生效，等待一个tick
-                    stateTickCounter++;
-                    if (stateTickCounter >= 1) {
-                        // 一个tick后再次检查
-                        if (ItemSwitchHelper.isItemInMainHand(currentTargetItem)) {
-                            // 物品已拿到，进入潜行处理状态
-                            if (currentBlockNeedsSneak && !currentPlayerIsSneaking) {
-                                placementState = PlacementState.PRESSING_SNEAK;
-                                stateTickCounter = 0;
-                            } else if (!currentBlockNeedsSneak && currentPlayerIsSneaking) {
-                                placementState = PlacementState.PRESSING_SNEAK;
-                                stateTickCounter = 0;
-                            } else {
-                                placementState = PlacementState.PLACING_BLOCK;
-                                stateTickCounter = 0;
-                            }
-                        } else {
-                            // 物品仍未获取，放弃
-                            resetStateMachine();
-                        }
-                    }
-                }
-                break;
 
-            case PRESSING_SNEAK:
-                // 潜行状态处理：根据需求按下或抬起潜行键
-                if (currentBlockNeedsSneak && !mc.player.isSneaking()) {
-                    // 需要潜行但玩家未潜行，按下潜行键
-                    mc.options.sneakKey.setPressed(true);
-                    currentPlayerIsSneaking = true;
-                    stateTickCounter++;
-
-                    if (stateTickCounter >= 1) {
-                        // 潜行已按下并等待一个tick，进入放置状态
-                        placementState = PlacementState.PLACING_BLOCK;
-                        stateTickCounter = 0;
+                    // 检查是否需要潜行（预先计算，以便在 SWITCHING_ITEM 状态使用）
+                    Direction direction = getPlacementDirection(currentTargetPos);
+                    if (direction == null) {
+                        resetStateMachine();
+                        return;
                     }
-                } else if (!currentBlockNeedsSneak && mc.player.isSneaking()) {
-                    // 不需要潜行但玩家正在潜行，抬起潜行键
-                    mc.options.sneakKey.setPressed(false);
-                    currentPlayerIsSneaking = false;
-                    stateTickCounter++;
 
-                    if (stateTickCounter >= 1) {
-                        // 潜行已抬起并等待一个tick，进入放置状态
-                        placementState = PlacementState.PLACING_BLOCK;
-                        stateTickCounter = 0;
-                    }
-                } else {
-                    // 潜行状态已满足要求，直接进入放置状态
-                    placementState = PlacementState.PLACING_BLOCK;
+                    BlockPos neighborPos = currentTargetPos.offset(direction);
+                    BlockState neighborState = mc.world.getBlockState(neighborPos);
+                    currentBlockNeedsSneak = BlockUtilHelper.SNEAK_BLOCKS.contains(neighborState.getBlock());
+                    currentPlayerIsSneaking = mc.player.isSneaking();
+
+                    // 进入物品切换状态
+                    placementState = PlacementState.SWITCHING_ITEM;
                     stateTickCounter = 0;
-                }
-                break;
+                    // 不 break，继续执行下一个状态（状态穿透）
+                    continue;
 
-            case PLACING_BLOCK:
-                // 放置状态：执行实际的方块放置
-                boolean placed = executePlacement(currentTargetPos, currentTargetState);
+                case SWITCHING_ITEM:
+                    // 物品切换状态：切换到目标物品
+                    if (!ItemSwitchHelper.switchToItem(currentTargetItem, true, false)) {
+                        // 物品不存在或切换失败，放弃当前方块，回到空闲状态
+                        resetStateMachine();
+                        return;
+                    }
 
-                // 无论放置成功与否，都继续流程
-                // 如果放置失败，可能是视线问题或其他临时问题，不阻塞后续方块
-                stateTickCounter++;
+                    // 检查物品是否已经拿到（立即生效）
+                    if (ItemSwitchHelper.isItemInMainHand(currentTargetItem)) {
+                        // 物品已拿到，立即进入潜行处理状态（无需等待）
+                        placementState = PlacementState.PRESSING_SNEAK;
+                        stateTickCounter = 0;
+                        // 继续执行下一个状态，不 break
+                        continue;
+                    } else {
+                        // 物品未立即生效，需要等待此 tick
+                        stateTickCounter++;
+                        // 物品切换需要与服务端同步，此 tick 就此结束
+                        break;
+                    }
 
-                if (stateTickCounter >= 1) {
-                    // 放置完成（或等待足够的tick），回到空闲状态准备下一个方块
-                    // 注意：不立即取消潜行，因为后续可能有多个连续需要潜行的方块
+                case PRESSING_SNEAK:
+                    // 潜行状态处理：根据需求按下或抬起潜行键
+                    // 关键优化：判断是否真的需要执行潜行操作
+                    if (currentBlockNeedsSneak && !mc.player.isSneaking()) {
+                        // 需要潜行但玩家未潜行，按下潜行键
+                        mc.options.sneakKey.setPressed(true);
+                        currentPlayerIsSneaking = true;
+                        didPrinterForceSneak = true; // 标记所有权
+                        stateTickCounter++;
+                        // 潜行操作需要与服务端同步，此 tick 结束
+                        break;
+                    } else if (!currentBlockNeedsSneak && mc.player.isSneaking()) {
+                        // 不需要潜行但玩家正在潜行，抬起潜行键
+                        mc.options.sneakKey.setPressed(false);
+                        currentPlayerIsSneaking = false;
+                        didPrinterForceSneak = false; // 释放所有权
+                        stateTickCounter++;
+                        // 潜行操作需要与服务端同步，此 tick 结束
+                        break;
+                    } else {
+                        // 潜行状态已满足要求，无需执行潜行操作，立即进入放置状态
+                        placementState = PlacementState.PLACING_BLOCK;
+                        stateTickCounter = 0;
+                        // 继续执行下一个状态，不 break
+                        continue;
+                    }
+
+                case PLACING_BLOCK:
+                    // 放置状态：执行实际的方块放置
+                    boolean placed = executePlacement(currentTargetPos, currentTargetState);
+
+                    // 无论放置成功与否，都标记为已执行
+                    // 如果放置失败，可能是视线问题或其他临时问题，不阻塞后续方块
+                    stateTickCounter++;
+
+                    // 放置方块需要与服务端同步，回到空闲状态
                     resetStateMachine();
-                }
-                break;
+                    // 此 tick 结束，不立即继续（确保服务端有足够的时间同步）
+                    break;
+            }
+
+            // 如果执行到此处，说明某个状态触发了 break
+            // 跳出 while 循环，本 tick 结束
+            break;
         }
     }
 
