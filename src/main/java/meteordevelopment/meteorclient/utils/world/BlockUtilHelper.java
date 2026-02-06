@@ -25,9 +25,10 @@ import java.util.Set;
  * 5. 视线检查 - 反作弊线性检查
  *
  * 修改日志：
- * - 修复了半砖无法在异种半砖（如 Top Slab 上放 Bottom Slab）上放置的问题。
- * - 修复了楼梯无法作为支撑方块的问题。
- * - 优化了 isClickable 判定，不再强制要求完整方块，只要有碰撞箱即可。
+ * - [Fix] 重构双层半砖逻辑：根据当前方块状态分步放置，先放一半，再补另一半。
+ * - [Fix] 修复水平放置逻辑：禁止异种半砖依靠（如 Bottom 靠 Top）。
+ * - [Fix] 修复垂直放置逻辑：确保依靠面有实体碰撞箱（如 Bottom 必须放在 Top/Full 上）。
+ * - [Opt] 优化 isClickable：基于碰撞箱检测，完美支持楼梯等非完整方块。
  */
 public class BlockUtilHelper {
 
@@ -148,10 +149,9 @@ public class BlockUtilHelper {
             // BOTTOM: Y - 0.25 (点击下半部分)
             double yOffset = (targetSlabType == SlabType.TOP) ? 0.25 : -0.25;
             return new Vec3d(
-                neighborPos.getX() + 0.5,
-                neighborPos.getY() + 0.5 + yOffset,
-                neighborPos.getZ() + 0.5
-            ).add(Vec3d.of(clickedSide.getVector()).multiply(0.5));
+                    neighborPos.getX() + 0.5,
+                    neighborPos.getY() + 0.5 + yOffset,
+                    neighborPos.getZ() + 0.5).add(Vec3d.of(clickedSide.getVector()).multiply(0.5));
         }
         // 垂直方向：直接使用面中心
         return Vec3d.ofCenter(neighborPos).add(Vec3d.of(clickedSide.getVector()).multiply(0.5));
@@ -165,10 +165,12 @@ public class BlockUtilHelper {
      * 这解决了楼梯、半砖无法作为支撑的问题。
      */
     private static boolean isClickable(BlockState state, World world, BlockPos pos) {
-        if (state.isAir() || !state.getFluidState().isEmpty()) return false;
+        if (state.isAir() || !state.getFluidState().isEmpty())
+            return false;
 
         // 如果是可替换方块（如草、雪片），则不能依靠
-        if (state.isReplaceable()) return false;
+        if (state.isReplaceable())
+            return false;
 
         // 只要有碰撞箱，就可以点击
         // 这囊括了楼梯、半砖、栅栏等非完整方块
@@ -176,64 +178,38 @@ public class BlockUtilHelper {
     }
 
     /**
-     * 检查水平方向邻居是否能支撑半砖
-     * 规则：只要邻居是可点击的实体方块即可。
+     * 检查水平方向的邻居是否合法
+     * [修复]：严格检查半砖类型匹配，防止异种半砖（Top靠Bottom）放置。
      */
     private static boolean canSupportSlabHorizontal(BlockState neighbor, SlabType targetType, World world, BlockPos neighborPos) {
-        return isClickable(neighbor, world, neighborPos);
-    }
-
-    /**
-     * [关键修复] 检查垂直方向邻居是否能支撑半砖
-     *
-     * 场景 A: 想放 BOTTOM Slab (占 Y=0~0.5)
-     * - 需要下方 (DOWN) 的方块提供一个实体顶面。
-     * - 支持：完整方块、TOP Slab (Y=0.5~1)、Double Slab、Stairs(绝大多数情况)。
-     * - 不支持：BOTTOM Slab (因为它 Y=0.5~1 是空的)。
-     *
-     * 场景 B: 想放 TOP Slab (占 Y=0.5~1)
-     * - 需要上方 (UP) 的方块提供一个实体底面。
-     * - 支持：完整方块、BOTTOM Slab (Y=0~0.5)、Double Slab、Stairs(绝大多数情况)。
-     * - 不支持：TOP Slab (因为它 Y=0~0.5 是空的)。
-     */
-    private static boolean canSupportSlabVertical(BlockState neighbor, SlabType targetType, World world, BlockPos neighborPos) {
-        // 首先必须是个实体方块
         if (!isClickable(neighbor, world, neighborPos)) return false;
 
-        // 如果邻居是半砖，需要进行几何判断
+        // 如果邻居是半砖，必须保证同层高有实体面
         if (neighbor.contains(SlabBlock.TYPE)) {
             SlabType neighborType = neighbor.get(SlabBlock.TYPE);
 
-            if (neighborType == SlabType.DOUBLE) return true; // 双层半砖等于完整方块
+            // 双层半砖等于完整方块，哪里都能依附
+            if (neighborType == SlabType.DOUBLE) return true;
 
-            if (targetType == SlabType.BOTTOM) {
-                // 我们要放 BOTTOM (在上方)，依靠下方方块
-                // 下方方块必须是 TOP 类型（即它的上半部分是实体的，顶面平整）
-                return neighborType == SlabType.TOP;
-            }
-            else if (targetType == SlabType.TOP) {
-                // 我们要放 TOP (在下方)，依靠上方方块
-                // 上方方块必须是 BOTTOM 类型（即它的下半部分是实体的，底面平整）
-                return neighborType == SlabType.BOTTOM;
-            }
+            // 单层半砖必须类型一致
+            // 目标 BOTTOM (0~0.5) <-> 邻居 BOTTOM (0~0.5) : OK
+            // 目标 TOP (0.5~1) <-> 邻居 TOP (0.5~1) : OK
+            // 异种 : NO
+            return neighborType == targetType;
         }
 
-        // 如果邻居是楼梯，通常都可以作为支撑
-        if (neighbor.getBlock() instanceof StairsBlock) {
-            return true;
-        }
-
-        // 对于其他方块，只要它是可点击的（isClickable 已检查），通常都可以作为垂直支撑
+        // 楼梯、完整方块等只要 isClickable 通过即可
         return true;
     }
 
-    // ==================== 方向判定方法 ====================
+    // ==================== 方向获取逻辑 (核心重构) ====================
 
     /**
      * 获取普通方块的所有可交互方向
      * 逻辑：不再区分优先级，一次性返回所有由实体方块支撑且符合NCP方向要求的面
      */
-    public static List<Direction> getInteractDirections(BlockPos blockPos, World world, Vec3d eyePos, boolean strictDir) {
+    public static List<Direction> getInteractDirections(BlockPos blockPos, World world, Vec3d eyePos,
+            boolean strictDir) {
         List<Direction> result = new ArrayList<>();
         // 获取符合 NCP 视角要求的方向集合（如果未开启 strictDir 则为 null）
         Set<Direction> ncpDirs = strictDir ? getPlaceDirectionsNCP(eyePos, Vec3d.ofCenter(blockPos)) : null;
@@ -255,19 +231,15 @@ public class BlockUtilHelper {
     }
 
     /**
-     * 获取第一个可交互方向
-     */
-    public static Direction getInteractDirection(BlockPos blockPos, World world, Vec3d eyePos, boolean strictDir) {
-        List<Direction> dirs = getInteractDirections(blockPos, world, eyePos, strictDir);
-        return dirs.isEmpty() ? null : dirs.get(0);
-    }
-
-    /**
+     * 寻找最佳交互方向 (对外入口)
+     * 支持视线检查与半砖逻辑
+     *
      * 核心修复逻辑：寻找最佳的可交互方向
      * 遍历所有结构上可行的方向，而不仅仅是第一个。
      * 如果开启了 Strict 模式且开启了视线检查，会逐个检查视线，返回第一个“既可行又可见”的方向。
      */
-    public static Direction findBestInteractDirection(BlockPos pos, BlockState requiredState, World world, net.minecraft.entity.player.PlayerEntity player, boolean strict, boolean checkLos) {
+    public static Direction findBestInteractDirection(BlockPos pos, BlockState requiredState, World world,
+            net.minecraft.entity.player.PlayerEntity player, boolean strict, boolean checkLos) {
         Vec3d eyePos = player.getEyePos();
 
         // 1. 获取所有结构上可行的候选方向
@@ -285,7 +257,8 @@ public class BlockUtilHelper {
         // 2. 遍历候选列表，寻找满足条件的最优解
         for (Direction dir : candidates) {
             // 如果不需要检查视线，直接返回第一个结构可行的方向
-            if (!checkLos) return dir;
+            if (!checkLos)
+                return dir;
 
             // 视线检查 (Raycast)
             BlockPos neighborPos = pos.offset(dir);
@@ -299,29 +272,58 @@ public class BlockUtilHelper {
         return null; // 所有方向都不可行或被遮挡
     }
 
-    /**
-     * 获取半砖的可交互方向（优先水平）
-     */
-    public static Direction getInteractDirectionForSlab(BlockPos blockPos, World world, Vec3d eyePos, boolean strictDir) {
+    public static Direction getInteractDirection(BlockPos blockPos, World world, Vec3d eyePos, boolean strictDir) {
         List<Direction> dirs = getInteractDirections(blockPos, world, eyePos, strictDir);
         return dirs.isEmpty() ? null : dirs.get(0);
     }
 
+    public static Direction getInteractDirectionForSlab(BlockPos blockPos, World world, Vec3d eyePos, boolean strictDir) {
+        return getInteractDirection(blockPos, world, eyePos, strictDir);
+    }
+
     /**
-     * 获取半砖的所有放置方向
-     * 逻辑：完全废除“优先水平”逻辑。同时检查水平和垂直方向。
-     * 只要几何上能形成目标半砖类型，就加入列表。
+     * [重构] 获取半砖放置方向
+     * 逻辑：
+     * 1. 如果是 DOUBLE，根据当前状态决定是补 TOP 还是补 BOTTOM。
+     * 2. 水平扫描：检查同类型支撑。
+     * 3. 垂直扫描：严格检查上下邻居的接触面。
      */
     public static List<Direction> getSlabPlaceDirections(BlockPos blockPos, World world, SlabType targetType, boolean strictDir, Vec3d eyePos) {
-        // 如果是双层半砖，逻辑等同于普通方块（只需要找个面贴上去即可）
+
+        // --- 1. 双层半砖特殊逻辑 ---
+        // 双层半砖不是一步到位的，需要根据当前世界状态决定放置哪一半
         if (targetType == SlabType.DOUBLE) {
-            return getInteractDirections(blockPos, world, eyePos, strictDir);
+            BlockState current = world.getBlockState(blockPos);
+
+            // 如果当前位置已经是半砖，我们需要填补剩下的一半
+            if (current.getBlock() instanceof SlabBlock && current.contains(SlabBlock.TYPE)) {
+                SlabType currentType = current.get(SlabBlock.TYPE);
+
+                if (currentType == SlabType.DOUBLE) {
+                    // 已经是双层了，不需要放置 (或作为普通方块处理)
+                    return new ArrayList<>();
+                } else if (currentType == SlabType.BOTTOM) {
+                    // 当前是下半砖，我们需要放置 TOP 半砖来合成双层
+                    return getSlabPlaceDirections(blockPos, world, SlabType.TOP, strictDir, eyePos);
+                } else if (currentType == SlabType.TOP) {
+                    // 当前是上半砖，我们需要放置 BOTTOM 半砖来合成双层
+                    return getSlabPlaceDirections(blockPos, world, SlabType.BOTTOM, strictDir, eyePos);
+                }
+            } else {
+                // 如果当前是空气/可替换，我们随便放哪一半都可以开始
+                // 为了最大化成功率，我们把放 Top 和放 Bottom 的可能性都加进去
+                List<Direction> directions = new ArrayList<>();
+                directions.addAll(getSlabPlaceDirections(blockPos, world, SlabType.TOP, strictDir, eyePos));
+                directions.addAll(getSlabPlaceDirections(blockPos, world, SlabType.BOTTOM, strictDir, eyePos));
+                return directions;
+            }
         }
 
+        // --- 单层半砖逻辑 (TOP / BOTTOM) ---
         List<Direction> result = new ArrayList<>();
         Set<Direction> ncpDirs = strictDir ? getPlaceDirectionsNCP(eyePos, Vec3d.ofCenter(blockPos)) : null;
 
-        // --- 1. 检查水平方向 (四周) ---
+        // 2. 水平扫描 (North, South, East, West)
         for (Direction dir : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST}) {
             if (strictDir && ncpDirs != null && !ncpDirs.contains(dir.getOpposite())) continue;
 
@@ -333,17 +335,50 @@ public class BlockUtilHelper {
             }
         }
 
-        // --- 2. 检查垂直方向 (上下) ---
-        Direction verticalDir = (targetType == SlabType.TOP) ? Direction.UP : Direction.DOWN;
+        // 3. 垂直扫描 (Up / Down)
+        // 这里必须严格判断：我们想放的半砖，需要依靠哪个方向的哪个面
 
-        if (verticalDir != null) {
-            boolean validNcp = !strictDir || (ncpDirs != null && ncpDirs.contains(verticalDir.getOpposite()));
-            if (validNcp) {
-                BlockPos neighborPos = blockPos.offset(verticalDir);
+        if (targetType == SlabType.BOTTOM) {
+            // 目标：放置 BOTTOM 半砖 (占据当前格 Y=0~0.5)
+            // 依靠：下方邻居 (DOWN) 的顶面
+            Direction dir = Direction.DOWN;
+            if (!strictDir || (ncpDirs == null || ncpDirs.contains(dir.getOpposite()))) {
+                BlockPos neighborPos = blockPos.offset(dir);
                 BlockState neighbor = world.getBlockState(neighborPos);
 
-                if (canSupportSlabVertical(neighbor, targetType, world, neighborPos)) {
-                    result.add(verticalDir);
+                if (isClickable(neighbor, world, neighborPos)) {
+                    // 检查下方邻居是否有实体顶面
+                    boolean hasTopFace = true;
+                    if (neighbor.contains(SlabBlock.TYPE)) {
+                        SlabType nType = neighbor.get(SlabBlock.TYPE);
+                        // 下方是 BOTTOM 半砖 (0~0.5)，它的顶面 (Y=0.5) 接触不到我们的底面 (Y=0)
+                        // 下方必须是 TOP (0.5~1) 或 DOUBLE
+                        if (nType == SlabType.BOTTOM) hasTopFace = false;
+                    }
+
+                    if (hasTopFace) result.add(dir);
+                }
+            }
+        }
+        else if (targetType == SlabType.TOP) {
+            // 目标：放置 TOP 半砖 (占据当前格 Y=0.5~1)
+            // 依靠：上方邻居 (UP) 的底面
+            Direction dir = Direction.UP;
+            if (!strictDir || (ncpDirs == null || ncpDirs.contains(dir.getOpposite()))) {
+                BlockPos neighborPos = blockPos.offset(dir);
+                BlockState neighbor = world.getBlockState(neighborPos);
+
+                if (isClickable(neighbor, world, neighborPos)) {
+                    // 检查上方邻居是否有实体底面
+                    boolean hasBottomFace = true;
+                    if (neighbor.contains(SlabBlock.TYPE)) {
+                        SlabType nType = neighbor.get(SlabBlock.TYPE);
+                        // 上方是 TOP 半砖 (0.5~1)，它的底面 (Y=0.5) 接触不到我们的顶面 (Y=1)
+                        // 上方必须是 BOTTOM (0~0.5) 或 DOUBLE
+                        if (nType == SlabType.TOP) hasBottomFace = false;
+                    }
+
+                    if (hasBottomFace) result.add(dir);
                 }
             }
         }
@@ -351,60 +386,15 @@ public class BlockUtilHelper {
         return result;
     }
 
-    // ==================== 可放置性检查方法 ====================
+    // ==================== 可放置性预检查 (用于 Printer 过滤) ====================
 
     /**
-     * 检查上半砖(TOP)是否可放置
-     * 逻辑更新：使用 isClickable 替代 isCompleteBlock
+     * 检查是否可放置 Slab (Wrapper)
      */
-    public static boolean canPlaceTopSlab(BlockPos blockPos, World world) {
-        // 1. 检查上方是否能作为悬挂点
-        BlockPos upPos = blockPos.up();
-        BlockState upState = world.getBlockState(upPos);
-        if (canSupportSlabVertical(upState, SlabType.TOP, world, upPos)) {
-            return true;
-        }
-
-        // 2. 检查四周是否有依附点
-        for (Direction dir : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST}) {
-            BlockPos neighborPos = blockPos.offset(dir);
-            BlockState neighbor = world.getBlockState(neighborPos);
-            if (canSupportSlabHorizontal(neighbor, SlabType.TOP, world, neighborPos)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    /**
-     * 检查下半砖(BOTTOM)是否可放置
-     * 逻辑更新：使用 isClickable 替代 isCompleteBlock
-     */
-    public static boolean canPlaceBottomSlab(BlockPos blockPos, World world) {
-        // 1. 检查下方是否能作为支撑点
-        BlockPos downPos = blockPos.down();
-        BlockState downState = world.getBlockState(downPos);
-        if (canSupportSlabVertical(downState, SlabType.BOTTOM, world, downPos)) {
-            return true;
-        }
-
-        // 2. 检查四周是否有依附点
-        for (Direction dir : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST}) {
-            BlockPos neighborPos = blockPos.offset(dir);
-            BlockState neighbor = world.getBlockState(neighborPos);
-            if (canSupportSlabHorizontal(neighbor, SlabType.BOTTOM, world, neighborPos)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     public static boolean canPlaceSlab(BlockPos blockPos, World world, SlabType slabType) {
-        return switch (slabType) {
-            case TOP -> canPlaceTopSlab(blockPos, world);
-            case BOTTOM -> canPlaceBottomSlab(blockPos, world);
-            case DOUBLE -> canPlaceTopSlab(blockPos, world) || canPlaceBottomSlab(blockPos, world);
-        };
+        // 直接复用 getSlabPlaceDirections 的逻辑判断列表是否为空
+        // 传入 strictDir=false, eyePos=Zero 因为我们只关心物理可行性，不关心反作弊
+        return !getSlabPlaceDirections(blockPos, world, slabType, false, Vec3d.ZERO).isEmpty();
     }
 
     // ==================== 工具方法 ====================

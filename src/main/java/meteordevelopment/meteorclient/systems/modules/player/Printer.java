@@ -547,10 +547,28 @@ public class Printer extends Module {
             }
 
             // 方块已经正确放置（相同类型的方块），跳过
-            // 关键修复：应该比较Block类型，而不是整个BlockState
-            // 因为朝向等属性会在放置时自动设置
+            // [关键修复] 之前的 `getBlock()` 比较无法处理半砖升级 (e.g. BOTTOM -> DOUBLE)
+            // 现在，如果 Block 类型相同，我们额外检查半砖状态。
             if (requiredState.getBlock() == currentState.getBlock()) {
-                continue;
+                // 如果是半砖，检查是否需要升级
+                if (requiredState.getBlock() instanceof SlabBlock &&
+                    requiredState.contains(SlabBlock.TYPE) &&
+                    currentState.contains(SlabBlock.TYPE)) {
+
+                    SlabType requiredType = requiredState.get(SlabBlock.TYPE);
+                    SlabType currentType = currentState.get(SlabBlock.TYPE);
+
+                    // 如果需要双层，但当前不是双层，则允许放置（让 BlockUtil 去处理）
+                    if (requiredType == SlabType.DOUBLE && currentType != SlabType.DOUBLE) {
+                        // Pass through to placement logic
+                    } else {
+                        // 否则，我们认为它已经放置好了
+                        continue;
+                    }
+                } else {
+                    // 对于非半砖方块，如果 Block 类型相同，就认为已经放置
+                    continue;
+                }
             }
 
             // 跳过流体
