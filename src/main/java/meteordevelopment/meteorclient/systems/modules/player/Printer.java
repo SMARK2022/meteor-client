@@ -384,11 +384,14 @@ public class Printer extends Module {
      * @return 放置方向，如果无法放置则返回null
      */
     private Direction getPlacementDirection(BlockPos pos) {
-        if (placeMode.get() == PlaceMode.STRICT) {
-            return BlockUtilHelper.getInteractDirection(pos, mc.world, mc.player.getEyePos(), true);
-        } else {
-            return BlockUtilHelper.getInteractDirection(pos, mc.world, mc.player.getEyePos(), false);
-        }
+        WorldSchematic worldSchematic = SchematicWorldHandler.getSchematicWorld();
+        if (worldSchematic == null) return null;
+
+        BlockState requiredState = worldSchematic.getBlockState(pos);
+        boolean strict = placeMode.get() == PlaceMode.STRICT;
+        boolean checkLos = strict && checkLineOfSight.get();
+
+        return BlockUtilHelper.findBestInteractDirection(pos, requiredState, mc.world, mc.player, strict, checkLos);
     }
 
     /**
@@ -416,10 +419,8 @@ public class Printer extends Module {
      * @return 放置是否成功
      */
     private boolean placeBlockLegit(BlockPos pos, BlockState requiredState) {
-        // 注意：物品切换和潜行状态已由状态机保证
-
-        // 获取可交互方向（使用标准查询，不进行NCP检查）
-        Direction direction = BlockUtilHelper.getInteractDirection(pos, mc.world, mc.player.getEyePos(), false);
+        // 使用智能搜索获取方向
+        Direction direction = BlockUtilHelper.findBestInteractDirection(pos, requiredState, mc.world, mc.player, false, false);
         if (direction == null) return false;
 
         BlockPos neighborPos = pos.offset(direction);
@@ -435,7 +436,7 @@ public class Printer extends Module {
             hitVec = BlockUtilHelper.getHitVec(neighborPos, clickedSide);
         }
 
-        // 执行放置（不再处理潜行，由状态机负责）
+        // 执行放置
         if (rotate.get()) {
             double yaw = Rotations.getYaw(hitVec);
             double pitch = Rotations.getPitch(hitVec);
@@ -458,20 +459,12 @@ public class Printer extends Module {
      * @return 放置是否成功
      */
     private boolean placeBlockStrict(BlockPos pos, BlockState requiredState) {
-        // 注意：物品切换和潜行状态已由状态机保证
+        // 使用新的智能搜索获取方向（包含视线检查）
+        Direction direction = BlockUtilHelper.findBestInteractDirection(pos, requiredState, mc.world, mc.player, true, checkLineOfSight.get());
 
-        // 获取可以放置的方向（使用严格检查）
-        Direction direction = getInteractDirectionStrict(pos);
         if (direction == null) return false;
 
         BlockPos neighborPos = pos.offset(direction);
-
-        // 线性视距检查（检查支撑方块的可见性）
-        if (checkLineOfSight.get() && !canSeeBlock(neighborPos, direction.getOpposite())) {
-            return false;
-        }
-
-        // 点击的邻居方块的哪个面
         Direction clickedSide = direction.getOpposite();
 
         // 计算hitVec（点击位置）
@@ -485,7 +478,7 @@ public class Printer extends Module {
             hitVec = BlockUtilHelper.getHitVec(neighborPos, clickedSide);
         }
 
-        // 计算旋转角度并执行放置（不再处理潜行，由状态机负责）
+        // 计算旋转角度并执行放置
         double yaw = Rotations.getYaw(hitVec);
         double pitch = Rotations.getPitch(hitVec);
 
@@ -519,34 +512,6 @@ public class Printer extends Module {
                 mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(Hand.MAIN_HAND));
             }
         }
-    }
-
-    /**
-     * 获取NCP风格的交互方向（严格模式）
-     */
-    private Direction getInteractDirectionStrict(BlockPos blockPos) {
-        return BlockUtilHelper.getInteractDirection(blockPos, mc.world, mc.player.getEyePos(), true);
-    }
-
-    /**
-     * 获取半砖的NCP风格交互方向（严格模式）
-     */
-    private Direction getInteractDirectionSlabStrict(BlockPos blockPos) {
-        return BlockUtilHelper.getInteractDirectionForSlab(blockPos, mc.world, mc.player.getEyePos(), true);
-    }
-
-    /**
-     * 获取NCP有效方向集合
-     */
-    private Set<Direction> getPlaceDirectionsNCP(Vec3d eyePos, Vec3d blockPos) {
-        return BlockUtilHelper.getPlaceDirectionsNCP(eyePos, blockPos);
-    }
-
-    /**
-     * Checks if a block face is visible to the player (line of sight check).
-     */
-    private boolean canSeeBlock(BlockPos pos, Direction side) {
-        return BlockUtilHelper.canSeeBlock(pos, side, mc.world, mc.player);
     }
 
     /**
@@ -626,44 +591,12 @@ public class Printer extends Module {
                     continue;
                 }
             } else {
-                // STRICT模式：反作弊绕过模式
-                // 需要进行详细的方向检查和反作弊可放置性检查
+                // STRICT 模式：使用新的智能搜索方法
+                // 这里不再手动检查 canPlaceTopSlab 等布尔值，而是直接看“有没有合法的放置方向”
+                Direction bestDir = BlockUtilHelper.findBestInteractDirection(pos, requiredState, mc.world, mc.player, true, checkLineOfSight.get());
 
-                // 检查是否有有效的放置方向
-                Direction direction = getInteractDirectionStrict(pos);
-                if (direction == null) {
+                if (bestDir == null) {
                     continue;
-                }
-
-                // 特殊处理：对于半砖，需要额外的可放置性检查
-                if (requiredState.getBlock() instanceof SlabBlock &&
-                    requiredState.contains(SlabBlock.TYPE)) {
-                    SlabType slabType = requiredState.get(SlabBlock.TYPE);
-
-                    // 根据半砖类型检查是否可以放置
-                    if (slabType == SlabType.TOP) {
-                        if (!BlockUtilHelper.canPlaceTopSlab(pos, mc.world)) {
-                            continue;
-                        }
-                    } else if (slabType == SlabType.BOTTOM) {
-                        if (!BlockUtilHelper.canPlaceBottomSlab(pos, mc.world)) {
-                            continue;
-                        }
-                    } else {
-                        // DOUBLE半砖，检查是否有任何支撑
-                        if (!BlockUtilHelper.canPlaceTopSlab(pos, mc.world) &&
-                            !BlockUtilHelper.canPlaceBottomSlab(pos, mc.world)) {
-                            continue;
-                        }
-                    }
-                }
-
-                // 可选的线性视距检查
-                if (checkLineOfSight.get()) {
-                    BlockPos neighborPos = pos.offset(direction);
-                    if (!canSeeBlock(neighborPos, direction.getOpposite())) {
-                        continue;
-                    }
                 }
             }
 

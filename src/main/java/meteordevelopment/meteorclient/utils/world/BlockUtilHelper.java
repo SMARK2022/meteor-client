@@ -217,34 +217,27 @@ public class BlockUtilHelper {
     }
 
     /**
-     * 获取所有可交互方向，优先水平后垂直
+     * 获取普通方块的所有可交互方向
+     * 逻辑：不再区分优先级，一次性返回所有由实体方块支撑且符合NCP方向要求的面
      */
     public static List<Direction> getInteractDirections(BlockPos blockPos, World world, Vec3d eyePos, boolean strictDir) {
         List<Direction> result = new ArrayList<>();
+        // 获取符合 NCP 视角要求的方向集合（如果未开启 strictDir 则为 null）
         Set<Direction> ncpDirs = strictDir ? getPlaceDirectionsNCP(eyePos, Vec3d.ofCenter(blockPos)) : null;
 
-        // 优先：水平方向
-        for (Direction dir : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST}) {
+        // 遍历所有 6 个方向
+        for (Direction dir : Direction.values()) {
+            // 1. NCP 方向检查
+            if (strictDir && ncpDirs != null && !ncpDirs.contains(dir.getOpposite())) {
+                continue;
+            }
+
+            // 2. 物理支撑检查：邻居方块必须是可点击的（实体/完整）
             BlockPos neighborPos = blockPos.offset(dir);
             if (isClickable(world.getBlockState(neighborPos), world, neighborPos)) {
-                if (!strictDir || (ncpDirs != null && ncpDirs.contains(dir.getOpposite()))) {
-                    result.add(dir);
-                }
+                result.add(dir);
             }
         }
-
-        // 备选：垂直方向
-        if (result.isEmpty()) {
-            for (Direction dir : new Direction[]{Direction.UP, Direction.DOWN}) {
-                BlockPos neighborPos = blockPos.offset(dir);
-                if (isClickable(world.getBlockState(neighborPos), world, neighborPos)) {
-                    if (!strictDir || (ncpDirs != null && ncpDirs.contains(dir.getOpposite()))) {
-                        result.add(dir);
-                    }
-                }
-            }
-        }
-
         return result;
     }
 
@@ -257,64 +250,87 @@ public class BlockUtilHelper {
     }
 
     /**
-     * 获取半砖的可交互方向（优先水平）
+     * 核心修复逻辑：寻找最佳的可交互方向
+     * 遍历所有结构上可行的方向，而不仅仅是第一个。
+     * 如果开启了 Strict 模式且开启了视线检查，会逐个检查视线，返回第一个“既可行又可见”的方向。
      */
-    public static Direction getInteractDirectionForSlab(BlockPos blockPos, World world, Vec3d eyePos, boolean strictDir) {
-        Set<Direction> ncpDirs = strictDir ? getPlaceDirectionsNCP(eyePos, Vec3d.ofCenter(blockPos)) : null;
+    public static Direction findBestInteractDirection(BlockPos pos, BlockState requiredState, World world, net.minecraft.entity.player.PlayerEntity player, boolean strict, boolean checkLos) {
+        Vec3d eyePos = player.getEyePos();
 
-        // 优先：水平方向
-        for (Direction dir : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST}) {
-            BlockPos neighborPos = blockPos.offset(dir);
-            if (isClickable(world.getBlockState(neighborPos), world, neighborPos)) {
-                if (!strictDir || (ncpDirs != null && ncpDirs.contains(dir.getOpposite()))) {
-                    return dir;
-                }
+        // 1. 获取所有结构上可行的候选方向
+        List<Direction> candidates;
+
+        // 特殊处理半砖：半砖的放置面有特定要求（Top/Bottom）
+        if (requiredState.getBlock() instanceof SlabBlock && requiredState.contains(SlabBlock.TYPE)) {
+            SlabType type = requiredState.get(SlabBlock.TYPE);
+            candidates = getSlabPlaceDirections(pos, world, type, strict, eyePos);
+        } else {
+            // 普通方块
+            candidates = getInteractDirections(pos, world, eyePos, strict);
+        }
+
+        // 2. 遍历候选列表，寻找满足条件的最优解
+        for (Direction dir : candidates) {
+            // 如果不需要检查视线，直接返回第一个结构可行的方向
+            if (!checkLos) return dir;
+
+            // 视线检查 (Raycast)
+            BlockPos neighborPos = pos.offset(dir);
+            Direction side = dir.getOpposite(); // 我们点击的是邻居的这个面
+
+            if (canSeeBlock(neighborPos, side, world, player)) {
+                return dir; // 找到了！既有依靠，又能看见
             }
         }
 
-        // 备选：垂直方向
-        for (Direction dir : new Direction[]{Direction.UP, Direction.DOWN}) {
-            BlockPos neighborPos = blockPos.offset(dir);
-            if (isClickable(world.getBlockState(neighborPos), world, neighborPos)) {
-                if (!strictDir || (ncpDirs != null && ncpDirs.contains(dir.getOpposite()))) {
-                    return dir;
-                }
-            }
-        }
-
-        return null;
+        return null; // 所有方向都不可行或被遮挡
     }
 
     /**
-     * 获取半砖的所有放置方向（优先水平，然后垂直）
+     * 获取半砖的可交互方向（优先水平）
+     */
+    public static Direction getInteractDirectionForSlab(BlockPos blockPos, World world, Vec3d eyePos, boolean strictDir) {
+        List<Direction> dirs = getInteractDirections(blockPos, world, eyePos, strictDir);
+        return dirs.isEmpty() ? null : dirs.get(0);
+    }
+
+    /**
+     * 获取半砖的所有放置方向
+     * 逻辑：完全废除“优先水平”逻辑。同时检查水平和垂直方向。
+     * 只要几何上能形成目标半砖类型，就加入列表。
      */
     public static List<Direction> getSlabPlaceDirections(BlockPos blockPos, World world, SlabType targetType, boolean strictDir, Vec3d eyePos) {
-        List<Direction> result = new ArrayList<>();
+        // 如果是双层半砖，逻辑等同于普通方块（只需要找个面贴上去即可）
         if (targetType == SlabType.DOUBLE) {
             return getInteractDirections(blockPos, world, eyePos, strictDir);
         }
 
+        List<Direction> result = new ArrayList<>();
         Set<Direction> ncpDirs = strictDir ? getPlaceDirectionsNCP(eyePos, Vec3d.ofCenter(blockPos)) : null;
 
-        // 优先：水平方向（更稳定）
+        // --- 1. 检查水平方向 (四周) ---
         for (Direction dir : new Direction[]{Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST}) {
+            if (strictDir && ncpDirs != null && !ncpDirs.contains(dir.getOpposite())) continue;
+
             BlockPos neighborPos = blockPos.offset(dir);
             BlockState neighbor = world.getBlockState(neighborPos);
+
             if (canSupportSlabHorizontal(neighbor, targetType, world, neighborPos)) {
-                if (!strictDir || (ncpDirs != null && ncpDirs.contains(dir.getOpposite()))) {
-                    result.add(dir);
-                }
+                result.add(dir);
             }
         }
 
-        // 备选：垂直方向
-        if (result.isEmpty()) {
-            Direction vertDir = (targetType == SlabType.TOP) ? Direction.UP : Direction.DOWN;
-            BlockPos neighborPos = blockPos.offset(vertDir);
-            BlockState neighbor = world.getBlockState(neighborPos);
-            if (canSupportSlabVertical(neighbor, targetType, world, neighborPos)) {
-                if (!strictDir || (ncpDirs != null && ncpDirs.contains(vertDir.getOpposite()))) {
-                    result.add(vertDir);
+        // --- 2. 检查垂直方向 (上下) ---
+        Direction verticalDir = (targetType == SlabType.TOP) ? Direction.UP : Direction.DOWN;
+
+        if (verticalDir != null) {
+            boolean validNcp = !strictDir || (ncpDirs != null && ncpDirs.contains(verticalDir.getOpposite()));
+            if (validNcp) {
+                BlockPos neighborPos = blockPos.offset(verticalDir);
+                BlockState neighbor = world.getBlockState(neighborPos);
+
+                if (canSupportSlabVertical(neighbor, targetType, world, neighborPos)) {
+                    result.add(verticalDir);
                 }
             }
         }
