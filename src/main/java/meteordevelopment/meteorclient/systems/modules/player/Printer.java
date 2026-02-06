@@ -65,96 +65,84 @@ public class Printer extends Module {
 
     // General Settings
     private final Setting<Boolean> moveStop = sgGeneral.add(new BoolSetting.Builder()
-        .name("move-stop")
-        .description("Stop placing blocks while moving.")
-        .defaultValue(false)
-        .build()
-    );
+            .name("move-stop")
+            .description("Stop placing blocks while moving.")
+            .defaultValue(false)
+            .build());
 
     private final Setting<PlaceMode> placeMode = sgGeneral.add(new EnumSetting.Builder<PlaceMode>()
-        .name("place-mode")
-        .description("The method used to place blocks. STRICT uses NCP direction checks for anti-cheat bypass.")
-        .defaultValue(PlaceMode.STRICT)
-        .build()
-    );
+            .name("place-mode")
+            .description("The method used to place blocks. STRICT uses NCP direction checks for anti-cheat bypass.")
+            .defaultValue(PlaceMode.STRICT)
+            .build());
 
     private final Setting<Integer> placeNums = sgGeneral.add(new IntSetting.Builder()
-        .name("blocks-per-tick")
-        .description("How many blocks to place per tick.")
-        .defaultValue(1)
-        .min(1)
-        .sliderRange(1, 6)
-        .build()
-    );
+            .name("blocks-per-tick")
+            .description("How many blocks to place per tick.")
+            .defaultValue(1)
+            .min(1)
+            .sliderRange(1, 6)
+            .build());
 
     private final Setting<Integer> placeDelay = sgGeneral.add(new IntSetting.Builder()
-        .name("place-delay")
-        .description("Delay in ticks between placing blocks.")
-        .defaultValue(0)
-        .min(0)
-        .sliderRange(0, 10)
-        .build()
-    );
+            .name("place-delay")
+            .description("Delay in ticks between placing blocks.")
+            .defaultValue(0)
+            .min(0)
+            .sliderRange(0, 10)
+            .build());
 
     private final Setting<Integer> placeRange = sgGeneral.add(new IntSetting.Builder()
-        .name("range")
-        .description("The range within which to place blocks.")
-        .defaultValue(4)
-        .min(1)
-        .sliderRange(1, 6)
-        .build()
-    );
+            .name("range")
+            .description("The range within which to place blocks.")
+            .defaultValue(4)
+            .min(1)
+            .sliderRange(1, 6)
+            .build());
 
     private final Setting<Boolean> rotate = sgGeneral.add(new BoolSetting.Builder()
-        .name("rotate")
-        .description("Rotates towards the block being placed.")
-        .defaultValue(true)
-        .build()
-    );
+            .name("rotate")
+            .description("Rotates towards the block being placed.")
+            .defaultValue(true)
+            .build());
 
     private final Setting<Boolean> swingHand = sgGeneral.add(new BoolSetting.Builder()
-        .name("swing-hand")
-        .description("Swing hand when placing blocks.")
-        .defaultValue(true)
-        .build()
-    );
+            .name("swing-hand")
+            .description("Swing hand when placing blocks.")
+            .defaultValue(true)
+            .build());
 
     private final Setting<Boolean> checkLineOfSight = sgGeneral.add(new BoolSetting.Builder()
-        .name("check-line-of-sight")
-        .description("Only place blocks that are visible to the player (anti-cheat).")
-        .defaultValue(true)
-        .visible(() -> placeMode.get() == PlaceMode.STRICT)
-        .build()
-    );
+            .name("check-line-of-sight")
+            .description("Only place blocks that are visible to the player (anti-cheat).")
+            .defaultValue(true)
+            .visible(() -> placeMode.get() == PlaceMode.STRICT)
+            .build());
 
     // Render Settings
     private final Setting<Boolean> render = sgRender.add(new BoolSetting.Builder()
-        .name("render")
-        .description("Renders blocks that are about to be placed.")
-        .defaultValue(true)
-        .build()
-    );
+            .name("render")
+            .description("Renders blocks that are about to be placed.")
+            .defaultValue(true)
+            .build());
 
     private final Setting<ShapeMode> shapeMode = sgRender.add(new EnumSetting.Builder<ShapeMode>()
-        .name("shape-mode")
-        .description("How the shapes are rendered.")
-        .defaultValue(ShapeMode.Both)
-        .build()
-    );
+            .name("shape-mode")
+            .description("How the shapes are rendered.")
+            .defaultValue(ShapeMode.Both)
+            .build());
 
     private final Setting<SettingColor> sideColor = sgRender.add(new ColorSetting.Builder()
-        .name("side-color")
-        .description("The side color of the rendering.")
-        .defaultValue(new SettingColor(20, 200, 20, 50))
-        .build()
-    );
+            .name("side-color")
+            .description("The side color of the rendering.")
+            .defaultValue(new SettingColor(20, 200, 20, 50))
+            .build());
 
     private final Setting<SettingColor> lineColor = sgRender.add(new ColorSetting.Builder()
-        .name("line-color")
-        .description("The line color of the rendering.")
-        .defaultValue(new SettingColor(20, 200, 20, 255))
-        .build()
-    );
+            .name("line-color")
+            .description("The line color of the rendering.")
+            .defaultValue(new SettingColor(20, 200, 20, 255))
+            .build());
 
     // Internal state
     private final List<BlockPos> placePositions = new ArrayList<>();
@@ -177,10 +165,10 @@ public class Printer extends Module {
      * 方块放置状态机
      */
     private enum PlacementState {
-        IDLE,           // 空闲状态，等待选择下一个方块
+        IDLE, // 空闲状态，等待选择下一个方块
         SWITCHING_ITEM, // 正在切换物品
         PRESSING_SNEAK, // 处理潜行状态（按下或抬起）
-        PLACING_BLOCK   // 正在放置方块
+        PLACING_BLOCK // 正在放置方块
     }
 
     public Printer() {
@@ -233,14 +221,16 @@ public class Printer extends Module {
     @EventHandler
     private void onTick(TickEvent.Post event) {
         // Critical: Stop immediately if module is disabled
-        if (!isActive()) return;
+        if (!isActive())
+            return;
 
         // Check if player is moving and moveStop is enabled
         if (moveStop.get() && isPlayerMoving()) {
             return;
         }
 
-        if (mc.player == null || mc.world == null) return;
+        if (mc.player == null || mc.world == null)
+            return;
 
         // Check if Litematica schematic is loaded
         WorldSchematic worldSchematic = SchematicWorldHandler.getSchematicWorld();
@@ -385,7 +375,8 @@ public class Printer extends Module {
      */
     private Direction getPlacementDirection(BlockPos pos) {
         WorldSchematic worldSchematic = SchematicWorldHandler.getSchematicWorld();
-        if (worldSchematic == null) return null;
+        if (worldSchematic == null)
+            return null;
 
         BlockState requiredState = worldSchematic.getBlockState(pos);
         boolean strict = placeMode.get() == PlaceMode.STRICT;
@@ -398,7 +389,7 @@ public class Printer extends Module {
      * 执行实际的方块放置操作
      * 此方法在PLACING_BLOCK状态时调用，假设物品已切换，潜行已按下（如果需要）
      *
-     * @param pos 目标位置
+     * @param pos           目标位置
      * @param requiredState 目标方块状态
      * @return 放置是否成功
      */
@@ -414,14 +405,16 @@ public class Printer extends Module {
      * 普通模式放置方块（LEGIT模式）
      * 使用简化的逻辑，不进行严格的反作弊检查
      *
-     * @param pos 目标位置
+     * @param pos           目标位置
      * @param requiredState 目标方块状态
      * @return 放置是否成功
      */
     private boolean placeBlockLegit(BlockPos pos, BlockState requiredState) {
         // 使用智能搜索获取方向
-        Direction direction = BlockUtilHelper.findBestInteractDirection(pos, requiredState, mc.world, mc.player, false, false);
-        if (direction == null) return false;
+        Direction direction = BlockUtilHelper.findBestInteractDirection(pos, requiredState, mc.world, mc.player, false,
+                false);
+        if (direction == null)
+            return false;
 
         BlockPos neighborPos = pos.offset(direction);
         Direction clickedSide = direction.getOpposite();
@@ -454,15 +447,17 @@ public class Printer extends Module {
      * 使用STRICT模式放置方块，包含反作弊绕过和方向检查
      * 关键：hitVec（点击位置）决定了方块的朝向，特别是对半砖至关重要
      *
-     * @param pos 目标位置（要放置的方块位置）
+     * @param pos           目标位置（要放置的方块位置）
      * @param requiredState 目标方块状态（包含朝向属性）
      * @return 放置是否成功
      */
     private boolean placeBlockStrict(BlockPos pos, BlockState requiredState) {
         // 使用新的智能搜索获取方向（包含视线检查）
-        Direction direction = BlockUtilHelper.findBestInteractDirection(pos, requiredState, mc.world, mc.player, true, checkLineOfSight.get());
+        Direction direction = BlockUtilHelper.findBestInteractDirection(pos, requiredState, mc.world, mc.player, true,
+                checkLineOfSight.get());
 
-        if (direction == null) return false;
+        if (direction == null)
+            return false;
 
         BlockPos neighborPos = pos.offset(direction);
         Direction clickedSide = direction.getOpposite();
@@ -498,8 +493,8 @@ public class Printer extends Module {
      * 直接执行方块放置，不处理潜行（由状态机负责）
      *
      * @param neighborPos The block being interacted with.
-     * @param side The face of the neighbor block being clicked.
-     * @param hitVec The exact position of the click.
+     * @param side        The face of the neighbor block being clicked.
+     * @param hitVec      The exact position of the click.
      */
     private void placeBlockInternal(BlockPos neighborPos, Direction side, Vec3d hitVec) {
         BlockHitResult hitResult = new BlockHitResult(hitVec, side, neighborPos, false);
@@ -522,7 +517,8 @@ public class Printer extends Module {
         placePositions.clear();
         placeItems.clear();
 
-        if (mc.player == null || mc.world == null) return;
+        if (mc.player == null || mc.world == null)
+            return;
 
         Vec3d playerPos = mc.player.getEyePos();
         int range = placeRange.get();
@@ -552,8 +548,8 @@ public class Printer extends Module {
             if (requiredState.getBlock() == currentState.getBlock()) {
                 // 如果是半砖，检查是否需要升级
                 if (requiredState.getBlock() instanceof SlabBlock &&
-                    requiredState.contains(SlabBlock.TYPE) &&
-                    currentState.contains(SlabBlock.TYPE)) {
+                        requiredState.contains(SlabBlock.TYPE) &&
+                        currentState.contains(SlabBlock.TYPE)) {
 
                     SlabType requiredType = requiredState.get(SlabBlock.TYPE);
                     SlabType currentType = currentState.get(SlabBlock.TYPE);
@@ -571,8 +567,8 @@ public class Printer extends Module {
                 }
             }
 
-            // 跳过流体
-            if (requiredState.getFluidState() != null && !requiredState.getFluidState().isEmpty()) {
+            // 只跳过纯水/岩浆，不跳过含水方块
+            if (requiredState.getBlock() instanceof FluidBlock) {
                 continue;
             }
 
@@ -611,7 +607,8 @@ public class Printer extends Module {
             } else {
                 // STRICT 模式：使用新的智能搜索方法
                 // 这里不再手动检查 canPlaceTopSlab 等布尔值，而是直接看“有没有合法的放置方向”
-                Direction bestDir = BlockUtilHelper.findBestInteractDirection(pos, requiredState, mc.world, mc.player, true, checkLineOfSight.get());
+                Direction bestDir = BlockUtilHelper.findBestInteractDirection(pos, requiredState, mc.world, mc.player,
+                        true, checkLineOfSight.get());
 
                 if (bestDir == null) {
                     continue;
@@ -624,9 +621,8 @@ public class Printer extends Module {
         }
 
         // 按距离排序（最近的优先）
-        placePositions.sort(Comparator.comparingDouble(pos ->
-            mc.player.getEyePos().squaredDistanceTo(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5)
-        ));
+        placePositions.sort(Comparator.comparingDouble(
+                pos -> mc.player.getEyePos().squaredDistanceTo(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5)));
     }
 
     /**
@@ -656,9 +652,9 @@ public class Printer extends Module {
         net.minecraft.util.math.Box box = new net.minecraft.util.math.Box(pos);
         for (Entity entity : mc.world.getEntitiesByClass(Entity.class, box, e -> true)) {
             if (entity.isAlive() &&
-                !(entity instanceof ItemFrameEntity) &&
-                !(entity instanceof ArmorStandEntity) &&
-                !(entity instanceof EndCrystalEntity)) {
+                    !(entity instanceof ItemFrameEntity) &&
+                    !(entity instanceof ArmorStandEntity) &&
+                    !(entity instanceof EndCrystalEntity)) {
                 return true;
             }
         }
@@ -670,15 +666,16 @@ public class Printer extends Module {
      */
     private boolean isPlayerMoving() {
         return mc.options.forwardKey.isPressed() ||
-            mc.options.backKey.isPressed() ||
-            mc.options.leftKey.isPressed() ||
-            mc.options.rightKey.isPressed();
+                mc.options.backKey.isPressed() ||
+                mc.options.leftKey.isPressed() ||
+                mc.options.rightKey.isPressed();
     }
 
     @EventHandler
     private void onRender(Render3DEvent event) {
         // Critical: Stop immediately if module is disabled or no blocks to render
-        if (!isActive() || !render.get() || placePositions.isEmpty()) return;
+        if (!isActive() || !render.get() || placePositions.isEmpty())
+            return;
 
         for (BlockPos pos : placePositions) {
             event.renderer.box(pos, sideColor.get(), lineColor.get(), shapeMode.get(), 0);

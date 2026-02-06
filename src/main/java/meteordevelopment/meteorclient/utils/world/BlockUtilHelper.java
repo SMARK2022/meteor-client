@@ -161,20 +161,26 @@ public class BlockUtilHelper {
 
     /**
      * 判断一个方块是否可以被点击/作为支撑
-     * 修改：不再要求必须是完整方块。只要有碰撞箱且不可替换（如草丛）即可。
-     * 这解决了楼梯、半砖无法作为支撑的问题。
+     *
+     * [Fix] 之前的逻辑直接排除了所有含 fluid 的方块，导致水下建筑无法进行。
+     * 现在我们只排除 FluidBlock (纯水/岩浆源)，并检查是否有选取框 (OutlineShape)。
+     * 只要方块有选取框（鼠标能指到），即使含水（如水下楼梯），也是合法的支撑。
      */
-    private static boolean isClickable(BlockState state, World world, BlockPos pos) {
-        if (state.isAir() || !state.getFluidState().isEmpty())
+    public static boolean isClickable(BlockState state, World world, BlockPos pos) {
+        if (state.isAir())
             return false;
 
-        // 如果是可替换方块（如草、雪片），则不能依靠
+        // 如果是纯流体方块（水/岩浆），则不能依靠
+        // 注意：含水方块（Waterlogged Stairs）不是 FluidBlock，所以不会被这里拦截
+        if (state.getBlock() instanceof FluidBlock)
+            return false;
+
+        // 如果是可替换方块（如草、雪片），视为不可依靠
         if (state.isReplaceable())
             return false;
 
-        // 只要有碰撞箱，就可以点击
-        // 这囊括了楼梯、半砖、栅栏等非完整方块
-        return !state.getCollisionShape(world, pos).isEmpty();
+        // 核心检查：只要有选取轮廓箱，就可以点击
+        return !state.getOutlineShape(world, pos).isEmpty();
     }
 
     /**

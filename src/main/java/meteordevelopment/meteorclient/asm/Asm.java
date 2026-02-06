@@ -129,9 +129,8 @@ public class Asm {
             return delegate.getExtensions();
         }
 
-        @Override
         public boolean couldTransformClass(MixinEnvironment environment, String name) {
-            return delegate.couldTransformClass(environment, name);
+            return true;
         }
     }
 }
