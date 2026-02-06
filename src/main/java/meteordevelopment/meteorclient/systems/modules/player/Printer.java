@@ -32,7 +32,7 @@ import meteordevelopment.meteorclient.utils.player.ItemSwitchHelper;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
-import meteordevelopment.meteorclient.utils.world.BlockUtilHelper;
+import meteordevelopment.meteorclient.utils.printer.BlockUtilHelper;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.*;
 import net.minecraft.block.enums.SlabType;

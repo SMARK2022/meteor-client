@@ -1,4 +1,4 @@
-package meteordevelopment.meteorclient.utils.world;
+package meteordevelopment.meteorclient.utils.printer;
 
 import net.minecraft.block.*;
 import net.minecraft.block.enums.BlockHalf;
