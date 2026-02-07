@@ -349,6 +349,14 @@ public final class Rules {
      */
     public static final HitVecCalculator SLAB = (ctx, opt) -> {
         BlockPos pos = opt.getInteractPos(ctx.targetPos());
+        
+        // [修复] 如果是 Self 模式（双层补全），直接点中心
+        // 对于半砖补全，无论是从下补上(UP面)，还是从上补下(DOWN面)，交界处都在 0.5 (即中心)
+        // 使用通用逻辑会算到 y=1.0 或 y=0.0，那是空气位置
+        if (opt.isSelf()) {
+            return Vec3d.ofCenter(pos);
+        }
+        
         Direction face = opt.getClickedFace();
         
         if (!ctx.hasProperty(SlabBlock.TYPE)) {
