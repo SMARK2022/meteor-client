@@ -430,6 +430,9 @@ public class Printer extends Module {
      * 普通模式放置方块（LEGIT模式）
      * 使用规则引擎，不进行严格的反作弊检查
      *
+     * 【重构后】Resolver 返回的 PlacementOption 已经包含计算好的 hitVec，
+     * 无需再次手动计算。
+     *
      * @param pos           目标位置
      * @param requiredState 目标方块状态
      * @return 放置是否成功
@@ -438,22 +441,17 @@ public class Printer extends Module {
         // 创建放置上下文（LEGIT 模式：strict=false, checkLos=false）
         PlacementContext ctx = PlacementContext.of(mc.world, pos, requiredState, mc.player, false, false);
 
-        // 使用规则引擎解析最佳方向
+        // 使用规则引擎解析最佳方向（内部已经计算了 hitVec 并通过了过滤）
         PlacementOption option = ResolverRegistry.resolve(ctx);
         if (option == null)
             return false;
 
-        // 【关键修复】优先使用 resolve() 返回的实际目标状态（如 BOTTOM/TOP），如果没有则使用原始 requiredState
-        BlockState actualTargetState = (option.actualTargetState() != null) ? option.actualTargetState() : requiredState;
-
+        // 直接从 option 中获取结果，无需再次计算
         BlockPos neighborPos = option.getInteractPos(pos);
         Direction clickedSide = option.getClickedFace();
+        Vec3d hitVec = option.hitVec(); // 【关键】直接拿，不用再算一遍！
 
-        // 使用规则引擎计算点击位置（需要用实际的目标状态）
-        PlacementResolver resolver = ResolverRegistry.get(actualTargetState);
-        Vec3d hitVec = resolver.calculateHitVec(ctx.withTargetState(actualTargetState), option);
-
-        // 【新增】保存hitVec用于显示
+        // 【新增】保存 hitVec 用于调试显示
         currentHitVec = hitVec;
 
         // 执行放置
@@ -474,6 +472,9 @@ public class Printer extends Module {
      * 使用STRICT模式放置方块，包含反作弊绕过和方向检查
      * 使用规则引擎，hitVec（点击位置）决定了方块的朝向
      *
+     * 【重构后】Resolver 返回的 PlacementOption 已经包含计算好的 hitVec，
+     * 并且该 hitVec 已经通过了 NCP 和视线检查。
+     *
      * @param pos           目标位置（要放置的方块位置）
      * @param requiredState 目标方块状态（包含朝向属性）
      * @return 放置是否成功
@@ -482,22 +483,17 @@ public class Printer extends Module {
         // 创建放置上下文（STRICT 模式：strict=true, checkLos 根据设置）
         PlacementContext ctx = PlacementContext.of(mc.world, pos, requiredState, mc.player, true, checkLineOfSight.get());
 
-        // 使用规则引擎解析最佳方向
+        // 使用规则引擎解析最佳方向（内部已经计算了 hitVec 并通过了过滤）
         PlacementOption option = ResolverRegistry.resolve(ctx);
         if (option == null)
             return false;
 
-        // 【关键修复】优先使用 resolve() 返回的实际目标状态（如 BOTTOM/TOP），如果没有则使用原始 requiredState
-        BlockState actualTargetState = (option.actualTargetState() != null) ? option.actualTargetState() : requiredState;
-
+        // 直接从 option 中获取结果，无需再次计算
         BlockPos neighborPos = option.getInteractPos(pos);
         Direction clickedSide = option.getClickedFace();
+        Vec3d hitVec = option.hitVec(); // 【关键】直接拿，不用再算一遍！
 
-        // 使用规则引擎计算点击位置（需要用实际的目标状态）
-        PlacementResolver resolver = ResolverRegistry.get(actualTargetState);
-        Vec3d hitVec = resolver.calculateHitVec(ctx.withTargetState(actualTargetState), option);
-
-        // 【新增】保存hitVec用于显示
+        // 【新增】保存 hitVec 用于调试显示
         currentHitVec = hitVec;
 
         // 计算旋转角度并执行放置

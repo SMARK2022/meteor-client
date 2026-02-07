@@ -276,8 +276,8 @@ public final class ResolverRegistry {
                 PlacementResolver resolver = get(bottomCtx.targetState());
                 PlacementOption result = resolver.resolve(bottomCtx);
                 if (result != null) {
-                    // 【修复】在返回时，将实际选择的目标状态（BOTTOM）包含在 PlacementOption 中
-                    return new PlacementOption(result.direction(), result.isSelf(), bottomState);
+                    // 【修复】在返回时，将实际选择的目标状态（BOTTOM）和 hitVec 包含在 PlacementOption 中
+                    return new PlacementOption(result.direction(), result.isSelf(), bottomState, result.hitVec());
                 }
 
                 // 再尝试放 TOP
@@ -286,8 +286,8 @@ public final class ResolverRegistry {
                 resolver = get(topCtx.targetState());
                 result = resolver.resolve(topCtx);
                 if (result != null) {
-                    // 【修复】在返回时，将实际选择的目标状态（TOP）包含在 PlacementOption 中
-                    return new PlacementOption(result.direction(), result.isSelf(), topState);
+                    // 【修复】在返回时，将实际选择的目标状态（TOP）和 hitVec 包含在 PlacementOption 中
+                    return new PlacementOption(result.direction(), result.isSelf(), topState, result.hitVec());
                 }
 
                 // 两种都不行则返回 null

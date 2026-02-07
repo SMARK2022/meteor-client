@@ -200,7 +200,10 @@ public class BlockUtilHelper {
 
     /**
      * 视线检查 - 方块面对玩家是否可见
+     *
+     * @deprecated 推荐使用 canSeePoint 进行更精确的检查
      */
+    @Deprecated
     public static boolean canSeeBlock(BlockPos blockPos, Direction direction, World world, net.minecraft.entity.player.PlayerEntity player) {
         if (direction == null || world == null) return false;
 
@@ -219,6 +222,45 @@ public class BlockUtilHelper {
         ));
 
         return hitResult == null || hitResult.getType() == net.minecraft.util.hit.HitResult.Type.MISS;
+    }
+
+    /**
+     * 【新增】检查视线是否能直达某个精确坐标
+     * 用于解决半砖/楼梯点击特定部位的可见性问题
+     *
+     * 判定逻辑：
+     * 1. MISS：没有被任何方块阻挡 -> 可见
+     * 2. HIT：击中了某个方块
+     *    - 通常 Raycast 会正好击中目标方块的表面
+     *    - 检查击中点与目标点的距离是否在误差范围内
+     *
+     * @param targetPoint 目标坐标（精确的点击位置）
+     * @param world 游戏世界
+     * @param player 玩家实体
+     * @return 是否可见
+     */
+    public static boolean canSeePoint(Vec3d targetPoint, World world, net.minecraft.entity.player.PlayerEntity player) {
+        if (targetPoint == null || world == null || player == null) return false;
+
+        Vec3d eyePos = player.getEyePos();
+
+        // 发射射线
+        net.minecraft.util.hit.BlockHitResult hitResult = world.raycast(new net.minecraft.world.RaycastContext(
+            eyePos,
+            targetPoint,
+            net.minecraft.world.RaycastContext.ShapeType.COLLIDER,
+            net.minecraft.world.RaycastContext.FluidHandling.NONE,
+            player
+        ));
+
+        // 判定逻辑：
+        // 1. MISS: 没有被任何方块阻挡 -> 可见
+        if (hitResult.getType() == net.minecraft.util.hit.HitResult.Type.MISS) return true;
+
+        // 2. 如果击中了，检查击中点与目标点的距离
+        // 由于浮点数精度，targetPoint 刚好在面上，raycast 可能会判定为击中该面
+        // 距离小于 0.01（1cm）视为同一个点
+        return hitResult.getPos().squaredDistanceTo(targetPoint) < 0.0001;
     }
 
     /**

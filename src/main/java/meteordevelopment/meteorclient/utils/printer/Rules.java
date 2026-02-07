@@ -240,11 +240,16 @@ public final class Rules {
      * 过滤器：NCP 方向检查（严格模式）
      * 根据玩家视角位置限制允许的放置方向
      * 只在 strict 模式下生效
+     *
+     * 【升级】现在基于精确的 hitVec 进行判断，而不仅仅是方块中心。
+     * 虽然 NCP 主要检查的是“点击面是否背对玩家”，但拥有精确坐标更保险。
      */
     public static final CandidateFilter NCP_STRICT = (ctx, opt) -> {
         if (!ctx.strict()) return true; // 非严格模式，全部通过
 
-        Set<Direction> validDirs = BlockUtilHelper.getPlaceDirectionsNCP(ctx.eyePos(), ctx.targetCenter());
+        // 如果 hitVec 已经计算过，使用精确坐标；否则回退到方块中心
+        Vec3d targetPos = (opt.hitVec() != null) ? opt.hitVec() : ctx.targetCenter();
+        Set<Direction> validDirs = BlockUtilHelper.getPlaceDirectionsNCP(ctx.eyePos(), targetPos);
         // 我们要点击的是 opt.getClickedFace() 面
         return validDirs.contains(opt.getClickedFace());
     };
@@ -253,13 +258,22 @@ public final class Rules {
      * 过滤器：视线检查（Line of Sight）
      * 确保玩家能够看到要点击的方块面
      * 只在 checkLos 启用时生效
+     *
+     * 【升级】这是本次重构的最大受益者。
+     * 以前我们检查方块中心是否可见 -> 半砖时经常误判。
+     * 现在我们直接检查 opt.hitVec() 是否可见。
      */
     public static final CandidateFilter LINE_OF_SIGHT = (ctx, opt) -> {
         if (!ctx.checkLos()) return true; // 未启用视线检查，全部通过
 
+        // 直接使用解析器算好的精确坐标进行 Raycast
+        if (opt.hitVec() != null) {
+            return BlockUtilHelper.canSeePoint(opt.hitVec(), ctx.world(), ctx.player());
+        }
+
+        // 回退方案（理论上不应该走到这里，因为 Resolver 已经注入了 hitVec）
         BlockPos clickPos = opt.getInteractPos(ctx.targetPos());
         Direction face = opt.getClickedFace();
-
         return BlockUtilHelper.canSeeBlock(clickPos, face, ctx.world(), ctx.player());
     };
 

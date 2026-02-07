@@ -103,9 +103,31 @@ public class PlacementResolver {
 
     /**
      * 解析最佳放置选项（Optional 版本）
+     *
+     * 【核心重构】执行流程变更：
+     * 1. Source 产生基础方向候选
+     * 2. 【关键】立即计算 HitVec（在过滤前）
+     * 3. Filter 基于方向 AND HitVec 进行检查
+     * 4. 返回第一个完全合法的选项（包含现成的 HitVec）
+     *
+     * 这解决了"点击位置误差导致过滤器误判"的问题：
+     * - 旧流程：判定(只看方块) -> 选定方向 -> 计算HitVec -> 执行
+     * - 新流程：产生方向 -> 计算HitVec -> 判定(看精确点) -> 执行
      */
     public Optional<PlacementOption> resolveOptional(PlacementContext ctx) {
         return getCandidateStream(ctx)
+            // 1. 先计算 HitVec（注入到 Option 中）
+            .map(opt -> {
+                // 如果 Option 中已经指定了特殊状态（如 Bottom Slab），
+                // 创建一个临时 Context 用于计算 HitVec
+                PlacementContext calcCtx = (opt.actualTargetState() != null)
+                    ? ctx.withTargetState(opt.actualTargetState())
+                    : ctx;
+
+                Vec3d vec = hitVecCalculator.calculate(calcCtx, opt);
+                return opt.withHitVec(vec);
+            })
+            // 2. 再进行过滤（现在过滤器可以访问 opt.hitVec() 了）
             .filter(opt -> passAllFilters(ctx, opt))
             .findFirst();
     }
@@ -116,6 +138,15 @@ public class PlacementResolver {
      */
     public List<PlacementOption> resolveAll(PlacementContext ctx) {
         return getCandidateStream(ctx)
+            // 先计算 HitVec
+            .map(opt -> {
+                PlacementContext calcCtx = (opt.actualTargetState() != null)
+                    ? ctx.withTargetState(opt.actualTargetState())
+                    : ctx;
+                Vec3d vec = hitVecCalculator.calculate(calcCtx, opt);
+                return opt.withHitVec(vec);
+            })
+            // 再过滤
             .filter(opt -> passAllFilters(ctx, opt))
             .toList();
     }
@@ -131,6 +162,10 @@ public class PlacementResolver {
 
     /**
      * 计算点击位置
+     *
+     * 【注意】在新的架构中，这个方法通常不需要被外部调用，
+     * 因为 resolve() 返回的 PlacementOption 已经包含了计算好的 hitVec。
+     * 保留此方法主要用于兼容性和特殊场景。
      *
      * @param ctx 放置上下文
      * @param opt 放置选项
@@ -151,7 +186,7 @@ public class PlacementResolver {
         // 实际上这不应该被调用了，除非遗留代码
         return calculateHitVec(ctx, PlacementOption.neighbor(clickedSide.getOpposite()));
     }
-    
+
     /**
      * @deprecated 请使用 calculateHitVec(PlacementContext, PlacementOption)
      */
