@@ -859,7 +859,8 @@ public final class Rules {
         }
 
         SlabType type = ctx.getProperty(SlabBlock.TYPE);
-        return HitVecCalculator.getHitVecForSlab(pos, face, type);
+        var neighborState = ctx.world().getBlockState(pos);
+        return HitVecCalculator.getHitVecForSlab(pos, face, type, neighborState);
     };
 
     /**
