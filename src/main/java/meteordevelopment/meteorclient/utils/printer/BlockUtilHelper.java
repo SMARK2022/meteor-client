@@ -3,6 +3,7 @@ package meteordevelopment.meteorclient.utils.printer;
 import net.minecraft.block.*;
 import net.minecraft.block.enums.BlockHalf;
 import net.minecraft.block.enums.SlabType;
+import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.registry.Registries;
 import net.minecraft.state.property.Properties;
 import net.minecraft.util.math.BlockPos;
@@ -17,19 +18,30 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * BlockUtilHelper - 方块放置工具，支持半砖、楼梯、轴向方块与反作弊验证
+ * BlockUtilHelper - 方块放置底层工具类
  *
- * 核心功能：
- * 1. hitVec计算 - 确定方块朝向
- * 2. 方向判定 - 智能识别 Slab/Stair/Axis 的放置需求
- * 3. 支撑检查 - 优化了非完整方块的支撑逻辑
- * 4. 可放置性 - 上下半砖支撑规则
- * 5. 视线检查 - 反作弊线性检查
+ * 本类提供方块放置所需的底层工具方法，包括：
+ * 1. hitVec计算 - 确定方块朝向的点击位置
+ * 2. 支撑检查 - 判断方块是否可被点击/作为支撑
+ * 3. NCP方向检查 - 反作弊视角方向验证
+ * 4. 视线检查 - 射线检测方块可见性
+ *
+ * 架构说明：
+ * 本类是规则引擎架构的底层支撑，提供原子级操作。
+ * 高级放置逻辑由以下组件实现：
+ * - {@link PlacementContext} - 上下文封装
+ * - {@link CandidateSource} - 候选方向来源
+ * - {@link CandidateFilter} - 候选过滤器
+ * - {@link HitVecCalculator} - 点击位置计算器
+ * - {@link Rules} - 规则定义库
+ * - {@link PlacementResolver} - 策略组装器
+ * - {@link ResolverRegistry} - 策略注册表
  *
  * 修改日志：
- * - [Feature] 新增 Axis 轴向方块逻辑：原木、石英柱、锁链等根据目标轴向自动选择点击面。
- * - [Fix] isClickable 修复：允许含水方块作为支撑。
- * - [Fix] 楼梯/半砖逻辑优化。
+ * - [Refactor] 重构为规则引擎架构的底层工具类
+ * - [Feature] 新增 Axis 轴向方块逻辑：原木、石英柱、锁链等根据目标轴向自动选择点击面
+ * - [Fix] isClickable 修复：允许含水方块作为支撑
+ * - [Fix] 楼梯/半砖逻辑优化
  */
 public class BlockUtilHelper {
 
@@ -236,12 +248,14 @@ public class BlockUtilHelper {
         return true;
     }
 
-    // ==================== 方向获取逻辑 (核心重构) ====================
+    // ==================== 方向获取逻辑 (兼容层 - 委托给规则引擎) ====================
 
     /**
      * 获取普通方块的所有可交互方向
-     * 逻辑：不再区分优先级，一次性返回所有由实体方块支撑且符合NCP方向要求的面
+     *
+     * @deprecated 推荐使用 {@link ResolverRegistry#get(Block)} 获取策略后调用 resolveAll()
      */
+    @Deprecated
     public static List<Direction> getInteractDirections(BlockPos blockPos, World world, Vec3d eyePos,
             boolean strictDir) {
         List<Direction> result = new ArrayList<>();
@@ -271,8 +285,11 @@ public class BlockUtilHelper {
      * 核心修复逻辑：寻找最佳的可交互方向
      * 遍历所有结构上可行的方向，而不仅仅是第一个。
      * 如果开启了 Strict 模式且开启了视线检查，会逐个检查视线，返回第一个“既可行又可见”的方向。
+     *
+     * @deprecated 此方法已重构，现在委托给规则引擎 {@link ResolverRegistry}
      */
-    public static Direction findBestInteractDirection(BlockPos pos, BlockState requiredState, World world,
+    @Deprecated
+    public static Direction findBestInteractDirectionLegacy(BlockPos pos, BlockState requiredState, World world,
             net.minecraft.entity.player.PlayerEntity player, boolean strict, boolean checkLos) {
         Vec3d eyePos = player.getEyePos();
 
@@ -318,16 +335,47 @@ public class BlockUtilHelper {
         return null; // 所有方向都不可行或被遮挡
     }
 
+    /**
+     * 寻找最佳交互方向 (对外入口 - 委托给规则引擎)
+     *
+     * 此方法是规则引擎架构的主入口点。
+     * 内部委托给 {@link ResolverRegistry} 实现。
+     *
+     * @param pos           目标位置
+     * @param requiredState 目标方块状态
+     * @param world         游戏世界
+     * @param player        玩家实体
+     * @param strict        是否启用严格模式（NCP检查）
+     * @param checkLos      是否检查视线
+     * @return 最佳放置方向，如果无法放置则返回 null
+     */
+    public static Direction findBestInteractDirection(BlockPos pos, BlockState requiredState, World world,
+            PlayerEntity player, boolean strict, boolean checkLos) {
+        // 创建上下文
+        PlacementContext ctx = PlacementContext.of(world, pos, requiredState, player, strict, checkLos);
+
+        // 委托给规则引擎
+        return ResolverRegistry.resolve(ctx);
+    }
+
+    /**
+     * @deprecated 推荐使用 {@link #findBestInteractDirection}
+     */
+    @Deprecated
     public static Direction getInteractDirection(BlockPos blockPos, World world, Vec3d eyePos, boolean strictDir) {
         List<Direction> dirs = getInteractDirections(blockPos, world, eyePos, strictDir);
         return dirs.isEmpty() ? null : dirs.get(0);
     }
 
+    /**
+     * @deprecated 推荐使用 {@link #findBestInteractDirection}
+     */
+    @Deprecated
     public static Direction getInteractDirectionForSlab(BlockPos blockPos, World world, Vec3d eyePos, boolean strictDir) {
         return getInteractDirection(blockPos, world, eyePos, strictDir);
     }
 
-    // ==================== 专用放置逻辑 ====================
+    // ==================== 专用放置逻辑 (遗留方法 - 被规则引擎内部使用) ====================
 
     /**
      * [新增] 轴向方块放置逻辑 (Logs, Pillars, Hay Bales, Chain)

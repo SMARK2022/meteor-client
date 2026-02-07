@@ -33,6 +33,9 @@ import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.meteorclient.utils.printer.BlockUtilHelper;
+import meteordevelopment.meteorclient.utils.printer.PlacementContext;
+import meteordevelopment.meteorclient.utils.printer.PlacementResolver;
+import meteordevelopment.meteorclient.utils.printer.ResolverRegistry;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.*;
 import net.minecraft.block.enums.SlabType;
@@ -368,7 +371,7 @@ public class Printer extends Module {
 
     /**
      * 获取当前目标方块的放置方向
-     * 根据模式选择使用STRICT或LEGIT的方向检查
+     * 使用规则引擎架构，根据模式选择使用STRICT或LEGIT的方向检查
      *
      * @param pos 目标位置
      * @return 放置方向，如果无法放置则返回null
@@ -382,7 +385,11 @@ public class Printer extends Module {
         boolean strict = placeMode.get() == PlaceMode.STRICT;
         boolean checkLos = strict && checkLineOfSight.get();
 
-        return BlockUtilHelper.findBestInteractDirection(pos, requiredState, mc.world, mc.player, strict, checkLos);
+        // 创建放置上下文
+        PlacementContext ctx = PlacementContext.of(mc.world, pos, requiredState, mc.player, strict, checkLos);
+
+        // 使用规则引擎解析最佳方向
+        return ResolverRegistry.resolve(ctx);
     }
 
     /**
@@ -402,48 +409,44 @@ public class Printer extends Module {
     }
 
     /**
-     * [新增] 辅助方法：统一计算点击坐标
-     * 解决了楼梯和半砖需要特定点击偏移的问题
+     * 辅助方法：使用规则引擎统一计算点击坐标
+     * 委托给对应方块类型的 HitVecCalculator 处理
      */
     private Vec3d calculateHitVec(BlockPos neighborPos, Direction clickedSide, BlockState state) {
-        Block block = state.getBlock();
+        boolean strict = placeMode.get() == PlaceMode.STRICT;
+        boolean checkLos = strict && checkLineOfSight.get();
 
-        // 1. 半砖：根据 Top/Bottom 调整 Y
-        if (block instanceof SlabBlock && state.contains(SlabBlock.TYPE)) {
-            SlabType type = state.get(SlabBlock.TYPE);
-            return BlockUtilHelper.getHitVecForSlab(neighborPos, clickedSide, type);
-        }
+        // 创建放置上下文
+        PlacementContext ctx = PlacementContext.of(mc.world, neighborPos.offset(clickedSide), state, mc.player, strict, checkLos);
 
-        // 2. 楼梯：根据 Half (Top/Bottom) 调整 Y
-        if (block instanceof StairsBlock && state.contains(StairsBlock.HALF)) {
-            net.minecraft.block.enums.BlockHalf half = state.get(StairsBlock.HALF);
-            return BlockUtilHelper.getHitVecForStairs(neighborPos, clickedSide, half);
-        }
-
-        // 3. 默认：点击中心
-        return BlockUtilHelper.getHitVec(neighborPos, clickedSide);
+        // 获取对应的解析器并计算点击位置
+        PlacementResolver resolver = ResolverRegistry.get(state);
+        return resolver.calculateHitVec(ctx, neighborPos, clickedSide);
     }
 
     /**
      * 普通模式放置方块（LEGIT模式）
-     * 使用简化的逻辑，不进行严格的反作弊检查
+     * 使用规则引擎，不进行严格的反作弊检查
      *
      * @param pos           目标位置
      * @param requiredState 目标方块状态
      * @return 放置是否成功
      */
     private boolean placeBlockLegit(BlockPos pos, BlockState requiredState) {
-        // 使用智能搜索获取方向
-        Direction direction = BlockUtilHelper.findBestInteractDirection(pos, requiredState, mc.world, mc.player, false,
-                false);
+        // 创建放置上下文（LEGIT 模式：strict=false, checkLos=false）
+        PlacementContext ctx = PlacementContext.of(mc.world, pos, requiredState, mc.player, false, false);
+
+        // 使用规则引擎解析最佳方向
+        Direction direction = ResolverRegistry.resolve(ctx);
         if (direction == null)
             return false;
 
         BlockPos neighborPos = pos.offset(direction);
         Direction clickedSide = direction.getOpposite();
 
-        // [核心修复] 使用统一的 HitVec 计算逻辑，支持楼梯
-        Vec3d hitVec = calculateHitVec(neighborPos, clickedSide, requiredState);
+        // 使用规则引擎计算点击位置
+        PlacementResolver resolver = ResolverRegistry.get(requiredState);
+        Vec3d hitVec = resolver.calculateHitVec(ctx, neighborPos, clickedSide);
 
         // 执行放置
         if (rotate.get()) {
@@ -461,25 +464,27 @@ public class Printer extends Module {
 
     /**
      * 使用STRICT模式放置方块，包含反作弊绕过和方向检查
-     * 关键：hitVec（点击位置）决定了方块的朝向，特别是对半砖至关重要
+     * 使用规则引擎，hitVec（点击位置）决定了方块的朝向
      *
      * @param pos           目标位置（要放置的方块位置）
      * @param requiredState 目标方块状态（包含朝向属性）
      * @return 放置是否成功
      */
     private boolean placeBlockStrict(BlockPos pos, BlockState requiredState) {
-        // 使用新的智能搜索获取方向（包含视线检查）
-        Direction direction = BlockUtilHelper.findBestInteractDirection(pos, requiredState, mc.world, mc.player, true,
-                checkLineOfSight.get());
+        // 创建放置上下文（STRICT 模式：strict=true, checkLos 根据设置）
+        PlacementContext ctx = PlacementContext.of(mc.world, pos, requiredState, mc.player, true, checkLineOfSight.get());
 
+        // 使用规则引擎解析最佳方向
+        Direction direction = ResolverRegistry.resolve(ctx);
         if (direction == null)
             return false;
 
         BlockPos neighborPos = pos.offset(direction);
         Direction clickedSide = direction.getOpposite();
 
-        // [核心修复] 使用统一的 HitVec 计算逻辑，支持楼梯
-        Vec3d hitVec = calculateHitVec(neighborPos, clickedSide, requiredState);
+        // 使用规则引擎计算点击位置
+        PlacementResolver resolver = ResolverRegistry.get(requiredState);
+        Vec3d hitVec = resolver.calculateHitVec(ctx, neighborPos, clickedSide);
 
         // 计算旋转角度并执行放置
         double yaw = Rotations.getYaw(hitVec);
@@ -613,12 +618,11 @@ public class Printer extends Module {
                     continue;
                 }
             } else {
-                // STRICT 模式：使用新的智能搜索方法
-                // 这里不再手动检查 canPlaceTopSlab 等布尔值，而是直接看“有没有合法的放置方向”
-                Direction bestDir = BlockUtilHelper.findBestInteractDirection(pos, requiredState, mc.world, mc.player,
+                // STRICT 模式：使用规则引擎检查是否存在合法的放置方向
+                PlacementContext ctx = PlacementContext.of(mc.world, pos, requiredState, mc.player,
                         true, checkLineOfSight.get());
 
-                if (bestDir == null) {
+                if (!ResolverRegistry.canPlace(ctx)) {
                     continue;
                 }
             }
