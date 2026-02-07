@@ -19,6 +19,7 @@ package meteordevelopment.meteorclient.systems.modules.player;
 import fi.dy.masa.litematica.data.DataManager;
 import fi.dy.masa.litematica.world.SchematicWorldHandler;
 import fi.dy.masa.litematica.world.WorldSchematic;
+import com.mojang.blaze3d.systems.RenderSystem;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
@@ -148,6 +149,19 @@ public class Printer extends Module {
             .defaultValue(new SettingColor(20, 200, 20, 255))
             .build());
 
+    // 交互点显示设置
+    private final Setting<Boolean> renderHitVec = sgRender.add(new BoolSetting.Builder()
+            .name("render-hit-vec")
+            .description("Renders a cube at the block placement hit point for debugging.")
+            .defaultValue(true)
+            .build());
+
+    private final Setting<SettingColor> hitVecColor = sgRender.add(new ColorSetting.Builder()
+            .name("hit-vec-color")
+            .description("The color of the hit point cube.")
+            .defaultValue(new SettingColor(255, 100, 100, 255))
+            .build());
+
     // Internal state
     private final List<BlockPos> placePositions = new ArrayList<>();
     private final Map<BlockPos, Item> placeItems = new HashMap<>();
@@ -164,6 +178,9 @@ public class Printer extends Module {
 
     // 【新增】标记变量：记录当前潜行状态是否由打印机强制触发
     private boolean didPrinterForceSneak = false;
+
+    // 【新增】交互点显示用的hitVec（调试用途）
+    private Vec3d currentHitVec = null;
 
     /**
      * 方块放置状态机
@@ -433,6 +450,9 @@ public class Printer extends Module {
         PlacementResolver resolver = ResolverRegistry.get(requiredState);
         Vec3d hitVec = resolver.calculateHitVec(ctx, option);
 
+        // 【新增】保存hitVec用于显示
+        currentHitVec = hitVec;
+
         // 执行放置
         if (rotate.get()) {
             double yaw = Rotations.getYaw(hitVec);
@@ -470,6 +490,9 @@ public class Printer extends Module {
         // 使用规则引擎计算点击位置
         PlacementResolver resolver = ResolverRegistry.get(requiredState);
         Vec3d hitVec = resolver.calculateHitVec(ctx, option);
+
+        // 【新增】保存hitVec用于显示
+        currentHitVec = hitVec;
 
         // 计算旋转角度并执行放置
         double yaw = Rotations.getYaw(hitVec);
@@ -686,6 +709,61 @@ public class Printer extends Module {
         for (BlockPos pos : placePositions) {
             event.renderer.box(pos, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
         }
+
+        // 【新增】渲染交互点立方体
+        if (renderHitVec.get() && currentHitVec != null) {
+            renderHitVecCube(event);
+        }
+    }
+
+    /**
+     * 渲染交互点立方体
+     * 使用两层立方体：
+     * - 第一层：70%不透明度的立方体（正常深度测试，可被遮挡）
+     * - 第二层：30%不透明度的立方体（禁用深度测试，始终可见）
+     */
+    private void renderHitVecCube(Render3DEvent event) {
+        if (currentHitVec == null)
+            return;
+
+        // 立方体的半边长（总边长为0.1，所以每边0.05）
+        double halfSize = 0.05;
+
+        // 立方体的中心坐标
+        double x = currentHitVec.x;
+        double y = currentHitVec.y;
+        double z = currentHitVec.z;
+
+        // 获取颜色
+        SettingColor color = hitVecColor.get();
+
+        // 获取基础RGBA值
+        int r = color.r;
+        int g = color.g;
+        int b = color.b;
+
+        // 创建两种透明度的颜色
+        // 70%不透明度 = 30%透明 ≈ Alpha值 179 (255 * 0.7)
+        int alpha70 = Math.round(255 * 0.7f);
+        SettingColor color70 = new SettingColor(r, g, b, alpha70);
+
+        // 30%不透明度 = 70%透明 ≈ Alpha值 76 (255 * 0.3)
+        int alpha30 = Math.round(255 * 0.3f);
+        SettingColor color30 = new SettingColor(r, g, b, alpha30);
+
+        // 创建立方体的碰撞箱
+        net.minecraft.util.math.Box box = new net.minecraft.util.math.Box(
+                x - halfSize, y - halfSize, z - halfSize,
+                x + halfSize, y + halfSize, z + halfSize
+        );
+
+        // 第一层：70%不透明度的立方体（正常绘制，会被遮挡）
+        event.renderer.box(box, color70, color70, ShapeMode.Both, 0);
+
+        // 第二层：禁用深度测试，绘制30%不透明度的立方体（始终可见）
+        RenderSystem.disableDepthTest();
+        event.renderer.box(box, color30, color30, ShapeMode.Both, 0);
+        RenderSystem.enableDepthTest();
     }
 
     @Override
