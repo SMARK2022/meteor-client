@@ -392,59 +392,89 @@ public final class Rules {
 
         return true;
     };
+    // ==================== 辅助方法：计算玩家理论朝向 ====================
+
     /**
-     * 过滤器：活板门方向检查
-     * * 核心逻辑：
-     * 1. 贴墙放置 (Horizontal Click)：
-     * 方向完全由"点击的那个面"决定。必须确保我们点击的面能产生目标 FACING。
-     * 例如：目标朝北 -> 必须贴在南面墙的北面上 -> 点击面必须是 NORTH。
-     * * 2. 平面放置 (Vertical Click - UP/DOWN)：
-     * 方向由"玩家放置时的视线方向"决定。
-     * Minecraft 规则：放置后的活板门朝向 = 玩家水平朝向的相反方向 (Opposite)。
-     * * [修正逻辑]：
-     * 由于 Printer 会自动旋转视线去看向目标方块，我们不能用 player.getHorizontalFacing() (当前朝向)。
-     * 我们需要计算：如果玩家转头看向目标方块，那时候的水平朝向是什么？
+     * 计算玩家看向目标方块时的理论水平朝向
+     * 解决 Printer 不自动旋转导致无法通过 getHorizontalFacing() 获取正确朝向的问题。
+     */
+    private static Direction getTheoreticalPlayerFacing(PlacementContext ctx) {
+        // 1. 计算看向目标中心的 Yaw
+        double yawToTarget = Rotations.getYaw(ctx.targetCenter());
+
+        // 2. 将 Yaw 转换为标准的水平方向 [绝对兼容写法]
+        // Minecraft Yaw: 0=South, 90=West, 180=North, 270=East
+        int index = MathHelper.floor((yawToTarget / 90.0D) + 0.5D) & 3;
+
+        return switch (index) {
+            case 0 -> Direction.SOUTH;
+            case 1 -> Direction.WEST;
+            case 2 -> Direction.NORTH;
+            default -> Direction.EAST;
+        };
+    }
+
+    // ==================== 通用旋转过滤器 ====================
+
+    /**
+     * [通用过滤器] 检查：目标朝向 == 玩家视线方向 (Same)
+     * 适用方块：楼梯 (Stairs)、活塞 (Piston)、侦测器 (Observer)、发射器 等
+     * 逻辑：如果玩家看着北边，放出来的方块也是朝北的。
+     */
+    public static final CandidateFilter ROTATION_CHECK_SAME = (ctx, opt) -> {
+        // 楼梯的 FACING 属性
+        if (!ctx.hasProperty(StairsBlock.FACING))
+            return true; // 通用兼容：如果不是楼梯则尝试其他属性或跳过
+        // 注：如果是 Piston 等其他方块，这里需要适配属性 key，或者写成泛型
+
+        Direction targetFacing = ctx.getProperty(StairsBlock.FACING);
+
+        // 楼梯的放置不论点击哪个面（除了特殊的半截判定），其水平朝向总是由玩家视线决定
+        Direction playerFacing = getTheoreticalPlayerFacing(ctx);
+
+        return playerFacing == targetFacing;
+    };
+
+    /**
+     * [通用过滤器] 检查：目标朝向 == 玩家视线反方向 (Opposite)
+     * 适用方块：活板门 (平放时)、栅栏门、箱子、熔炉、梯子 (地面放置时) 等
+     * 逻辑：如果玩家看着北边，放出来的方块是朝南的（背对玩家）。
+     */
+    public static final CandidateFilter ROTATION_CHECK_OPPOSITE = (ctx, opt) -> {
+        // 这里以活板门为例，通用化时可修改为 ctx.getProperty(Properties.HORIZONTAL_FACING)
+        if (!ctx.hasProperty(TrapdoorBlock.FACING))
+            return true;
+
+        Direction targetFacing = ctx.getProperty(TrapdoorBlock.FACING);
+        Direction playerFacing = getTheoreticalPlayerFacing(ctx);
+
+        return playerFacing.getOpposite() == targetFacing;
+    };
+
+    // ==================== 具体的方块过滤器实现 ====================
+
+    /**
+     * 活板门方向检查
+     * 混合逻辑：
+     * 1. 贴墙 (Horizontal Click) -> 由点击面决定 (Face Dependent)
+     * 2. 平放 (Vertical Click) -> 由玩家视线反向决定 (Player Opposite)
      */
     public static final CandidateFilter TRAPDOOR_ROTATION_CHECK = (ctx, opt) -> {
-        // 如果没有 FACING 属性，不需要检查
         if (!ctx.hasProperty(TrapdoorBlock.FACING))
             return true;
 
         Direction targetFacing = ctx.getProperty(TrapdoorBlock.FACING);
         Direction clickedFace = opt.getClickedFace();
 
-        // --- 情况 A: 贴墙放置 (点击侧面) ---
-        // 此时与玩家视角无关，只与点击面有关
+        // --- A. 贴墙放置 ---
         if (clickedFace.getAxis().isHorizontal()) {
-            // 规则：点击面必须等于目标朝向
-            // (例如：Trapdoor要朝北，意味着背靠南边的墙，我们需要点击那面墙的北面)
+            // 必须贴在正确的墙上 (例如目标朝北，必须贴在南面墙的北面上)
             return clickedFace == targetFacing;
         }
 
-        // --- 情况 B: 平面放置 (点击 UP/DOWN) ---
-        // 此时与点击面无关，只与玩家相对位置有关
-
-        // 1. 计算"理论视线方向"
-        double yawToTarget = Rotations.getYaw(ctx.targetCenter());
-
-        // 2. 将 Yaw 转换为标准的水平方向 [核心修复]
-        // 0=South, 1=West, 2=North, 3=East (与 Direction.fromHorizontal 顺序一致)
-        // Minecraft Yaw: 0=South, 90=West, 180=North, 270=East
-        int index = MathHelper.floor((yawToTarget / 90.0D) + 0.5D) & 3;
-        Direction theoreticalPlayerFacing;
-        switch (index) {
-            case 0: theoreticalPlayerFacing = Direction.SOUTH; break;
-            case 1: theoreticalPlayerFacing = Direction.WEST; break;
-            case 2: theoreticalPlayerFacing = Direction.NORTH; break;
-            default: theoreticalPlayerFacing = Direction.EAST; break;
-        }
-
-        // 3. 计算放置后的结果
-        // Minecraft 规则：Trapdoor 的朝向会背对玩家
-        Direction resultingTrapdoorFacing = theoreticalPlayerFacing.getOpposite();
-
-        // 4. 比较
-        return resultingTrapdoorFacing == targetFacing;
+        // --- B. 平放 (地面/天花板) ---
+        // 复用通用的反向检查
+        return ROTATION_CHECK_OPPOSITE.test(ctx, opt);
     };
 
     // ==================== HitVecCalculators (点击位置计算器) ====================

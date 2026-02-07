@@ -95,6 +95,7 @@ public final class ResolverRegistry {
             // 过滤：基础检查 + 楼梯特殊检查
             .addFilter(Rules.CLICKABLE_NEIGHBOR)
             .addFilter(Rules.NO_MISMATCHED_ALIGNMENT)
+            .addFilter(Rules.ROTATION_CHECK_SAME)
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
             // 点击位置
