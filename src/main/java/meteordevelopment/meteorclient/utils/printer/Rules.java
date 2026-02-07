@@ -204,6 +204,94 @@ public final class Rules {
         );
     };
 
+    // ==================== 漏斗专用逻辑 ====================
+
+    /**
+     * 来源：漏斗放置方向
+     * 规则：
+     * 1. 如果目标漏斗朝下 (DOWN)：可以点击任何方块的顶面/底面，或者点击下方方块的顶面。
+     * 2. 如果目标漏斗朝侧面 (e.g. NORTH)：必须点击北边那个邻居的 SOUTH 面（即把嘴插进北边的方块里）。
+     * 注意：漏斗不能朝上 (UP)。
+     */
+    public static final CandidateSource HOPPER_SUPPORT = ctx -> {
+        if (!ctx.hasProperty(HopperBlock.FACING))
+            return Stream.empty();
+        Direction facing = ctx.getProperty(HopperBlock.FACING);
+
+        // 漏斗嘴不能朝上
+        if (facing == Direction.UP)
+            return Stream.empty();
+
+        // 情况 A: 漏斗朝下
+        // 只要不点击侧面让它变成侧向，点哪里都会默认朝下。
+        // 但为了稳定性，我们优先找"上方"或"下方"的邻居，点击它们的垂直面。
+        if (facing == Direction.DOWN) {
+            return Stream.of(Direction.UP, Direction.DOWN)
+                    .map(PlacementOption::neighbor);
+        }
+
+        // 情况 B: 漏斗朝向侧面 (e.g. NORTH)
+        // 必须依靠在该方向的邻居上。
+        // 比如：漏斗要朝北，必须依靠在北边的方块上。
+        return Stream.of(PlacementOption.neighbor(facing));
+    };
+
+    // ==================== 延伸类 (潜影盒/末地烛) 专用逻辑 ====================
+
+    /**
+     * 来源：点击面决定朝向 (Click Face Dependent)
+     * 适用：Shulker Box, End Rod, Lightning Rod
+     * 规则：目标朝向哪里，就必须去点击那个方向的邻居的相反面。
+     * 例如：要放一个朝上的 End Rod，必须点击下方方块的 UP 面。
+     */
+    public static final CandidateSource FACE_DEPENDENT_SUPPORT = ctx -> {
+        // 尝试获取 FACING 属性
+        Direction facing = null;
+        if (ctx.hasProperty(Properties.FACING))
+            facing = ctx.getProperty(Properties.FACING);
+        else if (ctx.hasProperty(Properties.HOPPER_FACING))
+            facing = ctx.getProperty(Properties.HOPPER_FACING); // 兼容性
+
+        if (facing == null)
+            return Stream.empty();
+
+        // 逻辑：如果我要方块朝向 NORTH，我必须依附在 SOUTH 边的方块上（点击它的 NORTH 面）
+        // 错了！潜影盒/末地烛的逻辑是：点击面 = 朝向。
+        // 所以：如果我要方块朝向 NORTH，我必须找到 SOUTH 边的邻居，点击它的 NORTH 面。
+        // 等等，仔细思考：
+        // 潜影盒：点击地面(UP) -> 朝上(UP)。
+        // 也就是：TargetFacing = ClickedFace。
+        // 所以：如果目标是 UP，我需要 ClickedFace = UP。这意味着邻居在 DOWN。
+        // 如果目标是 NORTH，我需要 ClickedFace = NORTH。这意味着邻居在 SOUTH。
+
+        return Stream.of(PlacementOption.neighbor(facing.getOpposite()));
+    };
+
+    /**
+     * 来源：仅水平延伸支持
+     * 适用于：梯子、墙火把、墙告示牌、绊线钩等。
+     * 逻辑：
+     * 这些方块必须依附在墙上。
+     * 如果目标是 FACING=NORTH（朝北），说明它背靠南边的墙。
+     * 我们必须寻找 SOUTH 边的邻居，并点击它的 NORTH 面。
+     * * 严禁生成 UP/DOWN 候选，防止放置成站立变种。
+     */
+    public static final CandidateSource HORIZONTAL_EXTEND_SUPPORT = ctx -> {
+        // 尝试获取 FACING 属性
+        // 大多数此类方块使用 Properties.HORIZONTAL_FACING
+        if (!ctx.hasProperty(Properties.HORIZONTAL_FACING))
+            return Stream.empty();
+
+        Direction facing = ctx.getProperty(Properties.HORIZONTAL_FACING);
+
+        // 逻辑：Facing = 点击面。
+        // 要朝北 (NORTH)，必须点击邻居的 NORTH 面。
+        // 邻居在哪里？在反方向 (SOUTH)。
+        return Stream.of(PlacementOption.neighbor(facing.getOpposite()));
+    };
+
+
+
     // ==================== Filters (过滤器) ====================
 
     /**
@@ -488,6 +576,80 @@ public final class Rules {
 
         // --- B. 平放 (地面/天花板) ---
         // 复用通用的反向检查
+        return ROTATION_CHECK_OPPOSITE.test(ctx, opt);
+    };
+
+    /**
+     * 过滤器：漏斗方向检查
+     */
+    public static final CandidateFilter HOPPER_CHECK = (ctx, opt) -> {
+        if (!ctx.hasProperty(HopperBlock.FACING))
+            return true;
+        Direction targetFacing = ctx.getProperty(HopperBlock.FACING);
+        Direction clickedFace = opt.getClickedFace();
+
+        // 1. 如果目标是朝下
+        if (targetFacing == Direction.DOWN) {
+            // 只要不点击侧面即可（点击侧面会让漏斗横向）
+            // 必须点击 UP 或 DOWN 面
+            return clickedFace.getAxis().isVertical();
+        }
+
+        // 2. 如果目标是朝侧面 (e.g. NORTH)
+        // 必须点击该方向邻居的相反面 (e.g. 点击北边方块的 SOUTH 面)
+        // 也就是：点击的面必须与目标朝向相反
+        return clickedFace == targetFacing.getOpposite();
+    };
+
+    /**
+     * 过滤器：点击面一致性检查
+     * 确保点击的面 (ClickedFace) 等于目标朝向 (TargetFacing)
+     */
+    public static final CandidateFilter FACE_DEPENDENT_CHECK = (ctx, opt) -> {
+        Direction facing = null;
+        if (ctx.hasProperty(Properties.FACING))
+            facing = ctx.getProperty(Properties.FACING);
+
+        if (facing == null)
+            return true;
+
+        // 规则简单粗暴：点击哪个面，方块就朝向哪个面
+        return opt.getClickedFace() == facing;
+    };
+
+    /**
+     * [新增] 过滤器：禁止点击地板 (UP 面)
+     * 用于防止 WallTorch 等方块在点击地面时退化为 Standing 变种。
+     * 允许点击侧面（正常贴墙）和天花板（DOWN 面）。
+     */
+    public static final CandidateFilter BAN_FLOOR_CLICK = (ctx, opt) -> {
+        // 如果点击的是 UP 面 (即点击了地上的方块)，拒绝
+        return opt.getClickedFace() != Direction.UP;
+    };
+
+    /**
+     * [新增] 混合旋转检查 (墙面/视线)
+     * 适用于 WallTorch, WallSign 等。
+     * 逻辑：
+     * 1. 如果点击侧面 (贴墙)：方向由点击面决定 (Face Dependent)。
+     * 2. 如果点击垂直面 (天花板)：方向由玩家视线决定 (Player Rotation)。
+     */
+    public static final CandidateFilter WALL_DEGENERATE_ROTATION_CHECK = (ctx, opt) -> {
+        // 尝试获取水平朝向属性
+        if (!ctx.hasProperty(Properties.HORIZONTAL_FACING))
+            return true;
+        Direction targetFacing = ctx.getProperty(Properties.HORIZONTAL_FACING);
+
+        Direction clickedFace = opt.getClickedFace();
+
+        // 情况 A: 贴墙放置
+        if (clickedFace.getAxis().isHorizontal()) {
+            // 必须贴在正确的墙上 (点击面 == 目标朝向)
+            return clickedFace == targetFacing;
+        }
+
+        // 情况 B: 点击天花板/地面 (虽然 BAN_FLOOR_CLICK 会过滤掉地面，但逻辑上通用)
+        // 此时依赖玩家视线
         return ROTATION_CHECK_OPPOSITE.test(ctx, opt);
     };
 

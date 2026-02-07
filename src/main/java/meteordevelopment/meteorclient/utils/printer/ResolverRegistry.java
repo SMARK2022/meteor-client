@@ -140,6 +140,61 @@ public final class ResolverRegistry {
             .hitVec(Rules.TRAPDOOR); // 之前的 HitVec
 
     /**
+     * 漏斗放置策略
+     */
+    public static final PlacementResolver HOPPER_RESOLVER = PlacementResolver.create("hopper")
+            .addSource(Rules.HOPPER_SUPPORT)
+            .addFilter(Rules.CLICKABLE_NEIGHBOR)
+            .addFilter(Rules.HOPPER_CHECK)
+            .addFilter(Rules.NCP_STRICT)
+            .addFilter(Rules.LINE_OF_SIGHT)
+            .hitVec(Rules.CENTER); // 漏斗点中心即可
+
+    /**
+     * 延伸方块策略 (潜影盒、末地烛)
+     */
+    public static final PlacementResolver FACE_EXTEND_RESOLVER = PlacementResolver.create("face_extend")
+            .addSource(Rules.FACE_DEPENDENT_SUPPORT)
+            .addFilter(Rules.CLICKABLE_NEIGHBOR)
+            .addFilter(Rules.FACE_DEPENDENT_CHECK)
+            .addFilter(Rules.NCP_STRICT)
+            .addFilter(Rules.LINE_OF_SIGHT)
+            .hitVec(Rules.CENTER); // 点中心即可
+
+    /**
+     * [新增] 严格贴墙策略 (梯子、绊线钩、可可豆)
+     * 只能点击侧面，绝对不产生 UP/DOWN 候选。
+     */
+    public static final PlacementResolver PURE_WALL_RESOLVER = PlacementResolver.create("pure_wall")
+            // 来源：只生成水平邻居的候选 (targetFacing 的反方向)
+            .addSource(Rules.HORIZONTAL_EXTEND_SUPPORT)
+            .addSource(Rules.ALL_VERTICAL)
+            // 过滤：
+            .addFilter(Rules.CLICKABLE_NEIGHBOR)
+            .addFilter(Rules.WALL_DEGENERATE_ROTATION_CHECK) // 侧面看墙，顶面看人
+            .addFilter(Rules.NCP_STRICT)
+            .addFilter(Rules.LINE_OF_SIGHT)
+            .hitVec(Rules.CENTER);
+
+    /**
+     * [新增] 地板退化策略 (墙火把、墙牌、墙珊瑚)
+     * 允许点击侧面和天花板，但**严格禁止点击地板**。
+     */
+    public static final PlacementResolver WALL_DEGENERATE_RESOLVER = PlacementResolver.create("wall_degenerate")
+            // 来源：水平支撑 (找墙) + 垂直支撑 (找天花板)
+            // 注意：这里我们使用 union 组合两个 Source
+            .addSource(Rules.HORIZONTAL_EXTEND_SUPPORT)
+            .addSource(Rules.ALL_VERTICAL)
+            // 过滤：
+            .addFilter(Rules.CLICKABLE_NEIGHBOR)
+            .addFilter(Rules.BAN_FLOOR_CLICK) // <--- 核心：禁止点地板，防止退化
+            .addFilter(Rules.WALL_DEGENERATE_ROTATION_CHECK) // 侧面看墙，顶面看人
+            .addFilter(Rules.NCP_STRICT)
+            .addFilter(Rules.LINE_OF_SIGHT)
+            .hitVec(Rules.CENTER);
+
+
+    /**
      * 默认方块放置策略
      *
      * 来源：
@@ -191,6 +246,35 @@ public final class ResolverRegistry {
             return TRAPDOOR_RESOLVER;
         }
 
+        // 在 get(Block block) 中注册：
+        if (block instanceof HopperBlock) {
+            return HOPPER_RESOLVER;
+        }
+        if (block instanceof ShulkerBoxBlock || block instanceof EndRodBlock || block instanceof LightningRodBlock
+                || block instanceof AmethystClusterBlock) {
+            return FACE_EXTEND_RESOLVER;
+        }
+
+        // 1. 严格贴墙类 (Pure Wall)
+        if (block instanceof LadderBlock
+                || block instanceof TripwireHookBlock
+                || block instanceof CocoaBlock) {
+            return PURE_WALL_RESOLVER;
+        }
+
+        // 2. 地板退化类 (Degenerate on Floor)
+        // 这些方块在墙上正常，点地板会变身，点天花板(可能)走视线逻辑
+        if (block instanceof WallTorchBlock // 墙上火把
+                || block instanceof WallSignBlock // 墙上告示牌
+                || block instanceof WallBannerBlock // 墙上旗帜
+                || block instanceof WallSkullBlock // 墙上头颅
+                || block instanceof DeadCoralWallFanBlock // 墙上死珊瑚
+                || block instanceof CoralWallFanBlock // 墙上活珊瑚
+                // 1.20+ 新增
+                || block instanceof WallHangingSignBlock) {
+            return WALL_DEGENERATE_RESOLVER;
+        }
+
         // 4. 默认
         return DEFAULT_RESOLVER;
     }
@@ -223,6 +307,36 @@ public final class ResolverRegistry {
         // 在 get(Block block) 方法中添加：
         if (block instanceof TrapdoorBlock) {
             return TRAPDOOR_RESOLVER;
+        }
+
+        // 在 get(Block block) 中注册：
+        if (block instanceof HopperBlock) {
+            return HOPPER_RESOLVER;
+        }
+        if (block instanceof ShulkerBoxBlock || block instanceof EndRodBlock || block instanceof LightningRodBlock
+                || block instanceof AmethystClusterBlock) {
+            return FACE_EXTEND_RESOLVER;
+        }
+
+        // 1. 严格贴墙类 (Pure Wall)
+        if (block instanceof LadderBlock
+                || block instanceof TripwireHookBlock
+                || block instanceof CocoaBlock) {
+            return PURE_WALL_RESOLVER;
+        }
+
+        // 2. 地板退化类 (Degenerate on Floor)
+        // 这些方块在墙上正常，点地板会变身，点天花板(可能)走视线逻辑
+        if (block instanceof WallTorchBlock // 墙上火把
+                || block instanceof WallSignBlock // 墙上告示牌
+                || block instanceof WallBannerBlock // 墙上旗帜
+                || block instanceof WallSkullBlock // 墙上头颅
+                || block instanceof DeadCoralWallFanBlock // 墙上死珊瑚
+                || block instanceof CoralWallFanBlock // 墙上活珊瑚
+        // 1.20+ 新增
+        || block instanceof WallHangingSignBlock
+        ) {
+            return WALL_DEGENERATE_RESOLVER;
         }
 
         // 4. 默认
