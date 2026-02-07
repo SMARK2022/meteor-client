@@ -25,8 +25,8 @@ import net.minecraft.state.property.Properties;
  * 使用示例：
  * <pre>
  * PlacementResolver resolver = ResolverRegistry.get(blockState.getBlock());
- * Direction dir = resolver.resolve(context);
- * Vec3d hitVec = resolver.calculateHitVec(context, dir);
+ * PlacementOption opt = resolver.resolve(context);
+ * Vec3d hitVec = resolver.calculateHitVec(context, opt);
  * </pre>
  */
 public final class ResolverRegistry {
@@ -39,11 +39,13 @@ public final class ResolverRegistry {
      * 半砖放置策略
      *
      * 来源（并集）：
+     * - 半砖自我补全（双层半砖优先尝试补全）
      * - 所有水平方向（东南西北）
      * - 半砖特定垂直支撑（BOTTOM->DOWN, TOP->UP）
      *
      * 过滤（交集）：
      * - 邻居可点击
+     * - 限制 Self 操作只针对半砖
      * - 异种半砖检查（防止 BOTTOM 靠 TOP）
      * - 半砖垂直面检查
      * - NCP 方向检查（严格模式）
@@ -52,11 +54,13 @@ public final class ResolverRegistry {
      * 点击位置：半砖专用（根据 TOP/BOTTOM 调整 Y 偏移）
      */
     public static final PlacementResolver SLAB_RESOLVER = PlacementResolver.create("slab")
-        // 来源：水平 + 垂直支撑
+        // 来源：自我补全 + 水平 + 垂直支撑
+        .addSource(Rules.SLAB_SELF_COMPLETE)
         .addSource(Rules.ALL_HORIZONTAL)
         .addSource(Rules.SLAB_VERTICAL_SUPPORT)
         // 过滤：基础检查 + 半砖特殊检查
         .addFilter(Rules.CLICKABLE_NEIGHBOR)
+        .addFilter(Rules.VALID_SELF_TARGET) // 确保不乱点自己
         .addFilter(Rules.NO_MISMATCHED_SLABS)
         .addFilter(Rules.SLAB_VERTICAL_FACE)
         .addFilter(Rules.NCP_STRICT)
@@ -243,9 +247,9 @@ public final class ResolverRegistry {
      * - 这样能最大化放置成功率（两种方向都可以开始建造）
      *
      * @param ctx 放置上下文
-     * @return 最佳放置方向，如果无法放置则返回 null
+     * @return 最佳放置选项，如果无法放置则返回 null
      */
-    public static net.minecraft.util.math.Direction resolve(PlacementContext ctx) {
+    public static PlacementOption resolve(PlacementContext ctx) {
         // 对于双层半砖在空气位置，同时尝试两种放置方式
         if (ctx.hasProperty(SlabBlock.TYPE) &&
             ctx.getProperty(SlabBlock.TYPE) == SlabType.DOUBLE &&
@@ -254,7 +258,7 @@ public final class ResolverRegistry {
             // 先尝试放 BOTTOM
             PlacementContext bottomCtx = ctx.withTargetState(ctx.targetState().with(SlabBlock.TYPE, SlabType.BOTTOM));
             PlacementResolver resolver = get(bottomCtx.targetState());
-            net.minecraft.util.math.Direction result = resolver.resolve(bottomCtx);
+            PlacementOption result = resolver.resolve(bottomCtx);
             if (result != null) {
                 return result;
             }

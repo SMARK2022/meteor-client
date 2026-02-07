@@ -16,10 +16,10 @@ import java.util.stream.Stream;
  * 通过链式调用构建，实现声明式的逻辑定义。
  *
  * 核心执行流程：
- * 1. 从所有 Source 获取候选方向（取并集）
+ * 1. 从所有 Source 获取候选选项（取并集）
  * 2. 去重
  * 3. 依次应用所有 Filter（取交集）
- * 4. 返回第一个通过所有检查的方向
+ * 4. 返回第一个通过所有检查的选项
  *
  * 使用示例：
  * <pre>
@@ -32,7 +32,7 @@ import java.util.stream.Stream;
  *     .addFilter(Rules.LINE_OF_SIGHT)
  *     .hitVec(Rules.SLAB);
  *
- * Direction dir = resolver.resolve(context);
+ * PlacementOption opt = resolver.resolve(context);
  * </pre>
  */
 public class PlacementResolver {
@@ -86,42 +86,42 @@ public class PlacementResolver {
     // ==================== 核心解析方法 ====================
 
     /**
-     * 解析最佳放置方向
+     * 解析最佳放置选项
      *
      * 执行流程：
-     * 1. 合并所有 Source 的候选方向（并集）
+     * 1. 合并所有 Source 的候选选项（并集）
      * 2. 去重
      * 3. 应用所有 Filter（交集）
-     * 4. 返回第一个通过的方向
+     * 4. 返回第一个通过的选项
      *
      * @param ctx 放置上下文
-     * @return 最佳方向，如果没有可行方向则返回 null
+     * @return 最佳选项，如果没有可行选项则返回 null
      */
-    public Direction resolve(PlacementContext ctx) {
+    public PlacementOption resolve(PlacementContext ctx) {
         return resolveOptional(ctx).orElse(null);
     }
 
     /**
-     * 解析最佳放置方向（Optional 版本）
+     * 解析最佳放置选项（Optional 版本）
      */
-    public Optional<Direction> resolveOptional(PlacementContext ctx) {
+    public Optional<PlacementOption> resolveOptional(PlacementContext ctx) {
         return getCandidateStream(ctx)
-            .filter(dir -> passAllFilters(ctx, dir))
+            .filter(opt -> passAllFilters(ctx, opt))
             .findFirst();
     }
 
     /**
-     * 获取所有通过过滤的方向列表
+     * 获取所有通过过滤的选项列表
      * 用于需要多个候选的场景
      */
-    public List<Direction> resolveAll(PlacementContext ctx) {
+    public List<PlacementOption> resolveAll(PlacementContext ctx) {
         return getCandidateStream(ctx)
-            .filter(dir -> passAllFilters(ctx, dir))
+            .filter(opt -> passAllFilters(ctx, opt))
             .toList();
     }
 
     /**
-     * 检查是否存在至少一个可行方向
+     * 检查是否存在至少一个可行选项
      */
     public boolean canResolve(PlacementContext ctx) {
         return resolveOptional(ctx).isPresent();
@@ -132,34 +132,40 @@ public class PlacementResolver {
     /**
      * 计算点击位置
      *
-     * @param ctx         放置上下文
-     * @param neighborPos 邻居方块位置
-     * @param clickedSide 点击的面
+     * @param ctx 放置上下文
+     * @param opt 放置选项
      * @return 精确的点击坐标
      */
-    public Vec3d calculateHitVec(PlacementContext ctx, BlockPos neighborPos, Direction clickedSide) {
-        return hitVecCalculator.calculate(ctx, neighborPos, clickedSide);
+    public Vec3d calculateHitVec(PlacementContext ctx, PlacementOption opt) {
+        return hitVecCalculator.calculate(ctx, opt);
     }
 
     /**
-     * 根据解析结果计算点击位置
-     *
-     * @param ctx 放置上下文
-     * @param dir 解析得到的方向
-     * @return 精确的点击坐标
+     * @deprecated 请使用 calculateHitVec(PlacementContext, PlacementOption)
      */
+    @Deprecated
+    public Vec3d calculateHitVec(PlacementContext ctx, BlockPos neighborPos, Direction clickedSide) {
+        // 为了兼容性保留，但在新的架构下，最好总是使用 PlacementOption
+        // 如果我们必须构造一个 PlacementOption...
+        // 这里无法准确重建 isSelf，只能假设是 neighbor
+        // 实际上这不应该被调用了，除非遗留代码
+        return calculateHitVec(ctx, PlacementOption.neighbor(clickedSide.getOpposite()));
+    }
+    
+    /**
+     * @deprecated 请使用 calculateHitVec(PlacementContext, PlacementOption)
+     */
+    @Deprecated
     public Vec3d calculateHitVec(PlacementContext ctx, Direction dir) {
-        BlockPos neighborPos = ctx.neighborPos(dir);
-        Direction clickedSide = dir.getOpposite();
-        return calculateHitVec(ctx, neighborPos, clickedSide);
+         return calculateHitVec(ctx, PlacementOption.neighbor(dir));
     }
 
     // ==================== 内部方法 ====================
 
     /**
-     * 获取合并后的候选方向流（去重）
+     * 获取合并后的候选选项流（去重）
      */
-    private Stream<Direction> getCandidateStream(PlacementContext ctx) {
+    private Stream<PlacementOption> getCandidateStream(PlacementContext ctx) {
         if (sources.isEmpty()) {
             return Stream.empty();
         }
@@ -170,11 +176,11 @@ public class PlacementResolver {
     }
 
     /**
-     * 检查方向是否通过所有过滤器
+     * 检查选项是否通过所有过滤器
      */
-    private boolean passAllFilters(PlacementContext ctx, Direction dir) {
+    private boolean passAllFilters(PlacementContext ctx, PlacementOption opt) {
         for (CandidateFilter filter : filters) {
-            if (!filter.test(ctx, dir)) {
+            if (!filter.test(ctx, opt)) {
                 return false;
             }
         }

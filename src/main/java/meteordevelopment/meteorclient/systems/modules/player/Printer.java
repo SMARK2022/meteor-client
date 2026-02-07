@@ -34,6 +34,7 @@ import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.meteorclient.utils.printer.BlockUtilHelper;
 import meteordevelopment.meteorclient.utils.printer.PlacementContext;
+import meteordevelopment.meteorclient.utils.printer.PlacementOption;
 import meteordevelopment.meteorclient.utils.printer.PlacementResolver;
 import meteordevelopment.meteorclient.utils.printer.ResolverRegistry;
 import meteordevelopment.orbit.EventHandler;
@@ -283,13 +284,13 @@ public class Printer extends Module {
                     }
 
                     // 检查是否需要潜行（预先计算，以便在 SWITCHING_ITEM 状态使用）
-                    Direction direction = getPlacementDirection(currentTargetPos);
-                    if (direction == null) {
+                    PlacementOption option = getPlacementDirection(currentTargetPos);
+                    if (option == null) {
                         resetStateMachine();
                         return;
                     }
 
-                    BlockPos neighborPos = currentTargetPos.offset(direction);
+                    BlockPos neighborPos = option.getInteractPos(currentTargetPos);
                     BlockState neighborState = mc.world.getBlockState(neighborPos);
                     currentBlockNeedsSneak = BlockUtilHelper.SNEAK_BLOCKS.contains(neighborState.getBlock());
                     currentPlayerIsSneaking = mc.player.isSneaking();
@@ -376,7 +377,7 @@ public class Printer extends Module {
      * @param pos 目标位置
      * @return 放置方向，如果无法放置则返回null
      */
-    private Direction getPlacementDirection(BlockPos pos) {
+    private PlacementOption getPlacementDirection(BlockPos pos) {
         WorldSchematic worldSchematic = SchematicWorldHandler.getSchematicWorld();
         if (worldSchematic == null)
             return null;
@@ -409,22 +410,6 @@ public class Printer extends Module {
     }
 
     /**
-     * 辅助方法：使用规则引擎统一计算点击坐标
-     * 委托给对应方块类型的 HitVecCalculator 处理
-     */
-    private Vec3d calculateHitVec(BlockPos neighborPos, Direction clickedSide, BlockState state) {
-        boolean strict = placeMode.get() == PlaceMode.STRICT;
-        boolean checkLos = strict && checkLineOfSight.get();
-
-        // 创建放置上下文
-        PlacementContext ctx = PlacementContext.of(mc.world, neighborPos.offset(clickedSide), state, mc.player, strict, checkLos);
-
-        // 获取对应的解析器并计算点击位置
-        PlacementResolver resolver = ResolverRegistry.get(state);
-        return resolver.calculateHitVec(ctx, neighborPos, clickedSide);
-    }
-
-    /**
      * 普通模式放置方块（LEGIT模式）
      * 使用规则引擎，不进行严格的反作弊检查
      *
@@ -437,16 +422,16 @@ public class Printer extends Module {
         PlacementContext ctx = PlacementContext.of(mc.world, pos, requiredState, mc.player, false, false);
 
         // 使用规则引擎解析最佳方向
-        Direction direction = ResolverRegistry.resolve(ctx);
-        if (direction == null)
+        PlacementOption option = ResolverRegistry.resolve(ctx);
+        if (option == null)
             return false;
 
-        BlockPos neighborPos = pos.offset(direction);
-        Direction clickedSide = direction.getOpposite();
+        BlockPos neighborPos = option.getInteractPos(pos);
+        Direction clickedSide = option.getClickedFace();
 
         // 使用规则引擎计算点击位置
         PlacementResolver resolver = ResolverRegistry.get(requiredState);
-        Vec3d hitVec = resolver.calculateHitVec(ctx, neighborPos, clickedSide);
+        Vec3d hitVec = resolver.calculateHitVec(ctx, option);
 
         // 执行放置
         if (rotate.get()) {
@@ -475,16 +460,16 @@ public class Printer extends Module {
         PlacementContext ctx = PlacementContext.of(mc.world, pos, requiredState, mc.player, true, checkLineOfSight.get());
 
         // 使用规则引擎解析最佳方向
-        Direction direction = ResolverRegistry.resolve(ctx);
-        if (direction == null)
+        PlacementOption option = ResolverRegistry.resolve(ctx);
+        if (option == null)
             return false;
 
-        BlockPos neighborPos = pos.offset(direction);
-        Direction clickedSide = direction.getOpposite();
+        BlockPos neighborPos = option.getInteractPos(pos);
+        Direction clickedSide = option.getClickedFace();
 
         // 使用规则引擎计算点击位置
         PlacementResolver resolver = ResolverRegistry.get(requiredState);
-        Vec3d hitVec = resolver.calculateHitVec(ctx, neighborPos, clickedSide);
+        Vec3d hitVec = resolver.calculateHitVec(ctx, option);
 
         // 计算旋转角度并执行放置
         double yaw = Rotations.getYaw(hitVec);

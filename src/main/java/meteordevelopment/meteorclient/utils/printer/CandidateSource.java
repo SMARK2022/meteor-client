@@ -30,9 +30,9 @@ public interface CandidateSource {
      * 获取候选方向流
      *
      * @param ctx 放置上下文，包含所有环境信息
-     * @return 候选方向的 Stream（可能为空）
+     * @return 候选放置选项的 Stream（可能为空）
      */
-    Stream<Direction> getCandidates(PlacementContext ctx);
+    Stream<PlacementOption> getCandidates(PlacementContext ctx);
 
     /**
      * 组合两个 Source，返回两者候选的并集
@@ -52,12 +52,12 @@ public interface CandidateSource {
     }
 
     /**
-     * 从固定方向数组创建 Source
+     * 从固定方向数组创建 Source (默认为 Neighbor 模式)
      *
      * @param directions 方向数组
      * @return 产生这些方向的 Source
      */
     static CandidateSource of(Direction... directions) {
-        return ctx -> Stream.of(directions);
+        return ctx -> Stream.of(directions).map(PlacementOption::neighbor);
     }
 }

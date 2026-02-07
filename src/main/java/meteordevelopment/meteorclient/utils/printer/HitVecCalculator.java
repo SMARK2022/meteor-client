@@ -28,12 +28,11 @@ public interface HitVecCalculator {
     /**
      * 计算点击位置
      *
-     * @param ctx         放置上下文
-     * @param neighborPos 邻居方块位置（被点击的方块）
-     * @param clickedSide 点击的面（邻居方块的哪个面）
+     * @param ctx 放置上下文
+     * @param opt 放置选项
      * @return 精确的点击坐标
      */
-    Vec3d calculate(PlacementContext ctx, BlockPos neighborPos, Direction clickedSide);
+    Vec3d calculate(PlacementContext ctx, PlacementOption opt);
 
     /**
      * 组合计算器：如果第一个返回 null，则使用第二个
@@ -42,9 +41,9 @@ public interface HitVecCalculator {
      * @return 组合后的计算器
      */
     default HitVecCalculator orElse(HitVecCalculator fallback) {
-        return (ctx, neighborPos, clickedSide) -> {
-            Vec3d result = this.calculate(ctx, neighborPos, clickedSide);
-            return result != null ? result : fallback.calculate(ctx, neighborPos, clickedSide);
+        return (ctx, opt) -> {
+            Vec3d result = this.calculate(ctx, opt);
+            return result != null ? result : fallback.calculate(ctx, opt);
         };
     }
 

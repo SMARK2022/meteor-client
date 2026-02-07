@@ -50,26 +50,67 @@ public final class Rules {
      * 仅产生方向，不做任何过滤
      */
     public static final CandidateSource ALL_HORIZONTAL = ctx ->
-        Stream.of(Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST);
+        Stream.of(Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST)
+              .map(PlacementOption::neighbor);
 
     /**
      * 来源：所有垂直方向（上下）
      */
     public static final CandidateSource ALL_VERTICAL = ctx ->
-        Stream.of(Direction.UP, Direction.DOWN);
+        Stream.of(Direction.UP, Direction.DOWN)
+              .map(PlacementOption::neighbor);
 
     /**
      * 来源：所有六个方向
      */
     public static final CandidateSource ALL_DIRECTIONS = ctx ->
-        Stream.of(Direction.values());
+        Stream.of(Direction.values())
+              .map(PlacementOption::neighbor);
+
+    /**
+     * [新增] 半砖自我补全来源
+     * 专门用于处理双层半砖。
+     * - 如果当前是 BOTTOM，产生 Self(UP) -> 点击顶面
+     * - 如果当前是 TOP，产生 Self(DOWN) -> 点击底面
+     */
+    public static final CandidateSource SLAB_SELF_COMPLETE = ctx -> {
+        // 必须要是双层半砖的目标，且当前方块已经是单层半砖
+        if (!ctx.hasProperty(SlabBlock.TYPE)) return Stream.empty();
+        if (ctx.getProperty(SlabBlock.TYPE) != SlabType.DOUBLE) return Stream.empty();
+
+        var current = ctx.world().getBlockState(ctx.targetPos());
+        if (!(current.getBlock() instanceof SlabBlock)) return Stream.empty();
+        
+        SlabType currentType = current.get(SlabBlock.TYPE);
+
+        if (currentType == SlabType.BOTTOM) {
+            // 当前是下半，补上半 -> 点击自身的 UP 面
+            return Stream.of(PlacementOption.self(Direction.UP));
+        }
+        if (currentType == SlabType.TOP) {
+            // 当前是上半，补下半 -> 点击自身的 DOWN 面
+            return Stream.of(PlacementOption.self(Direction.DOWN));
+        }
+        
+        return Stream.empty();
+    };
+
+    /**
+     * [未来扩展] 含水方块来源
+     * 如果目标含水，尝试点击自身的 UP 面 (通常倒水都是点上面)
+     */
+    public static final CandidateSource WATERLOG_SELF = ctx -> {
+        // 假设 context 中有判断是否需要放水桶的逻辑
+        // return Stream.of(PlacementOption.self(Direction.UP));
+        return Stream.empty(); 
+    };
 
     /**
      * 来源：半砖垂直支撑方向
      * 根据半砖类型（TOP/BOTTOM）返回对应的垂直方向
      * - BOTTOM 半砖：只能从下方 (DOWN) 获得支撑
      * - TOP 半砖：只能从上方 (UP) 获得支撑
-     * - DOUBLE 半砖：返回空（由外部逻辑处理）
+     * - DOUBLE 半砖：返回空（由外部逻辑处理，通常走 SLAB_SELF_COMPLETE 或 NEIGHBOR）
      */
     public static final CandidateSource SLAB_VERTICAL_SUPPORT = ctx -> {
         if (!ctx.hasProperty(SlabBlock.TYPE)) return Stream.empty();
@@ -80,7 +121,7 @@ public final class Rules {
         // BOTTOM -> 依靠下方 (点击下方的 UP 面)
         // TOP -> 依靠上方 (点击上方的 DOWN 面)
         Direction dir = (type == SlabType.BOTTOM) ? Direction.DOWN : Direction.UP;
-        return Stream.of(dir);
+        return Stream.of(PlacementOption.neighbor(dir));
     };
 
     /**
@@ -94,7 +135,7 @@ public final class Rules {
 
         BlockHalf half = ctx.getProperty(StairsBlock.HALF);
         Direction dir = (half == BlockHalf.BOTTOM) ? Direction.DOWN : Direction.UP;
-        return Stream.of(dir);
+        return Stream.of(PlacementOption.neighbor(dir));
     };
 
     /**
@@ -109,9 +150,9 @@ public final class Rules {
 
         Direction.Axis axis = ctx.getProperty(Properties.AXIS);
         return switch (axis) {
-            case X -> Stream.of(Direction.EAST, Direction.WEST);
-            case Z -> Stream.of(Direction.NORTH, Direction.SOUTH);
-            default -> Stream.of(Direction.UP, Direction.DOWN); // Y轴
+            case X -> Stream.of(Direction.EAST, Direction.WEST).map(PlacementOption::neighbor);
+            case Z -> Stream.of(Direction.NORTH, Direction.SOUTH).map(PlacementOption::neighbor);
+            default -> Stream.of(Direction.UP, Direction.DOWN).map(PlacementOption::neighbor); // Y轴
         };
     };
 
@@ -120,10 +161,29 @@ public final class Rules {
     /**
      * 过滤器：邻居方块可点击检查
      * 确保指定方向的邻居是可以被点击的实体方块
+     * 自动适配 Neighbor 和 Self 模式
      */
-    public static final CandidateFilter CLICKABLE_NEIGHBOR = (ctx, dir) -> {
-        BlockPos neighborPos = ctx.neighborPos(dir);
-        return BlockUtilHelper.isClickable(ctx.neighborState(dir), ctx.world(), neighborPos);
+    public static final CandidateFilter CLICKABLE_NEIGHBOR = (ctx, opt) -> {
+        // 获取我们要点击的那个方块（可能是邻居，也可能是自己）
+        BlockPos clickPos = opt.getInteractPos(ctx.targetPos());
+        var clickState = ctx.world().getBlockState(clickPos);
+        
+        // 只要这个方块有轮廓，就可以点
+        return BlockUtilHelper.isClickable(clickState, ctx.world(), clickPos);
+    };
+    
+    /**
+     * [新增] 限制 Self 操作只针对半砖/特定方块
+     * 防止普通方块错误地尝试点自己
+     */
+    public static final CandidateFilter VALID_SELF_TARGET = (ctx, opt) -> {
+        if (!opt.isSelf()) return true; // 邻居模式不检查这个
+
+        // 只有特定的方块允许 Self 操作
+        boolean isSlab = ctx.targetState().getBlock() instanceof SlabBlock;
+        // boolean isWaterloggable = ...
+        
+        return isSlab; 
     };
 
     /**
@@ -131,12 +191,12 @@ public final class Rules {
      * 根据玩家视角位置限制允许的放置方向
      * 只在 strict 模式下生效
      */
-    public static final CandidateFilter NCP_STRICT = (ctx, dir) -> {
+    public static final CandidateFilter NCP_STRICT = (ctx, opt) -> {
         if (!ctx.strict()) return true; // 非严格模式，全部通过
 
         Set<Direction> validDirs = BlockUtilHelper.getPlaceDirectionsNCP(ctx.eyePos(), ctx.targetCenter());
-        // 我们要点击的是 dir 方向邻居的 dir.getOpposite() 面
-        return validDirs.contains(dir.getOpposite());
+        // 我们要点击的是 opt.getClickedFace() 面
+        return validDirs.contains(opt.getClickedFace());
     };
 
     /**
@@ -144,12 +204,13 @@ public final class Rules {
      * 确保玩家能够看到要点击的方块面
      * 只在 checkLos 启用时生效
      */
-    public static final CandidateFilter LINE_OF_SIGHT = (ctx, dir) -> {
+    public static final CandidateFilter LINE_OF_SIGHT = (ctx, opt) -> {
         if (!ctx.checkLos()) return true; // 未启用视线检查，全部通过
 
-        BlockPos neighborPos = ctx.neighborPos(dir);
-        Direction clickedSide = dir.getOpposite();
-        return BlockUtilHelper.canSeeBlock(neighborPos, clickedSide, ctx.world(), ctx.player());
+        BlockPos clickPos = opt.getInteractPos(ctx.targetPos());
+        Direction face = opt.getClickedFace();
+        
+        return BlockUtilHelper.canSeeBlock(clickPos, face, ctx.world(), ctx.player());
     };
 
     /**
@@ -157,18 +218,22 @@ public final class Rules {
      * 防止 BOTTOM 半砖依靠 TOP 半砖（它们之间有空隙）
      * 双层半砖视为完整方块，允许依靠
      */
-    public static final CandidateFilter NO_MISMATCHED_SLABS = (ctx, dir) -> {
+    public static final CandidateFilter NO_MISMATCHED_SLABS = (ctx, opt) -> {
+        // 1. 如果是点自己 (Self)，说明正在进行合法的补全操作，直接放行
+        if (opt.isSelf()) return true;
+        
         // 只对半砖生效
         if (!ctx.hasProperty(SlabBlock.TYPE)) return true;
 
         // 只检查水平方向（垂直方向由专门的 Filter 处理）
-        if (!dir.getAxis().isHorizontal()) return true;
+        if (!opt.direction().getAxis().isHorizontal()) return true;
 
         SlabType myType = ctx.getProperty(SlabBlock.TYPE);
         if (myType == SlabType.DOUBLE) return true; // 双层半砖不挑剔
 
         // 检查邻居
-        var neighbor = ctx.neighborState(dir);
+        BlockPos neighborPos = opt.getInteractPos(ctx.targetPos());
+        var neighbor = ctx.world().getBlockState(neighborPos);
         if (!(neighbor.getBlock() instanceof SlabBlock)) return true;
         if (!neighbor.contains(SlabBlock.TYPE)) return true;
 
@@ -186,17 +251,21 @@ public final class Rules {
      * - TOP（倒置）楼梯：不能依靠 BOTTOM 单层半砖（下半部分悬空）
      * 双层半砖视为完整方块，允许依靠
      */
-    public static final CandidateFilter NO_MISMATCHED_STAIR_SLAB = (ctx, dir) -> {
+    public static final CandidateFilter NO_MISMATCHED_STAIR_SLAB = (ctx, opt) -> {
+        // 1. Self 模式暂不适用于楼梯（除非将来有楼梯补全），放行
+        if (opt.isSelf()) return true;
+
         // 只对楼梯生效
         if (!ctx.hasProperty(StairsBlock.HALF)) return true;
 
         // 只检查水平方向
-        if (!dir.getAxis().isHorizontal()) return true;
+        if (!opt.direction().getAxis().isHorizontal()) return true;
 
         BlockHalf myHalf = ctx.getProperty(StairsBlock.HALF);
 
         // 检查邻居是否是半砖
-        var neighbor = ctx.neighborState(dir);
+        BlockPos neighborPos = opt.getInteractPos(ctx.targetPos());
+        var neighbor = ctx.world().getBlockState(neighborPos);
         if (!(neighbor.getBlock() instanceof SlabBlock)) return true;
         if (!neighbor.contains(SlabBlock.TYPE)) return true;
 
@@ -224,17 +293,20 @@ public final class Rules {
      * - 放置 BOTTOM 半砖：下方邻居必须有顶面（不能是 BOTTOM 单层半砖）
      * - 放置 TOP 半砖：上方邻居必须有底面（不能是 TOP 单层半砖）
      */
-    public static final CandidateFilter SLAB_VERTICAL_FACE = (ctx, dir) -> {
+    public static final CandidateFilter SLAB_VERTICAL_FACE = (ctx, opt) -> {
+        if (opt.isSelf()) return true;
+        
         // 只对半砖生效
         if (!ctx.hasProperty(SlabBlock.TYPE)) return true;
 
         // 只检查垂直方向
-        if (dir.getAxis().isHorizontal()) return true;
+        if (opt.direction().getAxis().isHorizontal()) return true;
 
         SlabType myType = ctx.getProperty(SlabBlock.TYPE);
         if (myType == SlabType.DOUBLE) return true;
 
-        var neighbor = ctx.neighborState(dir);
+        BlockPos neighborPos = opt.getInteractPos(ctx.targetPos());
+        var neighbor = ctx.world().getBlockState(neighborPos);
         if (!(neighbor.getBlock() instanceof SlabBlock)) return true;
         if (!neighbor.contains(SlabBlock.TYPE)) return true;
 
@@ -242,12 +314,12 @@ public final class Rules {
         if (neighborType == SlabType.DOUBLE) return true;
 
         // BOTTOM 半砖从 DOWN 方向依靠：下方不能是 BOTTOM（没有顶面）
-        if (myType == SlabType.BOTTOM && dir == Direction.DOWN) {
+        if (myType == SlabType.BOTTOM && opt.direction() == Direction.DOWN) {
             return neighborType != SlabType.BOTTOM;
         }
 
         // TOP 半砖从 UP 方向依靠：上方不能是 TOP（没有底面）
-        if (myType == SlabType.TOP && dir == Direction.UP) {
+        if (myType == SlabType.TOP && opt.direction() == Direction.UP) {
             return neighborType != SlabType.TOP;
         }
 
@@ -261,8 +333,11 @@ public final class Rules {
      * 点击邻居方块指定面的中心位置
      * 适用于大多数普通方块
      */
-    public static final HitVecCalculator CENTER = (ctx, neighborPos, clickedSide) ->
-        HitVecCalculator.getHitVec(neighborPos, clickedSide);
+    public static final HitVecCalculator CENTER = (ctx, opt) -> {
+        BlockPos pos = opt.getInteractPos(ctx.targetPos());
+        Direction face = opt.getClickedFace();
+        return HitVecCalculator.getHitVec(pos, face);
+    };
 
     /**
      * 计算器：半砖点击位置
@@ -272,13 +347,16 @@ public final class Rules {
      * 注意：ctx 中的 targetState 应该已经由 ResolverRegistry 调整为单层（BOTTOM/TOP）
      * 不处理双层（DOUBLE）的逻辑，那由 ResolverRegistry.resolve() 负责
      */
-    public static final HitVecCalculator SLAB = (ctx, neighborPos, clickedSide) -> {
+    public static final HitVecCalculator SLAB = (ctx, opt) -> {
+        BlockPos pos = opt.getInteractPos(ctx.targetPos());
+        Direction face = opt.getClickedFace();
+        
         if (!ctx.hasProperty(SlabBlock.TYPE)) {
-            return CENTER.calculate(ctx, neighborPos, clickedSide);
+            return CENTER.calculate(ctx, opt);
         }
 
         SlabType type = ctx.getProperty(SlabBlock.TYPE);
-        return HitVecCalculator.getHitVecForSlab(neighborPos, clickedSide, type);
+        return HitVecCalculator.getHitVecForSlab(pos, face, type);
     };
 
     /**
@@ -286,13 +364,16 @@ public final class Rules {
      * 水平面点击时根据目标朝向（正置/倒置）调整 Y 坐标偏移
      * 垂直面点击时使用中心
      */
-    public static final HitVecCalculator STAIR = (ctx, neighborPos, clickedSide) -> {
+    public static final HitVecCalculator STAIR = (ctx, opt) -> {
+        BlockPos pos = opt.getInteractPos(ctx.targetPos());
+        Direction face = opt.getClickedFace();
+        
         if (!ctx.hasProperty(StairsBlock.HALF)) {
-            return CENTER.calculate(ctx, neighborPos, clickedSide);
+            return CENTER.calculate(ctx, opt);
         }
 
         BlockHalf half = ctx.getProperty(StairsBlock.HALF);
-        return HitVecCalculator.getHitVecForStairs(neighborPos, clickedSide, half);
+        return HitVecCalculator.getHitVecForStairs(pos, face, half);
     };
 
     // ==================== 组合过滤器（便捷方法） ====================
@@ -309,7 +390,7 @@ public final class Rules {
      * 创建半砖专用过滤器链
      */
     public static CandidateFilter slabFilters() {
-        return baseFilters().and(NO_MISMATCHED_SLABS).and(SLAB_VERTICAL_FACE);
+        return baseFilters().and(NO_MISMATCHED_SLABS).and(SLAB_VERTICAL_FACE).and(VALID_SELF_TARGET);
     }
 
     /**

@@ -24,13 +24,13 @@ import net.minecraft.util.math.Direction;
 public interface CandidateFilter {
 
     /**
-     * 测试指定方向是否满足条件
+     * 测试指定选项是否满足条件
      *
      * @param ctx 放置上下文
-     * @param dir 待测试的方向
+     * @param opt 待测试的放置选项
      * @return true 表示通过，false 表示被过滤掉
      */
-    boolean test(PlacementContext ctx, Direction dir);
+    boolean test(PlacementContext ctx, PlacementOption opt);
 
     /**
      * 与另一个 Filter 组合（逻辑与）
@@ -39,7 +39,7 @@ public interface CandidateFilter {
      * @return 组合后的新过滤器
      */
     default CandidateFilter and(CandidateFilter other) {
-        return (ctx, dir) -> this.test(ctx, dir) && other.test(ctx, dir);
+        return (ctx, opt) -> this.test(ctx, opt) && other.test(ctx, opt);
     }
 
     /**
@@ -49,7 +49,7 @@ public interface CandidateFilter {
      * @return 组合后的新过滤器
      */
     default CandidateFilter or(CandidateFilter other) {
-        return (ctx, dir) -> this.test(ctx, dir) || other.test(ctx, dir);
+        return (ctx, opt) -> this.test(ctx, opt) || other.test(ctx, opt);
     }
 
     /**
@@ -58,20 +58,20 @@ public interface CandidateFilter {
      * @return 逻辑取反后的过滤器
      */
     default CandidateFilter negate() {
-        return (ctx, dir) -> !this.test(ctx, dir);
+        return (ctx, opt) -> !this.test(ctx, opt);
     }
 
     /**
      * 创建一个始终通过的 Filter
      */
     static CandidateFilter alwaysPass() {
-        return (ctx, dir) -> true;
+        return (ctx, opt) -> true;
     }
 
     /**
      * 创建一个始终拒绝的 Filter
      */
     static CandidateFilter alwaysReject() {
-        return (ctx, dir) -> false;
+        return (ctx, opt) -> false;
     }
 }
