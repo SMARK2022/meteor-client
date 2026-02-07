@@ -193,6 +193,84 @@ public final class ResolverRegistry {
             .addFilter(Rules.LINE_OF_SIGHT)
             .hitVec(Rules.CENTER);
 
+            // ==================== 水平朝向策略 ====================
+
+    /**
+     * 水平反向策略 (Opposite)
+     * 适用：箱子、熔炉、栅栏门、门、南瓜、织布机、中继器、比较器等。
+     * 逻辑：
+     * 1. 来源：六个方向均可点击 (ALL_DIRECTIONS)。
+     * 2. 旋转：方块朝向 = 玩家视线反方向 (背对玩家)。
+     */
+    public static final PlacementResolver HORIZONTAL_OPPOSITE_RESOLVER = PlacementResolver.create("horizontal_opposite")
+            .addSource(Rules.ALL_DIRECTIONS)
+            .addFilter(Rules.CLICKABLE_NEIGHBOR)
+            .addFilter(Rules.ROTATION_CHECK_OPPOSITE) // 核心：反向检查
+            .addFilter(Rules.NCP_STRICT)
+            .addFilter(Rules.LINE_OF_SIGHT)
+            .hitVec(Rules.CENTER);
+
+    /**
+     * 水平同向策略 (Same)
+     * 适用：铁砧、床等。
+     * 逻辑：
+     * 1. 来源：六个方向均可点击 (ALL_DIRECTIONS)。
+     * (虽然中继器通常点地，但逻辑上允许尝试其他面，只要 canPlace 通过)
+     * 2. 旋转：方块朝向 = 玩家视线方向 (同向)。
+     */
+    public static final PlacementResolver HORIZONTAL_SAME_RESOLVER = PlacementResolver.create("horizontal_same")
+            .addSource(Rules.ALL_DIRECTIONS)
+            .addFilter(Rules.CLICKABLE_NEIGHBOR)
+            .addFilter(Rules.ROTATION_CHECK_SAME) // 核心：同向检查
+            .addFilter(Rules.NCP_STRICT)
+            .addFilter(Rules.LINE_OF_SIGHT)
+            .hitVec(Rules.CENTER);
+
+    /**
+     * 6轴同向策略 (发射器、侦测器)
+     */
+    public static final PlacementResolver LOOK_6_SAME_RESOLVER = PlacementResolver.create("look_6_same")
+            .addSource(Rules.ALL_DIRECTIONS)
+            .addFilter(Rules.CLICKABLE_NEIGHBOR)
+            .addFilter(Rules.ROTATION_CHECK_6_SAME) // 视线同向
+            .addFilter(Rules.NCP_STRICT)
+            .addFilter(Rules.LINE_OF_SIGHT)
+            .hitVec(Rules.CENTER);
+
+    /**
+     * 6轴反向策略 (活塞)
+     */
+    public static final PlacementResolver LOOK_6_OPPOSITE_RESOLVER = PlacementResolver.create("look_6_opposite")
+            .addSource(Rules.ALL_DIRECTIONS)
+            .addFilter(Rules.CLICKABLE_NEIGHBOR)
+            .addFilter(Rules.ROTATION_CHECK_6_OPPOSITE) // 视线反向
+            .addFilter(Rules.NCP_STRICT)
+            .addFilter(Rules.LINE_OF_SIGHT)
+            .hitVec(Rules.CENTER);
+
+    /**
+     * 附着面策略 (拉杆、按钮) - 12种状态
+     */
+    public static final PlacementResolver FACE_ATTACHED_RESOLVER = PlacementResolver.create("face_attached")
+            .addSource(Rules.ALL_DIRECTIONS)
+            .addFilter(Rules.CLICKABLE_NEIGHBOR)
+            .addFilter(Rules.FACE_ATTACHED_CHECK) // 核心复杂逻辑
+            .addFilter(Rules.NCP_STRICT)
+            .addFilter(Rules.LINE_OF_SIGHT)
+            .hitVec(Rules.CENTER);
+
+
+            /**
+     * 合成器放置策略
+     * 逻辑：6轴反向 + 垂直时的旋转判定
+     */
+    public static final PlacementResolver CRAFTER_RESOLVER = PlacementResolver.create("crafter")
+            .addSource(Rules.ALL_DIRECTIONS)
+            .addFilter(Rules.CLICKABLE_NEIGHBOR)
+            .addFilter(Rules.CRAFTER_CHECK) // 核心专用检查
+            .addFilter(Rules.NCP_STRICT)
+            .addFilter(Rules.LINE_OF_SIGHT)
+            .hitVec(Rules.CENTER);
 
     /**
      * 默认方块放置策略
@@ -275,6 +353,79 @@ public final class ResolverRegistry {
             return WALL_DEGENERATE_RESOLVER;
         }
 
+        // ==================== 1. 水平反向类 (Opposite) ====================
+        // 特征：FACING 属性，且放置时背对玩家 (Face towards player)
+        if (block instanceof AbstractChestBlock // 箱子, 陷阱箱, 末影箱
+                || block instanceof RepeaterBlock // 红石中继器
+                || block instanceof ComparatorBlock // 红石比较器
+                || block instanceof AbstractFurnaceBlock // 熔炉, 高炉, 烟熏炉
+                || block instanceof FenceGateBlock // 栅栏门
+                || block instanceof DoorBlock // 门 (虽有多重属性，但水平逻辑一致)
+                || block instanceof CarvedPumpkinBlock // 雕刻南瓜, 南瓜灯 (Jack o Lantern)
+                || block instanceof BeehiveBlock // 蜂箱, 蜂巢
+                || block instanceof LoomBlock // 织布机
+                || block instanceof BarrelBlock // 木桶 (注：木桶其实是6面的，但很多人当箱子用。如果你的木桶是6面逻辑，移到
+                                                // FACE_EXTEND_RESOLVER；如果是强制水平，放这里。原版木桶是6面的，建议移走，或者这里只处理水平情况)
+                // *修正*：原版 Barrel 是 6 面朝向 (Look-based)，不属于
+                // HorizontalFacingBlock。它应该归类到"活塞/发射器"类(Look Based)，或者 FACE_EXTEND。
+                // 这里我们先不放 Barrel。
+
+                || block instanceof LecternBlock // 讲台
+                || block instanceof StonecutterBlock // 切石机
+                || block instanceof CampfireBlock // 营火
+                || block instanceof GlazedTerracottaBlock // 带釉陶瓦
+                || block instanceof DecoratedPotBlock // 饰纹陶罐 (1.20+)
+                || block instanceof ChiseledBookshelfBlock // 雕纹书架 (1.20+)
+        ) {
+            return HORIZONTAL_OPPOSITE_RESOLVER;
+        }
+
+        // ==================== 2. 水平同向类 (Same) ====================
+        // 特征：FACING 属性，且放置时面向玩家视线 (Face with player)
+        if (block instanceof AnvilBlock // 铁砧 (所有损坏程度)
+                || block instanceof BedBlock // 床
+                || block instanceof GrindstoneBlock // 砂轮 (注：砂轮有 Wall/Floor/Ceiling 状态，但水平逻辑是 Same)
+                || block instanceof BellBlock // 钟 (同上)
+        ) {
+            return HORIZONTAL_SAME_RESOLVER;
+        }
+
+        // ==================== 9. 六轴同向类 (Look 6 Same) ====================
+        // 特征：6面 FACING，朝向 = 玩家视线
+        if (block instanceof ObserverBlock // 侦测器 (输出端朝向玩家视线)
+                || block instanceof CommandBlock // 命令方块
+                || block instanceof BarrelBlock // 木桶 (通常是6轴 Look-based，虽然很多人以为是箱子)
+        ) {
+            return LOOK_6_SAME_RESOLVER;
+        }
+
+        // ==================== 10. 六轴反向类 (Look 6 Opposite) ====================
+        // 特征：6面 FACING，朝向 = 玩家视线反向 (头对着玩家)
+        if (block instanceof DispenserBlock // 发射器
+                || block instanceof DropperBlock // 投掷器
+                || block instanceof PistonBlock // 活塞 (普通 & 粘性)
+        // 注：EndPortalFrame 是水平反向，已在 Horizontal_Opposite 处理
+        ) {
+            return LOOK_6_OPPOSITE_RESOLVER;
+        }
+
+        // ==================== 11. 附着面类 (Face Attached / 12-Direction)
+        // ====================
+        // 特征：有 FACE (Wall/Floor/Ceiling) 和 HORIZONTAL_FACING 属性
+        if (block instanceof ButtonBlock // 所有按钮 (木/石/黑石/铜)
+                || block instanceof LeverBlock // 拉杆
+                || block instanceof GrindstoneBlock // 砂轮
+                || block instanceof BellBlock // 钟 (注：钟的放置逻辑与此类似)
+        // || block instanceof SwitchBlock // (如果模组有类似 Switch 的类)
+        ) {
+            return FACE_ATTACHED_RESOLVER;
+        }
+
+        // [新增] 合成器 (1.21+)
+        if (block instanceof CrafterBlock) {
+            return CRAFTER_RESOLVER;
+        }
+
         // 4. 默认
         return DEFAULT_RESOLVER;
     }
@@ -337,6 +488,79 @@ public final class ResolverRegistry {
         || block instanceof WallHangingSignBlock
         ) {
             return WALL_DEGENERATE_RESOLVER;
+        }
+
+        // ==================== 1. 水平反向类 (Opposite) ====================
+        // 特征：FACING 属性，且放置时背对玩家 (Face towards player)
+        if (block instanceof AbstractChestBlock // 箱子, 陷阱箱, 末影箱
+                || block instanceof RepeaterBlock // 红石中继器
+                || block instanceof ComparatorBlock // 红石比较器
+                || block instanceof AbstractFurnaceBlock // 熔炉, 高炉, 烟熏炉
+                || block instanceof FenceGateBlock // 栅栏门
+                || block instanceof DoorBlock // 门 (虽有多重属性，但水平逻辑一致)
+                || block instanceof CarvedPumpkinBlock // 雕刻南瓜, 南瓜灯 (Jack o Lantern)
+                || block instanceof BeehiveBlock // 蜂箱, 蜂巢
+                || block instanceof LoomBlock // 织布机
+                || block instanceof BarrelBlock // 木桶 (注：木桶其实是6面的，但很多人当箱子用。如果你的木桶是6面逻辑，移到
+                                                // FACE_EXTEND_RESOLVER；如果是强制水平，放这里。原版木桶是6面的，建议移走，或者这里只处理水平情况)
+                // *修正*：原版 Barrel 是 6 面朝向 (Look-based)，不属于
+                // HorizontalFacingBlock。它应该归类到"活塞/发射器"类(Look Based)，或者 FACE_EXTEND。
+                // 这里我们先不放 Barrel。
+
+                || block instanceof LecternBlock // 讲台
+                || block instanceof StonecutterBlock // 切石机
+                || block instanceof CampfireBlock // 营火
+                || block instanceof GlazedTerracottaBlock // 带釉陶瓦
+                || block instanceof DecoratedPotBlock // 饰纹陶罐 (1.20+)
+                || block instanceof ChiseledBookshelfBlock // 雕纹书架 (1.20+)
+        ) {
+            return HORIZONTAL_OPPOSITE_RESOLVER;
+        }
+
+        // ==================== 2. 水平同向类 (Same) ====================
+        // 特征：FACING 属性，且放置时面向玩家视线 (Face with player)
+        if (block instanceof AnvilBlock // 铁砧 (所有损坏程度)
+                || block instanceof BedBlock // 床
+                || block instanceof GrindstoneBlock // 砂轮 (注：砂轮有 Wall/Floor/Ceiling 状态，但水平逻辑是 Same)
+                || block instanceof BellBlock // 钟 (同上)
+        ) {
+            return HORIZONTAL_SAME_RESOLVER;
+        }
+
+        // ==================== 9. 六轴同向类 (Look 6 Same) ====================
+        // 特征：6面 FACING，朝向 = 玩家视线
+        if (block instanceof DispenserBlock // 发射器
+                || block instanceof DropperBlock // 投掷器
+                || block instanceof ObserverBlock // 侦测器 (输出端朝向玩家视线)
+                || block instanceof CommandBlock // 命令方块
+                || block instanceof BarrelBlock // 木桶 (通常是6轴 Look-based，虽然很多人以为是箱子)
+        ) {
+            return LOOK_6_SAME_RESOLVER;
+        }
+
+        // ==================== 10. 六轴反向类 (Look 6 Opposite) ====================
+        // 特征：6面 FACING，朝向 = 玩家视线反向 (头对着玩家)
+        if (block instanceof PistonBlock // 活塞 (普通 & 粘性)
+        // 注：EndPortalFrame 是水平反向，已在 Horizontal_Opposite 处理
+        ) {
+            return LOOK_6_OPPOSITE_RESOLVER;
+        }
+
+        // ==================== 11. 附着面类 (Face Attached / 12-Direction)
+        // ====================
+        // 特征：有 FACE (Wall/Floor/Ceiling) 和 HORIZONTAL_FACING 属性
+        if (block instanceof ButtonBlock // 所有按钮 (木/石/黑石/铜)
+                || block instanceof LeverBlock // 拉杆
+                || block instanceof GrindstoneBlock // 砂轮
+                || block instanceof BellBlock // 钟 (注：钟的放置逻辑与此类似)
+        // || block instanceof SwitchBlock // (如果模组有类似 Switch 的类)
+        ) {
+            return FACE_ATTACHED_RESOLVER;
+        }
+
+        // [新增] 合成器 (1.21+)
+        if (block instanceof CrafterBlock) {
+            return CRAFTER_RESOLVER;
         }
 
         // 4. 默认

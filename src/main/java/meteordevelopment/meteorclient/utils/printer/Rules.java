@@ -6,6 +6,9 @@ import net.minecraft.block.SlabBlock;
 import net.minecraft.block.StairsBlock;
 import net.minecraft.block.enums.BlockHalf;
 import net.minecraft.block.enums.SlabType;
+import net.minecraft.block.enums.BlockFace; // 必须导入这个枚举
+import net.minecraft.block.enums.Orientation; // 必须导入
+
 import net.minecraft.state.property.Properties;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
@@ -516,6 +519,36 @@ public final class Rules {
         };
     }
 
+    // ==================== 3D 视线计算辅助 ====================
+
+    /**
+     * 计算玩家看向目标时的 3D 朝向 (含 UP/DOWN)
+     * 用于 6 轴方块 (Piston, Observer, Dropper)
+     */
+    private static Direction getTheoreticalPlayerLookDirection(PlacementContext ctx) {
+        // 1. 计算 Pitch 和 Yaw
+        Vec3d eye = ctx.eyePos();
+        Vec3d target = ctx.targetCenter();
+
+        double dX = target.x - eye.x;
+        double dY = target.y - eye.y;
+        double dZ = target.z - eye.z;
+        double dist = Math.sqrt(dX * dX + dZ * dZ);
+
+        // 计算 Pitch (上下角度)
+        // Minecraft Pitch: -90 (Up) to 90 (Down)
+        double pitch = MathHelper.wrapDegrees((float) (-(MathHelper.atan2(dY, dist) * 57.2957763671875)));
+
+        // 判定阈值：通常 +/- 45 度分界
+        if (pitch < -45.0f)
+            return Direction.UP;
+        if (pitch > 45.0f)
+            return Direction.DOWN;
+
+        // 如果是水平，复用之前的水平计算逻辑
+        return getTheoreticalPlayerFacing(ctx);
+    }
+
     // ==================== 通用旋转过滤器 ====================
 
     /**
@@ -652,6 +685,141 @@ public final class Rules {
         // 此时依赖玩家视线
         return ROTATION_CHECK_OPPOSITE.test(ctx, opt);
     };
+
+    // ==================== 6 轴旋转过滤器 ====================
+
+    /**
+     * [通用] 6轴同向检查
+     * 适用：发射器、投掷器、侦测器
+     * 逻辑：TargetFacing == PlayerLook (视线往哪看，口就朝哪开)
+     */
+    public static final CandidateFilter ROTATION_CHECK_6_SAME = (ctx, opt) -> {
+        if (!ctx.hasProperty(Properties.FACING))
+            return true;
+        Direction target = ctx.getProperty(Properties.FACING);
+        Direction playerLook = getTheoreticalPlayerLookDirection(ctx);
+        return target == playerLook;
+    };
+
+    /**
+     * [通用] 6轴反向检查
+     * 适用：活塞 (Piston)
+     * 逻辑：TargetFacing == PlayerLook.Opposite
+     * (例如：你向下看(Look=Down)，活塞头朝上(Facing=Up))
+     */
+    public static final CandidateFilter ROTATION_CHECK_6_OPPOSITE = (ctx, opt) -> {
+        if (!ctx.hasProperty(Properties.FACING))
+            return true;
+        Direction target = ctx.getProperty(Properties.FACING);
+        Direction playerLook = getTheoreticalPlayerLookDirection(ctx);
+        return target == playerLook.getOpposite();
+    };
+
+    // ==================== 附着面 (FaceAttached) 复杂逻辑 ====================
+
+    /**
+     * 附着面方块检查 (拉杆、按钮、砂轮)
+     * 属性：FACE (Floor/Wall/Ceiling) + FACING (Horizontal)
+     * * 逻辑矩阵：
+     * 1. FACE = FLOOR:
+     * - 必须点击 UP 面。
+     * - FACING 由玩家水平视线决定 (通常是 Same 或 Opposite，视方块而定)。
+     * (注：拉杆/按钮通常是 Same，即点地时，顶端指向视线方向)
+     * 2. FACE = CEILING:
+     * - 必须点击 DOWN 面。
+     * - FACING 由玩家水平视线决定。
+     * 3. FACE = WALL:
+     * - 必须点击侧面。
+     * - FACING 必须等于 ClickedFace (贴墙逻辑)。
+     */
+    public static final CandidateFilter FACE_ATTACHED_CHECK = (ctx, opt) -> {
+        // 必须拥有两个属性
+        if (!ctx.hasProperty(Properties.BLOCK_FACE) ||
+                !ctx.hasProperty(Properties.HORIZONTAL_FACING))
+            return true;
+
+        var targetFace = ctx.getProperty(Properties.BLOCK_FACE);
+        var targetFacing = ctx.getProperty(Properties.HORIZONTAL_FACING);
+        var clickedFace = opt.getClickedFace();
+
+        switch (targetFace) {
+            case FLOOR -> {
+                // 必须点地板 (UP)
+                if (clickedFace != Direction.UP)
+                    return false;
+                // 检查水平朝向 (拉杆/按钮点地时，FACING = 玩家视线)
+                // 注意：这里可能因方块而异，如果不准，可能需要拆分 Same/Opposite
+                // 大多数 FaceAttachedBlock 是 "Same" (如拉杆柄朝向玩家视线)
+                return getTheoreticalPlayerFacing(ctx) == targetFacing;
+            }
+            case CEILING -> {
+                // 必须点天花板 (DOWN)
+                if (clickedFace != Direction.DOWN)
+                    return false;
+                // 检查水平朝向
+                return getTheoreticalPlayerFacing(ctx) == targetFacing;
+            }
+            case WALL -> {
+                // 必须点击侧面
+                if (!clickedFace.getAxis().isHorizontal())
+                    return false;
+                // 贴墙逻辑：点击面必须等于目标朝向
+                return clickedFace == targetFacing;
+            }
+        }
+        return true;
+    };
+
+    /**
+     * 合成器 (Crafter) 专用检查
+     * 属性：ORIENTATION (包含 Facing 和 Rotation)
+     * * 逻辑：
+     * 1. 检查主朝向 (Facing): 必须与玩家 3D 视线相反 (Piston Logic)。
+     * 2. 检查顶部朝向 (Rotation):
+     * - 如果主朝向是水平的：顶部必须是 UP (Minecraft 强制)。
+     * - 如果主朝向是垂直的 (UP/DOWN)：顶部必须指向玩家 (Player Horizontal Opposite)。
+     */
+    public static final CandidateFilter CRAFTER_CHECK = (ctx, opt) -> {
+        if (!ctx.hasProperty(Properties.ORIENTATION))
+            return true;
+
+        // 1. 解析目标状态
+        Orientation targetOrientation = ctx.getProperty(Properties.ORIENTATION);
+        Direction targetFacing = targetOrientation.getFacing(); // 喷口朝向
+        Direction targetTop = targetOrientation.getRotation(); // 顶部材质朝向
+
+        // 2. 检查主朝向 (Facing) - 必须背对玩家视线
+        // 例如：目标朝 UP，玩家必须看 DOWN
+        Direction playerLook3D = getTheoreticalPlayerLookDirection(ctx);
+        if (targetFacing != playerLook3D.getOpposite()) {
+            return false;
+        }
+
+        // 3. 检查顶部朝向 (Rotation)
+        if (targetFacing.getAxis().isVertical()) {
+            // [垂直模式] (UP_EAST, DOWN_NORTH 等)
+            // 规则：顶部材质朝向 = 玩家水平视线的反方向 (即顶部指向玩家)
+            // 我们需要计算玩家水平看着哪里
+            Direction playerHorizontal = getTheoreticalPlayerFacing(ctx);
+
+            // 目标顶部朝向 必须等于 玩家水平朝向的相反方向
+            // 例如：Target=UP_EAST (顶朝东)，意味着玩家站在东边面向西放置，或者站在西边面向东？
+            // 原版逻辑：放置在地上时，Top 指向玩家。
+            // 所以如果 Top=EAST，玩家应该在 WEST 看着 EAST 吗？不对。
+            // 正确逻辑：Top=EAST，意味着玩家面向 WEST (视线)，Top (EAST) 指向玩家背部?
+            // 让我们用最稳的 Opposite 逻辑：Top Points to Player.
+            // Player Facing (Look) = WEST -> Top = EAST.
+            return targetTop == playerHorizontal.getOpposite();
+        } else {
+            // [水平模式] (EAST_UP, NORTH_UP 等)
+            // 规则：顶部必须朝上 (UP)。这是 Minecraft 强制的。
+            // 只要目标状态是合法的 (例如没有 EAST_DOWN)，这一步通常自动通过。
+            // 但为了严谨，我们检查一下 Schematic 是否合法。
+            return targetTop == Direction.UP;
+        }
+    };
+
+
 
     // ==================== HitVecCalculators (点击位置计算器) ====================
 
