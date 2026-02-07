@@ -1,6 +1,7 @@
 package meteordevelopment.meteorclient.utils.printer;
 
 import net.minecraft.block.Block;
+import net.minecraft.block.BlockState;
 import net.minecraft.block.SlabBlock;
 import net.minecraft.block.StairsBlock;
 import net.minecraft.block.enums.SlabType;
@@ -198,122 +199,128 @@ public final class ResolverRegistry {
         return DEFAULT_RESOLVER;
     }
 
-    // ==================== 双层半砖特殊处理 ====================
-
-    /**
-     * 获取双层半砖的实际放置策略
-     *
-     * 双层半砖不是一步到位的，需要根据当前世界状态决定放置哪一半：
-     * - 如果当前是空气：按 BOTTOM 策略放置（开始建造）
-     * - 如果当前是 BOTTOM：按 TOP 策略放置（补全）
-     * - 如果当前是 TOP：按 BOTTOM 策略放置（补全）
-     *
-     * @param ctx 放置上下文
-     * @return 调整后的上下文（修改了 targetState）
-     */
-    public static PlacementContext adjustForDoubleSlab(PlacementContext ctx) {
-        if (!ctx.hasProperty(SlabBlock.TYPE)) return ctx;
-
-        SlabType targetType = ctx.getProperty(SlabBlock.TYPE);
-        if (targetType != SlabType.DOUBLE) return ctx;
-
-        // 检查当前世界状态
-        var currentState = ctx.currentState();
-        if (!(currentState.getBlock() instanceof SlabBlock)) {
-            // 当前是空气或其他，按 BOTTOM 放置
-            return ctx.withTargetState(ctx.targetState().with(SlabBlock.TYPE, SlabType.BOTTOM));
-        }
-
-        if (!currentState.contains(SlabBlock.TYPE)) return ctx;
-
-        SlabType currentType = currentState.get(SlabBlock.TYPE);
-        if (currentType == SlabType.DOUBLE) {
-            // 已经是双层，不需要放置
-            return ctx;
-        }
-
-        // 根据当前类型决定要放置的类型
-        SlabType neededType = (currentType == SlabType.BOTTOM) ? SlabType.TOP : SlabType.BOTTOM;
-        return ctx.withTargetState(ctx.targetState().with(SlabBlock.TYPE, neededType));
-    }
-
     // ==================== 便捷解析方法 ====================
 
     /**
      * 一站式解析方法：自动选择策略并解析方向
      *
-     * 特殊处理双层半砖在空气位置的情况：
-     * - 当目标是双层且当前是空气时，同时尝试 BOTTOM 和 TOP
-     * - 这样能最大化放置成功率（两种方向都可以开始建造）
+     * [重要修复] 处理双层半砖的逻辑：
+     * 1. 如果当前位置已有单层半砖，优先尝试自我补全（保持原始 DOUBLE 状态）
+     * 2. 如果当前是空气，尝试新放置 BOTTOM 或 TOP
+     * 3. 如果已经是双层半砖，返回 null（无需放置）
      *
      * @param ctx 放置上下文
      * @return 最佳放置选项，如果无法放置则返回 null
      */
     public static PlacementOption resolve(PlacementContext ctx) {
-        // 对于双层半砖在空气位置，同时尝试两种放置方式
-        if (ctx.hasProperty(SlabBlock.TYPE) &&
-            ctx.getProperty(SlabBlock.TYPE) == SlabType.DOUBLE &&
-            !(ctx.currentState().getBlock() instanceof SlabBlock)) {
+        // 特殊处理半砖
+        if (ctx.hasProperty(SlabBlock.TYPE)) {
+            var currentState = ctx.currentState();
+            boolean isCurrentSlab = currentState.getBlock() instanceof SlabBlock;
 
-            // 先尝试放 BOTTOM
-            PlacementContext bottomCtx = ctx.withTargetState(ctx.targetState().with(SlabBlock.TYPE, SlabType.BOTTOM));
-            PlacementResolver resolver = get(bottomCtx.targetState());
-            PlacementOption result = resolver.resolve(bottomCtx);
-            if (result != null) {
-                return result;
+            // 情况1：当前已有单层半砖，只能自我补全
+            if (isCurrentSlab && currentState.contains(SlabBlock.TYPE)) {
+                SlabType currentType = currentState.get(SlabBlock.TYPE);
+
+                // 如果已经是双层，无需放置
+                if (currentType == SlabType.DOUBLE) {
+                    return null;
+                }
+
+                // 只有目标是 DOUBLE 时才尝试自我补全
+                // 如果目标是 BOTTOM 或 TOP，但当前已经有半砖了，那就无法放置
+                if (ctx.getProperty(SlabBlock.TYPE) != SlabType.DOUBLE) {
+                    return null; // 目标与当前不匹配，无法放置
+                }
+
+                // 保持原始的 DOUBLE 状态，让 SLAB_SELF_COMPLETE 正常工作
+                PlacementResolver resolver = get(ctx.targetState());
+                return resolver.resolve(ctx);
             }
 
-            // 再尝试放 TOP
-            PlacementContext topCtx = ctx.withTargetState(ctx.targetState().with(SlabBlock.TYPE, SlabType.TOP));
-            resolver = get(topCtx.targetState());
-            result = resolver.resolve(topCtx);
-            if (result != null) {
-                return result;
-            }
+            // 情况2：当前是空气，目标是双层半砖，尝试新放置
+            if (!isCurrentSlab && ctx.getProperty(SlabBlock.TYPE) == SlabType.DOUBLE) {
+                // 先尝试放 BOTTOM
+                BlockState bottomState = ctx.targetState().with(SlabBlock.TYPE, SlabType.BOTTOM);
+                PlacementContext bottomCtx = ctx.withTargetState(bottomState);
+                PlacementResolver resolver = get(bottomCtx.targetState());
+                PlacementOption result = resolver.resolve(bottomCtx);
+                if (result != null) {
+                    // 【修复】在返回时，将实际选择的目标状态（BOTTOM）包含在 PlacementOption 中
+                    return new PlacementOption(result.direction(), result.isSelf(), bottomState);
+                }
 
-            // 两种都不行则返回 null
-            return null;
+                // 再尝试放 TOP
+                BlockState topState = ctx.targetState().with(SlabBlock.TYPE, SlabType.TOP);
+                PlacementContext topCtx = ctx.withTargetState(topState);
+                resolver = get(topCtx.targetState());
+                result = resolver.resolve(topCtx);
+                if (result != null) {
+                    // 【修复】在返回时，将实际选择的目标状态（TOP）包含在 PlacementOption 中
+                    return new PlacementOption(result.direction(), result.isSelf(), topState);
+                }
+
+                // 两种都不行则返回 null
+                return null;
+            }
         }
 
-        // 处理其他双层半砖情况（当前已经是 BOTTOM 或 TOP）
-        PlacementContext adjustedCtx = adjustForDoubleSlab(ctx);
-
-        // 获取策略并解析
-        PlacementResolver resolver = get(adjustedCtx.targetState());
-        return resolver.resolve(adjustedCtx);
+        // 其他方块类型或单层半砖目标：直接解析
+        PlacementResolver resolver = get(ctx.targetState());
+        return resolver.resolve(ctx);
     }
 
     /**
      * 检查是否可以放置
      *
-     * 特殊处理双层半砖在空气位置的情况：
-     * - 只要 BOTTOM 或 TOP 之一可以放置，就返回 true
+     * [修复] 与 resolve() 保持一致的逻辑
      *
      * @param ctx 放置上下文
      * @return true 表示存在可行的放置方向
      */
     public static boolean canPlace(PlacementContext ctx) {
-        // 对于双层半砖在空气位置，检查两种放置方式是否至少有一种可行
-        if (ctx.hasProperty(SlabBlock.TYPE) &&
-            ctx.getProperty(SlabBlock.TYPE) == SlabType.DOUBLE &&
-            !(ctx.currentState().getBlock() instanceof SlabBlock)) {
+        // 特殊处理半砖
+        if (ctx.hasProperty(SlabBlock.TYPE)) {
+            var currentState = ctx.currentState();
+            boolean isCurrentSlab = currentState.getBlock() instanceof SlabBlock;
 
-            // 检查放 BOTTOM 是否可行
-            PlacementContext bottomCtx = ctx.withTargetState(ctx.targetState().with(SlabBlock.TYPE, SlabType.BOTTOM));
-            PlacementResolver resolver = get(bottomCtx.targetState());
-            if (resolver.canResolve(bottomCtx)) {
-                return true;
+            // 情况1：当前已有单层半砖，只能自我补全
+            if (isCurrentSlab && currentState.contains(SlabBlock.TYPE)) {
+                SlabType currentType = currentState.get(SlabBlock.TYPE);
+
+                // 如果已经是双层，无法放置
+                if (currentType == SlabType.DOUBLE) {
+                    return false;
+                }
+
+                // 只有目标是 DOUBLE 时才能补全
+                if (ctx.getProperty(SlabBlock.TYPE) != SlabType.DOUBLE) {
+                    return false;
+                }
+
+                // 保持原始的 DOUBLE 状态检查
+                PlacementResolver resolver = get(ctx.targetState());
+                return resolver.canResolve(ctx);
             }
 
-            // 检查放 TOP 是否可行
-            PlacementContext topCtx = ctx.withTargetState(ctx.targetState().with(SlabBlock.TYPE, SlabType.TOP));
-            resolver = get(topCtx.targetState());
-            return resolver.canResolve(topCtx);
+            // 情况2：当前是空气，目标是双层半砖
+            if (!isCurrentSlab && ctx.getProperty(SlabBlock.TYPE) == SlabType.DOUBLE) {
+                // 检查放 BOTTOM 是否可行
+                PlacementContext bottomCtx = ctx.withTargetState(ctx.targetState().with(SlabBlock.TYPE, SlabType.BOTTOM));
+                PlacementResolver resolver = get(bottomCtx.targetState());
+                if (resolver.canResolve(bottomCtx)) {
+                    return true;
+                }
+
+                // 检查放 TOP 是否可行
+                PlacementContext topCtx = ctx.withTargetState(ctx.targetState().with(SlabBlock.TYPE, SlabType.TOP));
+                resolver = get(topCtx.targetState());
+                return resolver.canResolve(topCtx);
+            }
         }
 
-        // 处理其他双层半砖情况
-        PlacementContext adjustedCtx = adjustForDoubleSlab(ctx);
-        PlacementResolver resolver = get(adjustedCtx.targetState());
-        return resolver.canResolve(adjustedCtx);
+        // 其他方块类型：直接检查
+        PlacementResolver resolver = get(ctx.targetState());
+        return resolver.canResolve(ctx);
     }
 }

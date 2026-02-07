@@ -13,6 +13,9 @@ import net.minecraft.util.math.Vec3d;
 import java.util.Set;
 import java.util.stream.Stream;
 
+import meteordevelopment.meteorclient.utils.printer.BlockUtilHelper;
+import meteordevelopment.meteorclient.utils.printer.PlacementOption;
+
 /**
  * Rules - 规则定义库
  *
@@ -72,16 +75,19 @@ public final class Rules {
      * 专门用于处理双层半砖。
      * - 如果当前是 BOTTOM，产生 Self(UP) -> 点击顶面
      * - 如果当前是 TOP，产生 Self(DOWN) -> 点击底面
+     *
+     * [修复] 不再检查 targetState，而是直接检查当前世界状态
      */
     public static final CandidateSource SLAB_SELF_COMPLETE = ctx -> {
-        // 必须要是双层半砖的目标，且当前方块已经是单层半砖
-        if (!ctx.hasProperty(SlabBlock.TYPE)) return Stream.empty();
-        if (ctx.getProperty(SlabBlock.TYPE) != SlabType.DOUBLE) return Stream.empty();
-
+        // 检查当前世界中是否已经有单层半砖
         var current = ctx.world().getBlockState(ctx.targetPos());
         if (!(current.getBlock() instanceof SlabBlock)) return Stream.empty();
-        
+        if (!current.contains(SlabBlock.TYPE)) return Stream.empty();
+
         SlabType currentType = current.get(SlabBlock.TYPE);
+
+        // 如果已经是双层，不需要补全
+        if (currentType == SlabType.DOUBLE) return Stream.empty();
 
         if (currentType == SlabType.BOTTOM) {
             // 当前是下半，补上半 -> 点击自身的 UP 面
@@ -91,7 +97,7 @@ public final class Rules {
             // 当前是上半，补下半 -> 点击自身的 DOWN 面
             return Stream.of(PlacementOption.self(Direction.DOWN));
         }
-        
+
         return Stream.empty();
     };
 
@@ -102,7 +108,7 @@ public final class Rules {
     public static final CandidateSource WATERLOG_SELF = ctx -> {
         // 假设 context 中有判断是否需要放水桶的逻辑
         // return Stream.of(PlacementOption.self(Direction.UP));
-        return Stream.empty(); 
+        return Stream.empty();
     };
 
     /**
@@ -167,23 +173,25 @@ public final class Rules {
         // 获取我们要点击的那个方块（可能是邻居，也可能是自己）
         BlockPos clickPos = opt.getInteractPos(ctx.targetPos());
         var clickState = ctx.world().getBlockState(clickPos);
-        
+
         // 只要这个方块有轮廓，就可以点
         return BlockUtilHelper.isClickable(clickState, ctx.world(), clickPos);
     };
-    
+
     /**
      * [新增] 限制 Self 操作只针对半砖/特定方块
      * 防止普通方块错误地尝试点自己
+     * [修复] 检查当前世界状态而非目标状态
      */
     public static final CandidateFilter VALID_SELF_TARGET = (ctx, opt) -> {
         if (!opt.isSelf()) return true; // 邻居模式不检查这个
 
-        // 只有特定的方块允许 Self 操作
-        boolean isSlab = ctx.targetState().getBlock() instanceof SlabBlock;
+        // 检查当前位置的方块是否允许 Self 操作
+        var current = ctx.world().getBlockState(ctx.targetPos());
+        boolean isSlab = current.getBlock() instanceof SlabBlock;
         // boolean isWaterloggable = ...
-        
-        return isSlab; 
+
+        return isSlab;
     };
 
     /**
@@ -209,7 +217,7 @@ public final class Rules {
 
         BlockPos clickPos = opt.getInteractPos(ctx.targetPos());
         Direction face = opt.getClickedFace();
-        
+
         return BlockUtilHelper.canSeeBlock(clickPos, face, ctx.world(), ctx.player());
     };
 
@@ -221,7 +229,7 @@ public final class Rules {
     public static final CandidateFilter NO_MISMATCHED_SLABS = (ctx, opt) -> {
         // 1. 如果是点自己 (Self)，说明正在进行合法的补全操作，直接放行
         if (opt.isSelf()) return true;
-        
+
         // 只对半砖生效
         if (!ctx.hasProperty(SlabBlock.TYPE)) return true;
 
@@ -229,7 +237,6 @@ public final class Rules {
         if (!opt.direction().getAxis().isHorizontal()) return true;
 
         SlabType myType = ctx.getProperty(SlabBlock.TYPE);
-        if (myType == SlabType.DOUBLE) return true; // 双层半砖不挑剔
 
         // 检查邻居
         BlockPos neighborPos = opt.getInteractPos(ctx.targetPos());
@@ -295,7 +302,7 @@ public final class Rules {
      */
     public static final CandidateFilter SLAB_VERTICAL_FACE = (ctx, opt) -> {
         if (opt.isSelf()) return true;
-        
+
         // 只对半砖生效
         if (!ctx.hasProperty(SlabBlock.TYPE)) return true;
 
@@ -344,21 +351,21 @@ public final class Rules {
      * 水平面点击时根据目标类型（TOP/BOTTOM）调整 Y 坐标偏移
      * 垂直面点击时使用中心
      *
-     * 注意：ctx 中的 targetState 应该已经由 ResolverRegistry 调整为单层（BOTTOM/TOP）
-     * 不处理双层（DOUBLE）的逻辑，那由 ResolverRegistry.resolve() 负责
+     * [重要修复] Self 模式特殊处理：
+     * - BOTTOM 半砖补全：点击 UP 面 -> (center + 0.5*UP)
+     * - TOP 半砖补全：点击 DOWN 面 -> (center + 0.5*DOWN)
      */
     public static final HitVecCalculator SLAB = (ctx, opt) -> {
         BlockPos pos = opt.getInteractPos(ctx.targetPos());
-        
+        Direction face = opt.getClickedFace();
+
         // [修复] 如果是 Self 模式（双层补全），直接点中心
         // 对于半砖补全，无论是从下补上(UP面)，还是从上补下(DOWN面)，交界处都在 0.5 (即中心)
         // 使用通用逻辑会算到 y=1.0 或 y=0.0，那是空气位置
         if (opt.isSelf()) {
             return Vec3d.ofCenter(pos);
         }
-        
-        Direction face = opt.getClickedFace();
-        
+
         if (!ctx.hasProperty(SlabBlock.TYPE)) {
             return CENTER.calculate(ctx, opt);
         }
@@ -375,7 +382,7 @@ public final class Rules {
     public static final HitVecCalculator STAIR = (ctx, opt) -> {
         BlockPos pos = opt.getInteractPos(ctx.targetPos());
         Direction face = opt.getClickedFace();
-        
+
         if (!ctx.hasProperty(StairsBlock.HALF)) {
             return CENTER.calculate(ctx, opt);
         }
@@ -384,34 +391,4 @@ public final class Rules {
         return HitVecCalculator.getHitVecForStairs(pos, face, half);
     };
 
-    // ==================== 组合过滤器（便捷方法） ====================
-
-    /**
-     * 创建基础过滤器链：可点击 + NCP + 视线
-     * 这是所有方块类型共用的基础检查
-     */
-    public static CandidateFilter baseFilters() {
-        return CLICKABLE_NEIGHBOR.and(NCP_STRICT).and(LINE_OF_SIGHT);
-    }
-
-    /**
-     * 创建半砖专用过滤器链
-     */
-    public static CandidateFilter slabFilters() {
-        return baseFilters().and(NO_MISMATCHED_SLABS).and(SLAB_VERTICAL_FACE).and(VALID_SELF_TARGET);
-    }
-
-    /**
-     * 创建楼梯专用过滤器链（与基础相同，楼梯不挑剔水平邻居）
-     */
-    public static CandidateFilter stairFilters() {
-        return baseFilters();
-    }
-
-    /**
-     * 创建轴向方块专用过滤器链（与基础相同）
-     */
-    public static CandidateFilter axisFilters() {
-        return baseFilters();
-    }
 }

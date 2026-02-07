@@ -443,12 +443,15 @@ public class Printer extends Module {
         if (option == null)
             return false;
 
+        // 【关键修复】优先使用 resolve() 返回的实际目标状态（如 BOTTOM/TOP），如果没有则使用原始 requiredState
+        BlockState actualTargetState = (option.actualTargetState() != null) ? option.actualTargetState() : requiredState;
+
         BlockPos neighborPos = option.getInteractPos(pos);
         Direction clickedSide = option.getClickedFace();
 
-        // 使用规则引擎计算点击位置
-        PlacementResolver resolver = ResolverRegistry.get(requiredState);
-        Vec3d hitVec = resolver.calculateHitVec(ctx, option);
+        // 使用规则引擎计算点击位置（需要用实际的目标状态）
+        PlacementResolver resolver = ResolverRegistry.get(actualTargetState);
+        Vec3d hitVec = resolver.calculateHitVec(ctx.withTargetState(actualTargetState), option);
 
         // 【新增】保存hitVec用于显示
         currentHitVec = hitVec;
@@ -484,12 +487,15 @@ public class Printer extends Module {
         if (option == null)
             return false;
 
+        // 【关键修复】优先使用 resolve() 返回的实际目标状态（如 BOTTOM/TOP），如果没有则使用原始 requiredState
+        BlockState actualTargetState = (option.actualTargetState() != null) ? option.actualTargetState() : requiredState;
+
         BlockPos neighborPos = option.getInteractPos(pos);
         Direction clickedSide = option.getClickedFace();
 
-        // 使用规则引擎计算点击位置
-        PlacementResolver resolver = ResolverRegistry.get(requiredState);
-        Vec3d hitVec = resolver.calculateHitVec(ctx, option);
+        // 使用规则引擎计算点击位置（需要用实际的目标状态）
+        PlacementResolver resolver = ResolverRegistry.get(actualTargetState);
+        Vec3d hitVec = resolver.calculateHitVec(ctx.withTargetState(actualTargetState), option);
 
         // 【新增】保存hitVec用于显示
         currentHitVec = hitVec;
