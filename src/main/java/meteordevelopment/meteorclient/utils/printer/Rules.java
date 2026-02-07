@@ -262,12 +262,15 @@ public final class Rules {
      * 适用于大多数普通方块
      */
     public static final HitVecCalculator CENTER = (ctx, neighborPos, clickedSide) ->
-        BlockUtilHelper.getHitVec(neighborPos, clickedSide);
+        HitVecCalculator.getHitVec(neighborPos, clickedSide);
 
     /**
      * 计算器：半砖点击位置
      * 水平面点击时根据目标类型（TOP/BOTTOM）调整 Y 坐标偏移
      * 垂直面点击时使用中心
+     *
+     * 注意：ctx 中的 targetState 应该已经由 ResolverRegistry 调整为单层（BOTTOM/TOP）
+     * 不处理双层（DOUBLE）的逻辑，那由 ResolverRegistry.resolve() 负责
      */
     public static final HitVecCalculator SLAB = (ctx, neighborPos, clickedSide) -> {
         if (!ctx.hasProperty(SlabBlock.TYPE)) {
@@ -275,20 +278,7 @@ public final class Rules {
         }
 
         SlabType type = ctx.getProperty(SlabBlock.TYPE);
-        // 对于双层半砖，需要根据当前世界状态决定实际放置类型
-        if (type == SlabType.DOUBLE) {
-            var current = ctx.currentState();
-            if (current.getBlock() instanceof SlabBlock && current.contains(SlabBlock.TYPE)) {
-                SlabType currentType = current.get(SlabBlock.TYPE);
-                // 当前是 BOTTOM，需要放 TOP；当前是 TOP，需要放 BOTTOM
-                type = (currentType == SlabType.BOTTOM) ? SlabType.TOP : SlabType.BOTTOM;
-            } else {
-                // 当前是空气，默认放 BOTTOM
-                type = SlabType.BOTTOM;
-            }
-        }
-
-        return BlockUtilHelper.getHitVecForSlab(neighborPos, clickedSide, type);
+        return HitVecCalculator.getHitVecForSlab(neighborPos, clickedSide, type);
     };
 
     /**
@@ -302,7 +292,7 @@ public final class Rules {
         }
 
         BlockHalf half = ctx.getProperty(StairsBlock.HALF);
-        return BlockUtilHelper.getHitVecForStairs(neighborPos, clickedSide, half);
+        return HitVecCalculator.getHitVecForStairs(neighborPos, clickedSide, half);
     };
 
     // ==================== 组合过滤器（便捷方法） ====================

@@ -555,6 +555,10 @@ public class Printer extends Module {
                 continue;
             }
 
+            // 定义一个标记，用于指示是否为半砖升级操作
+            // 如果是升级操作，我们需要绕过后面的 isReplaceable 检查
+            boolean isSlabUpgrade = false;
+
             // 方块已经正确放置（相同类型的方块），跳过
             // [关键修复] 之前的 `getBlock()` 比较无法处理半砖升级 (e.g. BOTTOM -> DOUBLE)
             // 现在，如果 Block 类型相同，我们额外检查半砖状态。
@@ -569,7 +573,7 @@ public class Printer extends Module {
 
                     // 如果需要双层，但当前不是双层，则允许放置（让 BlockUtil 去处理）
                     if (requiredType == SlabType.DOUBLE && currentType != SlabType.DOUBLE) {
-                        // Pass through to placement logic
+                        isSlabUpgrade = true; // [标记] 这是一个合法的升级操作
                     } else {
                         // 否则，我们认为它已经放置好了
                         continue;
@@ -587,9 +591,14 @@ public class Printer extends Module {
 
             // 检查当前位置是否可以被替换
             // 只有空气、流体和可替换方块才能被放置覆盖
-            boolean isCurrentLiquid = currentState.getFluidState() != null && !currentState.getFluidState().isEmpty();
-            if (!currentState.isAir() && !isCurrentLiquid && !currentState.isReplaceable()) {
-                continue;
+            // 如果不是半砖升级操作，则必须检查当前位置是否为空或可替换
+            if (!isSlabUpgrade) {
+                boolean isCurrentLiquid = currentState.getFluidState() != null
+                        && !currentState.getFluidState().isEmpty();
+                // 如果当前位置既不是空气，也不是流体，也不可替换（如石头），则跳过
+                if (!currentState.isAir() && !isCurrentLiquid && !currentState.isReplaceable()) {
+                    continue;
+                }
             }
 
             // 检查是否有实体阻挡
