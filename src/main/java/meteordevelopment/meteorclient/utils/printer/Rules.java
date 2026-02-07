@@ -1,5 +1,6 @@
 package meteordevelopment.meteorclient.utils.printer;
 
+import net.minecraft.block.*;
 import net.minecraft.block.Block;
 import net.minecraft.block.SlabBlock;
 import net.minecraft.block.StairsBlock;
@@ -12,9 +13,11 @@ import net.minecraft.util.math.Vec3d;
 
 import java.util.Set;
 import java.util.stream.Stream;
+import net.minecraft.util.math.MathHelper;
 
 import meteordevelopment.meteorclient.utils.printer.BlockUtilHelper;
 import meteordevelopment.meteorclient.utils.printer.PlacementOption;
+import meteordevelopment.meteorclient.utils.player.Rotations; // 确保这个也在
 
 /**
  * Rules - 规则定义库
@@ -162,6 +165,45 @@ public final class Rules {
         };
     };
 
+    // ==================== 活板门专用逻辑 ====================
+
+    /**
+     * 来源：活板门放置方向
+     * 活板门的放置逻辑非常特殊，分为两种情况：
+     * 1. 依靠侧面放置（Wall Placement）：
+     * - 必须寻找背后的墙。例如 Trapdoor FACING=NORTH，意味着它贴在 SOUTH 面的墙上。
+     * - 此时 HALF 由点击位置决定。
+     * 2. 依靠地面/天花板放置（Floor/Ceiling Placement）：
+     * - 此时 FACING 由玩家视线决定（我们无法通过点击面改变 FACING）。
+     * - 此时 HALF 由点击面决定（点地=BOTTOM, 点天=TOP）。
+     * * 我们的策略：优先尝试"贴墙放"（因为这样可以精确控制 FACING 和 HALF），
+     * 如果不行，再尝试"平放"（此时需要配合玩家旋转）。
+     */
+    public static final CandidateSource TRAPDOOR_SUPPORT = ctx -> {
+        if (!ctx.hasProperty(TrapdoorBlock.FACING) || !ctx.hasProperty(TrapdoorBlock.HALF)) {
+            return Stream.empty();
+        }
+
+        Direction facing = ctx.getProperty(TrapdoorBlock.FACING);
+        BlockHalf half = ctx.getProperty(TrapdoorBlock.HALF);
+
+        // 策略 A: 贴墙放置 (最稳健)
+        // 如果活板门朝北 (NORTH)，说明它的铰链在南边，它依附在南边的方块上。
+        // 我们需要点击南边方块的北面。
+        Direction wallDirection = facing.getOpposite();
+
+        // 策略 B: 地面/天花板放置
+        // 如果 HALF=BOTTOM，可以放在地面 (DOWN)
+        // 如果 HALF=TOP，可以放在天花板 (UP)
+        // 注意：这种放置方式下，FACING 取决于玩家 Yaw，Printer 需要在 executePlacement 时处理旋转
+        Direction verticalDir = (half == BlockHalf.BOTTOM) ? Direction.DOWN : Direction.UP;
+
+        return Stream.of(
+                PlacementOption.neighbor(wallDirection), // 优先找墙
+                PlacementOption.neighbor(verticalDir) // 其次找地面/天花板
+        );
+    };
+
     // ==================== Filters (过滤器) ====================
 
     /**
@@ -222,74 +264,92 @@ public final class Rules {
     };
 
     /**
-     * 过滤器：拒绝异种半砖支撑
-     * 防止 BOTTOM 半砖依靠 TOP 半砖（它们之间有空隙）
-     * 双层半砖视为完整方块，允许依靠
+     * [通用过滤器] 垂直几何对齐检查
+     * * 作用：防止因高度错位导致的放置失败。
+     * 核心逻辑：确保"我需要的点击区域"在"邻居身上"是存在的实体。
+     * * 支持方块：
+     * - SlabBlock (半砖)
+     * - StairsBlock (楼梯)
+     * - TrapdoorBlock (活板门) [新增]
+     * * 冲突场景：
+     * 1. 我是下半截 (Bottom)，邻居是纯上半截 (Top Slab/Trapdoor) -> ❌ 邻居下半部是空的，无法点击
+     * 2. 我是上半截 (Top)，邻居是纯下半截 (Bottom Slab/Trapdoor) -> ❌ 邻居上半部是空的
      */
-    public static final CandidateFilter NO_MISMATCHED_SLABS = (ctx, opt) -> {
-        // 1. 如果是点自己 (Self)，说明正在进行合法的补全操作，直接放行
-        if (opt.isSelf()) return true;
+    public static final CandidateFilter NO_MISMATCHED_ALIGNMENT = (ctx, opt) -> {
+        // 1. Self 模式直接放行（这是补全操作，几何位置由 HitVec 保证）
+        if (opt.isSelf())
+            return true;
 
-        // 只对半砖生效
-        if (!ctx.hasProperty(SlabBlock.TYPE)) return true;
+        // 2. 只检查水平方向（垂直方向依靠由其他 Filter 负责）
+        if (!opt.direction().getAxis().isHorizontal())
+            return true;
 
-        // 只检查水平方向（垂直方向由专门的 Filter 处理）
-        if (!opt.direction().getAxis().isHorizontal()) return true;
+        // --- A. 分析"我"的几何形态 ---
+        boolean iAmBottom = false;
+        boolean iAmTop = false;
 
-        SlabType myType = ctx.getProperty(SlabBlock.TYPE);
-
-        // 检查邻居
-        BlockPos neighborPos = opt.getInteractPos(ctx.targetPos());
-        var neighbor = ctx.world().getBlockState(neighborPos);
-        if (!(neighbor.getBlock() instanceof SlabBlock)) return true;
-        if (!neighbor.contains(SlabBlock.TYPE)) return true;
-
-        SlabType neighborType = neighbor.get(SlabBlock.TYPE);
-        if (neighborType == SlabType.DOUBLE) return true; // 双层半砖可以支撑任何
-
-        // 单层半砖必须类型一致
-        return neighborType == myType;
-    };
-
-    /**
-     * 过滤器：楼梯水平邻居半砖检查
-     * 防止楼梯依靠不匹配的半砖（它们之间有空隙）
-     * - BOTTOM（正置）楼梯：不能依靠 TOP 单层半砖（上半部分悬空）
-     * - TOP（倒置）楼梯：不能依靠 BOTTOM 单层半砖（下半部分悬空）
-     * 双层半砖视为完整方块，允许依靠
-     */
-    public static final CandidateFilter NO_MISMATCHED_STAIR_SLAB = (ctx, opt) -> {
-        // 1. Self 模式暂不适用于楼梯（除非将来有楼梯补全），放行
-        if (opt.isSelf()) return true;
-
-        // 只对楼梯生效
-        if (!ctx.hasProperty(StairsBlock.HALF)) return true;
-
-        // 只检查水平方向
-        if (!opt.direction().getAxis().isHorizontal()) return true;
-
-        BlockHalf myHalf = ctx.getProperty(StairsBlock.HALF);
-
-        // 检查邻居是否是半砖
-        BlockPos neighborPos = opt.getInteractPos(ctx.targetPos());
-        var neighbor = ctx.world().getBlockState(neighborPos);
-        if (!(neighbor.getBlock() instanceof SlabBlock)) return true;
-        if (!neighbor.contains(SlabBlock.TYPE)) return true;
-
-        SlabType neighborType = neighbor.get(SlabBlock.TYPE);
-        if (neighborType == SlabType.DOUBLE) return true; // 双层半砖可以支撑任何
-
-        // BOTTOM（正置）楼梯占据下半空间 (0~0.5)
-        // 如果邻居是 TOP 半砖 (0.5~1)，它们之间有空隙，不能依靠
-        if (myHalf == BlockHalf.BOTTOM && neighborType == SlabType.TOP) {
-            return false;
+        // 检查半砖
+        if (ctx.hasProperty(SlabBlock.TYPE)) {
+            SlabType type = ctx.getProperty(SlabBlock.TYPE);
+            iAmBottom = (type == SlabType.BOTTOM || type == SlabType.DOUBLE);
+            iAmTop = (type == SlabType.TOP || type == SlabType.DOUBLE);
+        }
+        // 检查楼梯
+        else if (ctx.hasProperty(StairsBlock.HALF)) {
+            BlockHalf half = ctx.getProperty(StairsBlock.HALF);
+            iAmBottom = (half == BlockHalf.BOTTOM);
+            iAmTop = (half == BlockHalf.TOP);
+        }
+        // [新增] 检查活板门
+        else if (ctx.hasProperty(TrapdoorBlock.HALF)) {
+            BlockHalf half = ctx.getProperty(TrapdoorBlock.HALF);
+            iAmBottom = (half == BlockHalf.BOTTOM);
+            iAmTop = (half == BlockHalf.TOP);
+        } else {
+            // 如果我是普通方块（如石头），我需要完整的侧面吗？
+            // 通常普通方块可以依附在半砖上，只要 HitVec 算得准。
+            // 但为了稳妥，我们可以认为普通方块既需要 Top 也需要 Bottom 的支撑
+            // iAmBottom = true; iAmTop = true;
+            // 暂时保持宽松策略：非半截方块不检查对齐
+            return true;
         }
 
-        // TOP（倒置）楼梯占据上半空间 (0.5~1)
-        // 如果邻居是 BOTTOM 半砖 (0~0.5)，它们之间有空隙，不能依靠
-        if (myHalf == BlockHalf.TOP && neighborType == SlabType.BOTTOM) {
-            return false;
+        // --- B. 分析"邻居"的几何缺陷 ---
+        // 我们只关心邻居是不是"纯粹的另一半"，如果是，那就无法依附。
+
+        BlockPos neighborPos = opt.getInteractPos(ctx.targetPos());
+        var neighborState = ctx.world().getBlockState(neighborPos);
+        Block neighborBlock = neighborState.getBlock();
+
+        boolean neighborIsPureTop = false;
+        boolean neighborIsPureBottom = false;
+
+        // 检查邻居半砖
+        if (neighborBlock instanceof SlabBlock && neighborState.contains(SlabBlock.TYPE)) {
+            SlabType t = neighborState.get(SlabBlock.TYPE);
+            neighborIsPureTop = (t == SlabType.TOP); // 只有上，下是空
+            neighborIsPureBottom = (t == SlabType.BOTTOM); // 只有下，上是空
         }
+        // [新增] 检查邻居活板门 (活板门是很薄的，错位绝对点不到)
+        else if (neighborBlock instanceof TrapdoorBlock && neighborState.contains(TrapdoorBlock.HALF)) {
+            // 注意：活板门如果是 OPEN 的，它的碰撞箱会贴在侧面，这会让情况变复杂。
+            // 但无论是否 Open，它的 Top/Bottom 属性决定了它在 Y 轴上的主体位置。
+            BlockHalf h = neighborState.get(TrapdoorBlock.HALF);
+            neighborIsPureTop = (h == BlockHalf.TOP);
+            neighborIsPureBottom = (h == BlockHalf.BOTTOM);
+        }
+        // (可选) 检查邻居楼梯：楼梯背面是完整的，但正面是缺的。
+        // 为了最大兼容性，通常认为楼梯是"足够厚"的，暂不将其标记为 PureTop/Bottom。
+
+        // --- C. 判定冲突 ---
+
+        // 如果我需要在下方依附，但邻居下方是空的 -> 冲突
+        if (iAmBottom && neighborIsPureTop)
+            return false;
+
+        // 如果我需要在上方依附，但邻居上方是空的 -> 冲突
+        if (iAmTop && neighborIsPureBottom)
+            return false;
 
         return true;
     };
@@ -331,6 +391,60 @@ public final class Rules {
         }
 
         return true;
+    };
+    /**
+     * 过滤器：活板门方向检查
+     * * 核心逻辑：
+     * 1. 贴墙放置 (Horizontal Click)：
+     * 方向完全由"点击的那个面"决定。必须确保我们点击的面能产生目标 FACING。
+     * 例如：目标朝北 -> 必须贴在南面墙的北面上 -> 点击面必须是 NORTH。
+     * * 2. 平面放置 (Vertical Click - UP/DOWN)：
+     * 方向由"玩家放置时的视线方向"决定。
+     * Minecraft 规则：放置后的活板门朝向 = 玩家水平朝向的相反方向 (Opposite)。
+     * * [修正逻辑]：
+     * 由于 Printer 会自动旋转视线去看向目标方块，我们不能用 player.getHorizontalFacing() (当前朝向)。
+     * 我们需要计算：如果玩家转头看向目标方块，那时候的水平朝向是什么？
+     */
+    public static final CandidateFilter TRAPDOOR_ROTATION_CHECK = (ctx, opt) -> {
+        // 如果没有 FACING 属性，不需要检查
+        if (!ctx.hasProperty(TrapdoorBlock.FACING))
+            return true;
+
+        Direction targetFacing = ctx.getProperty(TrapdoorBlock.FACING);
+        Direction clickedFace = opt.getClickedFace();
+
+        // --- 情况 A: 贴墙放置 (点击侧面) ---
+        // 此时与玩家视角无关，只与点击面有关
+        if (clickedFace.getAxis().isHorizontal()) {
+            // 规则：点击面必须等于目标朝向
+            // (例如：Trapdoor要朝北，意味着背靠南边的墙，我们需要点击那面墙的北面)
+            return clickedFace == targetFacing;
+        }
+
+        // --- 情况 B: 平面放置 (点击 UP/DOWN) ---
+        // 此时与点击面无关，只与玩家相对位置有关
+
+        // 1. 计算"理论视线方向"
+        double yawToTarget = Rotations.getYaw(ctx.targetCenter());
+
+        // 2. 将 Yaw 转换为标准的水平方向 [核心修复]
+        // 0=South, 1=West, 2=North, 3=East (与 Direction.fromHorizontal 顺序一致)
+        // Minecraft Yaw: 0=South, 90=West, 180=North, 270=East
+        int index = MathHelper.floor((yawToTarget / 90.0D) + 0.5D) & 3;
+        Direction theoreticalPlayerFacing;
+        switch (index) {
+            case 0: theoreticalPlayerFacing = Direction.SOUTH; break;
+            case 1: theoreticalPlayerFacing = Direction.WEST; break;
+            case 2: theoreticalPlayerFacing = Direction.NORTH; break;
+            default: theoreticalPlayerFacing = Direction.EAST; break;
+        }
+
+        // 3. 计算放置后的结果
+        // Minecraft 规则：Trapdoor 的朝向会背对玩家
+        Direction resultingTrapdoorFacing = theoreticalPlayerFacing.getOpposite();
+
+        // 4. 比较
+        return resultingTrapdoorFacing == targetFacing;
     };
 
     // ==================== HitVecCalculators (点击位置计算器) ====================
@@ -391,4 +505,35 @@ public final class Rules {
         return HitVecCalculator.getHitVecForStairs(pos, face, half);
     };
 
+
+    /**
+     * 计算器：活板门点击位置
+     * * 核心逻辑：
+     * 1. 如果点击的是侧面 (Wall Placement)：
+     * - HALF=TOP -> 点击上半部 (Y+0.8)
+     * - HALF=BOTTOM -> 点击下半部 (Y+0.2)
+     * 2. 如果点击的是上下底面 (Floor/Ceiling)：
+     * - 直接点击中心
+     */
+    public static final HitVecCalculator TRAPDOOR = (ctx, opt) -> {
+        BlockPos pos = opt.getInteractPos(ctx.targetPos());
+        Direction face = opt.getClickedFace();
+
+        // 默认中心
+        Vec3d center = HitVecCalculator.getHitVec(pos, face);
+
+        // 如果没有属性，直接返回
+        if (!ctx.hasProperty(TrapdoorBlock.HALF))
+            return center;
+        BlockHalf half = ctx.getProperty(TrapdoorBlock.HALF);
+
+        // 只有点击侧面时，才需要通过 Y 偏移来控制 HALF
+        if (face.getAxis().isHorizontal()) {
+            // Trapdoor 对点击位置比较敏感，建议偏移量稍微大一点以确保判定
+            double yOffset = (half == BlockHalf.TOP) ? 0.35 : -0.35;
+            return new Vec3d(center.x, center.y + yOffset, center.z);
+        }
+
+        return center;
+    };
 }

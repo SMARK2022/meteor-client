@@ -1,5 +1,7 @@
 package meteordevelopment.meteorclient.utils.printer;
 
+import meteordevelopment.meteorclient.utils.printer.PlacementOption;
+import net.minecraft.block.*;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.SlabBlock;
@@ -24,6 +26,7 @@ import net.minecraft.state.property.Properties;
  * 4. 默认方块：六个方向均可
  *
  * 使用示例：
+ *
  * <pre>
  * PlacementResolver resolver = ResolverRegistry.get(blockState.getBlock());
  * PlacementOption opt = resolver.resolve(context);
@@ -32,7 +35,8 @@ import net.minecraft.state.property.Properties;
  */
 public final class ResolverRegistry {
 
-    private ResolverRegistry() {} // 禁止实例化
+    private ResolverRegistry() {
+    } // 禁止实例化
 
     // ==================== 预定义策略 ====================
 
@@ -55,19 +59,19 @@ public final class ResolverRegistry {
      * 点击位置：半砖专用（根据 TOP/BOTTOM 调整 Y 偏移）
      */
     public static final PlacementResolver SLAB_RESOLVER = PlacementResolver.create("slab")
-        // 来源：自我补全 + 水平 + 垂直支撑
-        .addSource(Rules.SLAB_SELF_COMPLETE)
-        .addSource(Rules.ALL_HORIZONTAL)
-        .addSource(Rules.SLAB_VERTICAL_SUPPORT)
-        // 过滤：基础检查 + 半砖特殊检查
-        .addFilter(Rules.CLICKABLE_NEIGHBOR)
-        .addFilter(Rules.VALID_SELF_TARGET) // 确保不乱点自己
-        .addFilter(Rules.NO_MISMATCHED_SLABS)
-        .addFilter(Rules.SLAB_VERTICAL_FACE)
-        .addFilter(Rules.NCP_STRICT)
-        .addFilter(Rules.LINE_OF_SIGHT)
-        // 点击位置
-        .hitVec(Rules.SLAB);
+            // 来源：自我补全 + 水平 + 垂直支撑
+            .addSource(Rules.SLAB_SELF_COMPLETE)
+            .addSource(Rules.ALL_HORIZONTAL)
+            .addSource(Rules.SLAB_VERTICAL_SUPPORT)
+            // 过滤：基础检查 + 半砖特殊检查
+            .addFilter(Rules.CLICKABLE_NEIGHBOR)
+            .addFilter(Rules.VALID_SELF_TARGET) // 确保不乱点自己
+            .addFilter(Rules.NO_MISMATCHED_ALIGNMENT)
+            .addFilter(Rules.SLAB_VERTICAL_FACE)
+            .addFilter(Rules.NCP_STRICT)
+            .addFilter(Rules.LINE_OF_SIGHT)
+            // 点击位置
+            .hitVec(Rules.SLAB);
 
     /**
      * 楼梯放置策略
@@ -85,16 +89,16 @@ public final class ResolverRegistry {
      * 点击位置：楼梯专用（根据正置/倒置调整 Y 偏移）
      */
     public static final PlacementResolver STAIR_RESOLVER = PlacementResolver.create("stair")
-        // 来源：水平 + 垂直支撑
-        .addSource(Rules.ALL_HORIZONTAL)
-        .addSource(Rules.STAIR_VERTICAL_SUPPORT)
-        // 过滤：基础检查 + 楼梯特殊检查
-        .addFilter(Rules.CLICKABLE_NEIGHBOR)
-        .addFilter(Rules.NO_MISMATCHED_STAIR_SLAB)
-        .addFilter(Rules.NCP_STRICT)
-        .addFilter(Rules.LINE_OF_SIGHT)
-        // 点击位置
-        .hitVec(Rules.STAIR);
+            // 来源：水平 + 垂直支撑
+            .addSource(Rules.ALL_HORIZONTAL)
+            .addSource(Rules.STAIR_VERTICAL_SUPPORT)
+            // 过滤：基础检查 + 楼梯特殊检查
+            .addFilter(Rules.CLICKABLE_NEIGHBOR)
+            .addFilter(Rules.NO_MISMATCHED_ALIGNMENT)
+            .addFilter(Rules.NCP_STRICT)
+            .addFilter(Rules.LINE_OF_SIGHT)
+            // 点击位置
+            .hitVec(Rules.STAIR);
 
     /**
      * 轴向方块放置策略（原木、柱子、干草块、锁链等）
@@ -110,14 +114,29 @@ public final class ResolverRegistry {
      * 点击位置：中心点击
      */
     public static final PlacementResolver AXIS_RESOLVER = PlacementResolver.create("axis")
-        // 来源：轴向特定
-        .addSource(Rules.AXIS_SPECIFIC)
-        // 过滤：基础检查
-        .addFilter(Rules.CLICKABLE_NEIGHBOR)
-        .addFilter(Rules.NCP_STRICT)
-        .addFilter(Rules.LINE_OF_SIGHT)
-        // 点击位置
-        .hitVec(Rules.CENTER);
+            // 来源：轴向特定
+            .addSource(Rules.AXIS_SPECIFIC)
+            // 过滤：基础检查
+            .addFilter(Rules.CLICKABLE_NEIGHBOR)
+            .addFilter(Rules.NCP_STRICT)
+            .addFilter(Rules.LINE_OF_SIGHT)
+            // 点击位置
+            .hitVec(Rules.CENTER);
+
+    /**
+     * 活板门放置策略
+     */
+    public static final PlacementResolver TRAPDOOR_RESOLVER = PlacementResolver.create("trapdoor")
+            .addSource(Rules.TRAPDOOR_SUPPORT) // 之前的 Source
+            .addFilter(Rules.CLICKABLE_NEIGHBOR)
+
+            // [新增] 必须加上对齐检查，防止活板门试图依附在错位的半砖/活板门上
+            .addFilter(Rules.NO_MISMATCHED_ALIGNMENT)
+
+            .addFilter(Rules.TRAPDOOR_ROTATION_CHECK)
+            .addFilter(Rules.NCP_STRICT)
+            .addFilter(Rules.LINE_OF_SIGHT)
+            .hitVec(Rules.TRAPDOOR); // 之前的 HitVec
 
     /**
      * 默认方块放置策略
@@ -133,14 +152,14 @@ public final class ResolverRegistry {
      * 点击位置：中心点击
      */
     public static final PlacementResolver DEFAULT_RESOLVER = PlacementResolver.create("default")
-        // 来源：所有方向
-        .addSource(Rules.ALL_DIRECTIONS)
-        // 过滤：基础检查
-        .addFilter(Rules.CLICKABLE_NEIGHBOR)
-        .addFilter(Rules.NCP_STRICT)
-        .addFilter(Rules.LINE_OF_SIGHT)
-        // 点击位置
-        .hitVec(Rules.CENTER);
+            // 来源：所有方向
+            .addSource(Rules.ALL_DIRECTIONS)
+            // 过滤：基础检查
+            .addFilter(Rules.CLICKABLE_NEIGHBOR)
+            .addFilter(Rules.NCP_STRICT)
+            .addFilter(Rules.LINE_OF_SIGHT)
+            // 点击位置
+            .hitVec(Rules.CENTER);
 
     // ==================== 策略获取方法 ====================
 
@@ -164,6 +183,11 @@ public final class ResolverRegistry {
         // 3. 轴向方块（通过默认状态检查是否有 AXIS 属性）
         if (block.getDefaultState().contains(Properties.AXIS)) {
             return AXIS_RESOLVER;
+        }
+
+        // 在 get(Block block) 方法中添加：
+        if (block instanceof TrapdoorBlock) {
+            return TRAPDOOR_RESOLVER;
         }
 
         // 4. 默认
@@ -193,6 +217,11 @@ public final class ResolverRegistry {
         // 3. 轴向方块
         if (state.contains(Properties.AXIS)) {
             return AXIS_RESOLVER;
+        }
+
+        // 在 get(Block block) 方法中添加：
+        if (block instanceof TrapdoorBlock) {
+            return TRAPDOOR_RESOLVER;
         }
 
         // 4. 默认
@@ -306,7 +335,8 @@ public final class ResolverRegistry {
             // 情况2：当前是空气，目标是双层半砖
             if (!isCurrentSlab && ctx.getProperty(SlabBlock.TYPE) == SlabType.DOUBLE) {
                 // 检查放 BOTTOM 是否可行
-                PlacementContext bottomCtx = ctx.withTargetState(ctx.targetState().with(SlabBlock.TYPE, SlabType.BOTTOM));
+                PlacementContext bottomCtx = ctx
+                        .withTargetState(ctx.targetState().with(SlabBlock.TYPE, SlabType.BOTTOM));
                 PlacementResolver resolver = get(bottomCtx.targetState());
                 if (resolver.canResolve(bottomCtx)) {
                     return true;
