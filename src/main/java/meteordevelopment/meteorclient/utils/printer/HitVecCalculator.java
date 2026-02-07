@@ -1,5 +1,7 @@
 package meteordevelopment.meteorclient.utils.printer;
 
+import net.minecraft.block.BlockState;
+import net.minecraft.block.SlabBlock;
 import net.minecraft.block.enums.BlockHalf;
 import net.minecraft.block.enums.SlabType;
 import net.minecraft.util.math.BlockPos;
@@ -60,9 +62,9 @@ public interface HitVecCalculator {
     /**
      * 计算半砖的hitVec
      * 水平点击：通过Y偏移决定上/下半砖
-     * 垂直点击：直接使用面中心
+     * 垂直点击：根据邻居类型调整点击高度
      */
-    static Vec3d getHitVecForSlab(BlockPos neighborPos, Direction clickedSide, SlabType targetSlabType) {
+    static Vec3d getHitVecForSlab(BlockPos neighborPos, Direction clickedSide, SlabType targetSlabType, BlockState neighborState) {
         if (clickedSide.getAxis().isHorizontal()) {
             // 水平方向：调整Y坐标
             // TOP: Y + 0.25 (点击上半部分)
@@ -73,7 +75,24 @@ public interface HitVecCalculator {
                     neighborPos.getY() + 0.5 + yOffset,
                     neighborPos.getZ() + 0.5).add(Vec3d.of(clickedSide.getVector()).multiply(0.5));
         }
-        // 垂直方向：直接使用面中心
+
+        // 垂直方向：检查邻居的半砖状态
+        // 如果邻居是半砖，且我们点击的是它的“半高”面，则需要调整点击位置到中心
+        if (neighborState.getBlock() instanceof SlabBlock && neighborState.contains(SlabBlock.TYPE)) {
+            SlabType neighborType = neighborState.get(SlabBlock.TYPE);
+
+            // 情况1：邻居是 BOTTOM，我们点它的 UP 面 -> 点击位置在 y=0.5 (即中心)
+            if (neighborType == SlabType.BOTTOM && clickedSide == Direction.UP) {
+                return Vec3d.ofCenter(neighborPos);
+            }
+
+            // 情况2：邻居是 TOP，我们点它的 DOWN 面 -> 点击位置在 y=0.5 (即中心)
+            if (neighborType == SlabType.TOP && clickedSide == Direction.DOWN) {
+                return Vec3d.ofCenter(neighborPos);
+            }
+        }
+
+        // 默认情况（完整方块或双层半砖）：直接使用面中心
         return Vec3d.ofCenter(neighborPos).add(Vec3d.of(clickedSide.getVector()).multiply(0.5));
     }
 

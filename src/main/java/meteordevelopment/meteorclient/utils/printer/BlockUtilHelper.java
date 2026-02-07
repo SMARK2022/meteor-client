@@ -218,7 +218,16 @@ public class BlockUtilHelper {
             player
         ));
 
-        return hitResult == null || hitResult.getType() == net.minecraft.util.hit.HitResult.Type.MISS;
+        if (hitResult == null || hitResult.getType() == net.minecraft.util.hit.HitResult.Type.MISS) {
+            return true;
+        }
+
+        if (hitResult.getType() == net.minecraft.util.hit.HitResult.Type.BLOCK) {
+            // 如果击中的是目标方块本身，且击中的面与目标面一致，则视为可见
+            return hitResult.getBlockPos().equals(blockPos) && hitResult.getSide() == direction;
+        }
+
+        return false;
     }
 
     /**
