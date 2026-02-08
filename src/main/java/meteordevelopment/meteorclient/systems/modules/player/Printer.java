@@ -42,6 +42,8 @@ import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.*;
 import net.minecraft.block.enums.SlabType;
 import net.minecraft.entity.Entity;
+import net.minecraft.entity.ItemEntity;
+import net.minecraft.entity.ExperienceOrbEntity;
 import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.decoration.EndCrystalEntity;
 import net.minecraft.entity.decoration.ItemFrameEntity;
@@ -678,18 +680,46 @@ public class Printer extends Module {
 
     /**
      * Checks if there's an entity blocking placement at the given position.
+     * [修复版] 解决了掉落物、经验球、旁观者导致无法放置的问题
      */
     private boolean hasBlockingEntity(BlockPos pos) {
         net.minecraft.util.math.Box box = new net.minecraft.util.math.Box(pos);
-        for (Entity entity : mc.world.getEntitiesByClass(Entity.class, box, e -> true)) {
-            if (entity.isAlive() &&
-                    !(entity instanceof ItemFrameEntity) &&
-                    !(entity instanceof ArmorStandEntity) &&
-                    !(entity instanceof EndCrystalEntity)) {
-                return true;
-            }
-        }
-        return false;
+
+        // 性能优化：可以直接在这里传入 Predicate 进行初步过滤
+        return !mc.world.getEntitiesByClass(Entity.class, box, entity -> {
+            // 1. 基础存活检查
+            if (!entity.isAlive())
+                return false;
+
+            // 2. 排除旁观者 (旁观者不有碰撞体积)
+            if (entity.isSpectator())
+                return false;
+
+            // 3. 排除非阻挡性实体
+            if (entity instanceof ItemEntity)
+                return false; // 掉落物
+            if (entity instanceof ExperienceOrbEntity)
+                return false; // 经验球
+            // if (entity instanceof AbstractMinecartEntity) return false; // (可选)
+            // 矿车通常可以重叠放置
+
+            // 4. 排除装饰性实体 (展示框、画等)
+            // EndCrystal 和 ArmorStand 有时确实会阻挡，视具体需求而定，原代码排除了它们
+            if (entity instanceof ItemFrameEntity)
+                return false;
+            if (entity instanceof ArmorStandEntity)
+                return false;
+            if (entity instanceof EndCrystalEntity)
+                return false;
+
+            // 5. 排除与方块无碰撞的实体 (如箭矢)
+            // 这一步比较激进，通常 ProjectileEntity 也可以排除
+            if (entity instanceof net.minecraft.entity.projectile.ProjectileEntity)
+                return false;
+
+            // 剩下的通常是：玩家(Player)、生物(Mobs)、船(Boats) -> 这些应该视为阻挡
+            return true;
+        }).isEmpty(); // 如果列表不为空，说明存在阻挡实体
     }
 
     /**

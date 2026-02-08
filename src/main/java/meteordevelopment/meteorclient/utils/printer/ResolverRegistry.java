@@ -529,9 +529,7 @@ public final class ResolverRegistry {
 
         // ==================== 9. 六轴同向类 (Look 6 Same) ====================
         // 特征：6面 FACING，朝向 = 玩家视线
-        if (block instanceof DispenserBlock // 发射器
-                || block instanceof DropperBlock // 投掷器
-                || block instanceof ObserverBlock // 侦测器 (输出端朝向玩家视线)
+        if (block instanceof ObserverBlock // 侦测器 (输出端朝向玩家视线)
                 || block instanceof CommandBlock // 命令方块
                 || block instanceof BarrelBlock // 木桶 (通常是6轴 Look-based，虽然很多人以为是箱子)
         ) {
@@ -540,7 +538,9 @@ public final class ResolverRegistry {
 
         // ==================== 10. 六轴反向类 (Look 6 Opposite) ====================
         // 特征：6面 FACING，朝向 = 玩家视线反向 (头对着玩家)
-        if (block instanceof PistonBlock // 活塞 (普通 & 粘性)
+        if (block instanceof DispenserBlock // 发射器
+                || block instanceof DropperBlock // 投掷器
+                || block instanceof PistonBlock // 活塞 (普通 & 粘性)
         // 注：EndPortalFrame 是水平反向，已在 Horizontal_Opposite 处理
         ) {
             return LOOK_6_OPPOSITE_RESOLVER;
