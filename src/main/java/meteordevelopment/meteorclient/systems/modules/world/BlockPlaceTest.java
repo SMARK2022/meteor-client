@@ -245,58 +245,50 @@ public class BlockPlaceTest extends Module {
     private void sendBlockPlacePacket() {
         if (mc.player == null || mc.getNetworkHandler() == null || mc.world == null) return;
 
-        // 1. 构造目标坐标
+        // 1. 准备基础数据
         BlockPos targetPos = new BlockPos(targetX.get(), targetY.get(), targetZ.get());
-
-        // 2. 构造光标位置（方块内部的点击位置）
         Vec3d cursorPos = new Vec3d(cursorX.get(), cursorY.get(), cursorZ.get());
+        Direction face = targetFace.get();
 
-        // 3. 构造 BlockHitResult
+        // 2. 校验 Cursor 是否在面上 (关键！防止 Invalid Interaction)
+        // 如果想要模拟合法点击，必须确保点击点在面上。
+        // 例如：UP 面，y 必须是 1.0；NORTH 面，z 必须是 0.0 等。
+        // 这里我们信任用户的输入，但您可以添加逻辑自动修正。
+
+        // 3. 计算绝对命中坐标 (Hit Vec)
         Vec3d hitPos = Vec3d.of(targetPos).add(cursorPos);
-        BlockHitResult hitResult = new BlockHitResult(
-            hitPos,              // 命中点的世界坐标
-            targetFace.get(),    // 点击的面
-            targetPos,           // 方块坐标
-            false                // 是否在方块内部
-        );
 
-        // 4. 获取正确的序列号 (通过反射修复可见性问题)
-        int sequence = 0;
-        try {
-            // 使用反射获取受保护的 getPendingUpdateManager 方法
-            Method method = ClientWorld.class.getDeclaredMethod("getPendingUpdateManager");
-            method.setAccessible(true); // 暴力破解访问权限
+        // 4. 构造 BlockHitResult
+        // isInsideBlock 通常为 false，除非你的头就在方块里
+        boolean inside = false;
+        BlockHitResult hitResult = new BlockHitResult(hitPos, face, targetPos, inside);
 
-            PendingUpdateManager manager = (PendingUpdateManager) method.invoke(mc.world);
-            sequence = manager.getSequence(); // 获取 int 类型的序列号
+        // 5. 获取正确的序列号 (关键修复！！！)
+        // 1.19+ 必须从 PendingUpdateManager 获取当前的序列
+        int sequence = mc.world.getPendingUpdateManager().getSequence();
 
-        } catch (Exception e) {
-            // 如果反射失败（比如方法名不对），回退到 0
-            e.printStackTrace();
-            if (logToChat.get()) info("(red)Failed to get sequence via reflection!");
-        }
-
-        // 5. 构造放置包
+        // 6. 构造放置包
         PlayerInteractBlockC2SPacket packet = new PlayerInteractBlockC2SPacket(
             Hand.MAIN_HAND,
             hitResult,
             sequence
         );
 
-        // 6. 发送挥手包 (绕过 NoSwing 检测)
+        // 7. 发送挥手包 (关键修复！！！)
+        // 这会让服务器认为是一次合法的交互，并通过 NoSwing 检测
+        // 注意：挥手包通常在交互包之前或之后发送，Vanilla 逻辑通常是先交互后挥手或同时
         mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(Hand.MAIN_HAND));
 
-        // 7. 发送放置包
+        // 8. 发送放置包
         mc.getNetworkHandler().sendPacket(packet);
 
-        // 记录发送信息
+        // 记录日志
         lastSendTime = System.currentTimeMillis();
         sequenceId++;
 
-        // 添加到序列追踪
         String sendLog = String.format("[#%d] SENT Interact -> (%d, %d, %d) seq=%d face=%s cursor=(%.2f, %.2f, %.2f)",
             sequenceId, targetX.get(), targetY.get(), targetZ.get(), sequence,
-            targetFace.get().name(), cursorX.get(), cursorY.get(), cursorZ.get());
+            face.name(), cursorX.get(), cursorY.get(), cursorZ.get());
 
         packetSequence.add(sendLog);
 
@@ -317,7 +309,7 @@ public class BlockPlaceTest extends Module {
             info("Distance: (highlight)%.1f blocks", distance);
         }
 
-        // 重置按钮状态（在方法结束后，避免自引用）
+        // 自动重置按钮
         sendButton.set(false);
     }
 
