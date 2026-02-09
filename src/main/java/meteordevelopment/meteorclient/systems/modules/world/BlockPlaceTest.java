@@ -11,6 +11,7 @@ import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.player.ChatUtils;
 import meteordevelopment.orbit.EventHandler;
+import net.minecraft.network.packet.c2s.play.HandSwingC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerInteractBlockC2SPacket;
 import net.minecraft.network.packet.s2c.play.*;
 import net.minecraft.util.Hand;
@@ -18,7 +19,10 @@ import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.client.network.PendingUpdateManager;
+import net.minecraft.client.world.ClientWorld;
 
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -233,21 +237,21 @@ public class BlockPlaceTest extends Module {
     /**
      * 发送方块放置数据包
      *
-     * 关键点：
-     * 1. 使用 PlayerInteractBlockC2SPacket 而不是直接调用 interactBlock()
-     * 2. 这样可以绕过客户端的距离检查，直接发送到服务器
-     * 3. 服务器会依次执行所有的反作弊检查（包括 FarPlace 和 GhostBlockMitigation）
+     * 关键修复点：
+     * 1. 序列号 (Sequence ID)：使用 PendingUpdateManager 获取当前世界序列。
+     * 2. 挥手包 (Hand Swing)：发送 HandSwingC2SPacket 以通过 NoSwing 检查。
+     * 3. 绝对坐标：确保 BlockHitResult 使用正确的世界命中坐标。
      */
     private void sendBlockPlacePacket() {
-        if (mc.player == null || mc.getNetworkHandler() == null) return;
+        if (mc.player == null || mc.getNetworkHandler() == null || mc.world == null) return;
 
-        // 构造目标坐标
+        // 1. 构造目标坐标
         BlockPos targetPos = new BlockPos(targetX.get(), targetY.get(), targetZ.get());
 
-        // 构造光标位置（方块内部的点击位置）
+        // 2. 构造光标位置（方块内部的点击位置）
         Vec3d cursorPos = new Vec3d(cursorX.get(), cursorY.get(), cursorZ.get());
 
-        // 构造 BlockHitResult
+        // 3. 构造 BlockHitResult
         Vec3d hitPos = Vec3d.of(targetPos).add(cursorPos);
         BlockHitResult hitResult = new BlockHitResult(
             hitPos,              // 命中点的世界坐标
@@ -256,14 +260,33 @@ public class BlockPlaceTest extends Module {
             false                // 是否在方块内部
         );
 
-        // 构造数据包
+        // 4. 获取正确的序列号 (通过反射修复可见性问题)
+        int sequence = 0;
+        try {
+            // 使用反射获取受保护的 getPendingUpdateManager 方法
+            Method method = ClientWorld.class.getDeclaredMethod("getPendingUpdateManager");
+            method.setAccessible(true); // 暴力破解访问权限
+
+            PendingUpdateManager manager = (PendingUpdateManager) method.invoke(mc.world);
+            sequence = manager.getSequence(); // 获取 int 类型的序列号
+
+        } catch (Exception e) {
+            // 如果反射失败（比如方法名不对），回退到 0
+            e.printStackTrace();
+            if (logToChat.get()) info("(red)Failed to get sequence via reflection!");
+        }
+
+        // 5. 构造放置包
         PlayerInteractBlockC2SPacket packet = new PlayerInteractBlockC2SPacket(
-            Hand.MAIN_HAND,      // 使用主手
-            hitResult,           // 命中结果
-            0                    // 序列号（用于 1.19+ 的同步）
+            Hand.MAIN_HAND,
+            hitResult,
+            sequence
         );
 
-        // 发送数据包
+        // 6. 发送挥手包 (绕过 NoSwing 检测)
+        mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(Hand.MAIN_HAND));
+
+        // 7. 发送放置包
         mc.getNetworkHandler().sendPacket(packet);
 
         // 记录发送信息
@@ -271,8 +294,8 @@ public class BlockPlaceTest extends Module {
         sequenceId++;
 
         // 添加到序列追踪
-        String sendLog = String.format("[#%d] SENT PlayerInteractBlock -> (%d, %d, %d) face=%s cursor=(%.2f, %.2f, %.2f)",
-            sequenceId, targetX.get(), targetY.get(), targetZ.get(),
+        String sendLog = String.format("[#%d] SENT Interact -> (%d, %d, %d) seq=%d face=%s cursor=(%.2f, %.2f, %.2f)",
+            sequenceId, targetX.get(), targetY.get(), targetZ.get(), sequence,
             targetFace.get().name(), cursorX.get(), cursorY.get(), cursorZ.get());
 
         packetSequence.add(sendLog);
