@@ -37,7 +37,10 @@ public record PlacementContext(
     boolean strict,
 
     /** 是否检查视线（Line of Sight） */
-    boolean checkLos
+    boolean checkLos,
+
+    /** 最大交互距离（Reach Distance，从 Printer 的 placeRange 传入） */
+    double maxReach
 ) {
     /**
      * 获取目标位置的中心坐标
@@ -92,14 +95,14 @@ public record PlacementContext(
      * 创建一个修改了目标状态的新上下文（用于双层半砖等递归场景）
      */
     public PlacementContext withTargetState(BlockState newState) {
-        return new PlacementContext(world, targetPos, newState, eyePos, player, strict, checkLos);
+        return new PlacementContext(world, targetPos, newState, eyePos, player, strict, checkLos, maxReach);
     }
 
     /**
      * 静态工厂方法：从基础参数创建上下文
      */
     public static PlacementContext of(World world, BlockPos pos, BlockState state,
-                                       PlayerEntity player, boolean strict, boolean checkLos) {
+                                       PlayerEntity player, boolean strict, boolean checkLos, double maxReach) {
         return new PlacementContext(
             world,
             pos,
@@ -107,7 +110,8 @@ public record PlacementContext(
             player.getEyePos(),
             player,
             strict,
-            checkLos
+            checkLos,
+            maxReach
         );
     }
 }

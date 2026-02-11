@@ -475,8 +475,8 @@ public class Printer extends Module {
         boolean strict = placeMode.get() == PlaceMode.STRICT;
         boolean checkLos = strict && checkLineOfSight.get();
 
-        // 创建放置上下文
-        PlacementContext ctx = PlacementContext.of(mc.world, pos, requiredState, mc.player, strict, checkLos);
+        // 创建放置上下文（传入 placeRange 作为 maxReach）
+        PlacementContext ctx = PlacementContext.of(mc.world, pos, requiredState, mc.player, strict, checkLos, placeRange.get());
 
         // 使用规则引擎解析最佳方向
         return ResolverRegistry.resolve(ctx);
@@ -510,8 +510,8 @@ public class Printer extends Module {
      * @return 放置是否成功
      */
     private boolean placeBlockLegit(BlockPos pos, BlockState requiredState) {
-        // 创建放置上下文（LEGIT 模式：strict=false, checkLos=false）
-        PlacementContext ctx = PlacementContext.of(mc.world, pos, requiredState, mc.player, false, false);
+        // 创建放置上下文（LEGIT 模式：strict=false, checkLos=false，传入 placeRange）
+        PlacementContext ctx = PlacementContext.of(mc.world, pos, requiredState, mc.player, false, false, placeRange.get());
 
         // 使用规则引擎解析最佳方向（内部已经计算了 hitVec 并通过了过滤）
         PlacementOption option = ResolverRegistry.resolve(ctx);
@@ -554,8 +554,8 @@ public class Printer extends Module {
      * @return 放置是否成功
      */
     private boolean placeBlockStrict(BlockPos pos, BlockState requiredState) {
-        // 创建放置上下文（STRICT 模式：strict=true, checkLos 根据设置）
-        PlacementContext ctx = PlacementContext.of(mc.world, pos, requiredState, mc.player, true, checkLineOfSight.get());
+        // 创建放置上下文（STRICT 模式：strict=true, checkLos 根据设置，传入 placeRange）
+        PlacementContext ctx = PlacementContext.of(mc.world, pos, requiredState, mc.player, true, checkLineOfSight.get(), placeRange.get());
 
         // 使用规则引擎解析最佳方向（内部已经计算了 hitVec 并通过了过滤）
         PlacementOption option = ResolverRegistry.resolve(ctx);
@@ -724,8 +724,9 @@ public class Printer extends Module {
                 }
             } else {
                 // STRICT 模式：使用规则引擎检查是否存在合法的放置方向
+                // [改进] 规则引擎内部现在包含了 Reach 过滤器，会对 hitVec 进行精确检查
                 PlacementContext ctx = PlacementContext.of(mc.world, pos, requiredState, mc.player,
-                        true, checkLineOfSight.get());
+                        true, checkLineOfSight.get(), placeRange.get());
 
                 if (!ResolverRegistry.canPlace(ctx)) {
                     continue;

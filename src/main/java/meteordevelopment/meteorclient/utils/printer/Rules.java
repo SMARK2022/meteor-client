@@ -373,14 +373,14 @@ public final class Rules {
      * 确保玩家能够到达要点击的位置（基于 hitVec 而不仅仅是方块中心）
      *
      * 【关键改进】Minecraft 的交互距离是基于 hitVec（点击位置）而不是方块中心。
-     * 虽然官方交互范围是 4.5 格，但由于浮点数精度，通常建议使用 4.5 + 0.1 = 4.6 的阈值。
+     * 使用 Printer 中配置的 maxReach 值（从 placeRange 传入）。
      *
      * 计算公式：
-     * - interactionRange = 4.5（Survival Mode 标准值）
+     * - maxReach = ctx.maxReach()（从 Printer 的 placeRange 设置传入）
      * - reachDistance = eyePos.distanceTo(hitVec)
-     * - 检查：reachDistance <= interactionRange
+     * - 检查：reachDistance <= maxReach + 0.1（加缓冲应对浮点数精度）
      *
-     * @param ctx 放置上下文
+     * @param ctx 放置上下文（包含 maxReach）
      * @param opt 候选放置方向
      * @return true 表示在reach范围内，false 表示超出范围
      */
@@ -395,8 +395,9 @@ public final class Rules {
         // 计算从眼部到点击位置的距离
         double reachDistance = ctx.eyePos().distanceTo(hitVec);
 
-        // Minecraft 标准交互范围：4.5 格
-        double maxReach = 4.5;
+        // 使用 PlacementContext 中传入的 maxReach 值（来自 Printer 的 placeRange 设置）
+        // 加上小缓冲（0.1）以应对浮点数精度问题
+        double maxReach = ctx.maxReach() + 0.1;
 
         return reachDistance <= maxReach;
     };
