@@ -99,12 +99,16 @@ public class Printer extends Module {
             .sliderRange(0, 10)
             .build());
 
-    private final Setting<Integer> placeRange = sgGeneral.add(new IntSetting.Builder()
+    // ==================== 距离设置 ====================
+    // [改进] 支持浮点数精度，预选范围 = range + 1.0
+    // 这样可以提前把接近边界但 reach 不足的方块排除
+    private final Setting<Double> placeRange = sgGeneral.add(new DoubleSetting.Builder()
             .name("range")
-            .description("The range within which to place blocks.")
-            .defaultValue(4)
-            .min(1)
-            .sliderRange(1, 6)
+            .description("The range within which to place blocks (float).")
+            .defaultValue(4.5)
+            .min(1.0)
+            .max(15.0)
+            .sliderRange(1.0, 8.0)
             .build());
 
     private final Setting<Boolean> rotate = sgGeneral.add(new BoolSetting.Builder()
@@ -174,9 +178,7 @@ public class Printer extends Module {
     private Item currentTargetItem = null;
     private BlockState currentTargetState = null;
     private PlacementState placementState = PlacementState.IDLE;
-    private int stateTickCounter = 0;
     private boolean currentBlockNeedsSneak = false;
-    private boolean currentPlayerIsSneaking = false;
 
     // 【新增】标记变量：记录当前潜行状态是否由打印机强制触发
     private boolean didPrinterForceSneak = false;
@@ -238,7 +240,6 @@ public class Printer extends Module {
         currentTargetState = null;
         currentBlockNeedsSneak = false;
         placementState = PlacementState.IDLE;
-        stateTickCounter = 0;
     }
 
     @EventHandler
@@ -312,32 +313,27 @@ public class Printer extends Module {
                     BlockPos neighborPos = option.getInteractPos(currentTargetPos);
                     BlockState neighborState = mc.world.getBlockState(neighborPos);
                     currentBlockNeedsSneak = BlockUtilHelper.SNEAK_BLOCKS.contains(neighborState.getBlock());
-                    currentPlayerIsSneaking = mc.player.isSneaking();
 
                     // 进入物品切换状态
                     placementState = PlacementState.SWITCHING_ITEM;
-                    stateTickCounter = 0;
                     // 不 break，继续执行下一个状态（状态穿透）
                     continue;
 
                 case SWITCHING_ITEM:
-                    // 物品切换状态：切换到目标物品
-                    if (!ItemSwitchHelper.switchToItem(currentTargetItem, true, false)) {
-                        // 物品不存在或切换失败，放弃当前方块，回到空闲状态
-                        resetStateMachine();
-                        return;
-                    }
-
                     // 检查物品是否已经拿到（立即生效）
                     if (ItemSwitchHelper.isItemInMainHand(currentTargetItem)) {
                         // 物品已拿到，立即进入潜行处理状态（无需等待）
                         placementState = PlacementState.PRESSING_SNEAK;
-                        stateTickCounter = 0;
                         // 继续执行下一个状态，不 break
                         continue;
                     } else {
+                        // 物品切换状态：切换到目标物品
+                        if (!ItemSwitchHelper.switchToItem(currentTargetItem, true, false)) {
+                            // 物品不存在或切换失败，放弃当前方块，回到空闲状态
+                            resetStateMachine();
+                            return;
+                        }
                         // 物品未立即生效，需要等待此 tick
-                        stateTickCounter++;
                         // 物品切换需要与服务端同步，此 tick 就此结束
                         break;
                     }
@@ -348,23 +344,18 @@ public class Printer extends Module {
                     if (currentBlockNeedsSneak && !mc.player.isSneaking()) {
                         // 需要潜行但玩家未潜行，按下潜行键
                         mc.options.sneakKey.setPressed(true);
-                        currentPlayerIsSneaking = true;
                         didPrinterForceSneak = true; // 标记所有权
-                        stateTickCounter++;
                         // 潜行操作需要与服务端同步，此 tick 结束
                         break;
                     } else if (!currentBlockNeedsSneak && mc.player.isSneaking()) {
                         // 不需要潜行但玩家正在潜行，抬起潜行键
                         mc.options.sneakKey.setPressed(false);
-                        currentPlayerIsSneaking = false;
                         didPrinterForceSneak = false; // 释放所有权
-                        stateTickCounter++;
                         // 潜行操作需要与服务端同步，此 tick 结束
                         break;
                     } else {
                         // 潜行状态已满足要求，无需执行潜行操作，立即进入放置状态
                         placementState = PlacementState.PLACING_BLOCK;
-                        stateTickCounter = 0;
                         // 继续执行下一个状态，不 break
                         continue;
                     }
@@ -375,7 +366,6 @@ public class Printer extends Module {
 
                     // 无论放置成功与否，都标记为已执行
                     // 如果放置失败，可能是视线问题或其他临时问题，不阻塞后续方块
-                    stateTickCounter++;
 
                     // 放置方块需要与服务端同步，回到空闲状态
                     resetStateMachine();
@@ -537,6 +527,10 @@ public class Printer extends Module {
     /**
      * 更新需要放置方块的位置列表
      * 从Litematica原理图和世界进行对比，找出所有需要放置的方块
+     *
+     * [改进] 现在使用浮点数范围 + 预选距离+1的逻辑 + Reach 过滤的两层过滤：
+     * 1. 初始球形范围：range + 1.0（预选阶段）
+     * 2. Reach 过滤：在 Rules 中对 hitVec 进行精确检查
      */
     private void updatePlacePositions(WorldSchematic worldSchematic) {
         placePositions.clear();
@@ -546,10 +540,14 @@ public class Printer extends Module {
             return;
 
         Vec3d playerPos = mc.player.getEyePos();
-        int range = placeRange.get();
+        double range = placeRange.get();
+
+        // 【改进】预选范围 = 配置范围 + 1.0
+        // 这样可以提前把接近边界但 reach 不足的方块排除
+        double preSelectionRange = range + 1.0;
 
         // 获取玩家周围球形范围内的所有方块位置
-        List<BlockPos> sphere = getSphere(range, playerPos);
+        List<BlockPos> sphere = getSphere(preSelectionRange, playerPos);
 
         for (BlockPos pos : sphere) {
             // 检查是否在渲染层范围内
@@ -660,15 +658,26 @@ public class Printer extends Module {
 
     /**
      * Gets all block positions in a sphere around the given position.
+     * [改进] 现在使用浮点数范围，并支持亚方块级精度
+     *
+     * @param range 球形搜索范围（浮点数，单位：方块）
+     * @param center 球心坐标（眼部位置）
+     * @return 范围内的所有方块位置列表
      */
-    private List<BlockPos> getSphere(int range, Vec3d center) {
+    private List<BlockPos> getSphere(double range, Vec3d center) {
         List<BlockPos> list = new ArrayList<>();
 
-        for (int x = -range; x <= range; x++) {
-            for (int y = -range; y <= range; y++) {
-                for (int z = -range; z <= range; z++) {
+        // 计算扫描范围：向上取整
+        int scanRange = (int) Math.ceil(range) + 1;
+
+        for (int x = -scanRange; x <= scanRange; x++) {
+            for (int y = -scanRange; y <= scanRange; y++) {
+                for (int z = -scanRange; z <= scanRange; z++) {
                     BlockPos pos = BlockPos.ofFloored(center.x + x, center.y + y, center.z + z);
-                    if (Vec3d.ofCenter(pos).distanceTo(center) <= range) {
+                    double distance = Vec3d.ofCenter(pos).distanceTo(center);
+
+                    // [改进] 使用浮点数范围判断
+                    if (distance <= range) {
                         list.add(pos);
                     }
                 }

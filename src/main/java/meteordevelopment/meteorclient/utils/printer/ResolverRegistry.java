@@ -70,6 +70,7 @@ public final class ResolverRegistry {
             .addFilter(Rules.SLAB_VERTICAL_FACE)
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
+            .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
             // 点击位置
             .hitVec(Rules.SLAB);
 
@@ -98,6 +99,7 @@ public final class ResolverRegistry {
             .addFilter(Rules.ROTATION_CHECK_SAME)
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
+            .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
             // 点击位置
             .hitVec(Rules.STAIR);
 
@@ -121,6 +123,7 @@ public final class ResolverRegistry {
             .addFilter(Rules.CLICKABLE_NEIGHBOR)
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
+            .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
             // 点击位置
             .hitVec(Rules.CENTER);
 
@@ -137,6 +140,7 @@ public final class ResolverRegistry {
             .addFilter(Rules.TRAPDOOR_ROTATION_CHECK)
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
+            .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
             .hitVec(Rules.TRAPDOOR); // 之前的 HitVec
 
     /**
@@ -148,6 +152,7 @@ public final class ResolverRegistry {
             .addFilter(Rules.HOPPER_CHECK)
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
+            .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
             .hitVec(Rules.CENTER); // 漏斗点中心即可
 
     /**
@@ -159,6 +164,7 @@ public final class ResolverRegistry {
             .addFilter(Rules.FACE_DEPENDENT_CHECK)
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
+            .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
             .hitVec(Rules.CENTER); // 点中心即可
 
     /**
@@ -174,6 +180,7 @@ public final class ResolverRegistry {
             .addFilter(Rules.WALL_DEGENERATE_ROTATION_CHECK) // 侧面看墙，顶面看人
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
+            .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
             .hitVec(Rules.CENTER);
 
     /**
@@ -191,6 +198,7 @@ public final class ResolverRegistry {
             .addFilter(Rules.WALL_DEGENERATE_ROTATION_CHECK) // 侧面看墙，顶面看人
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
+            .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
             .hitVec(Rules.CENTER);
 
             // ==================== 水平朝向策略 ====================
@@ -208,6 +216,7 @@ public final class ResolverRegistry {
             .addFilter(Rules.ROTATION_CHECK_OPPOSITE) // 核心：反向检查
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
+            .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
             .hitVec(Rules.CENTER);
 
     /**
@@ -224,6 +233,7 @@ public final class ResolverRegistry {
             .addFilter(Rules.ROTATION_CHECK_SAME) // 核心：同向检查
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
+            .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
             .hitVec(Rules.CENTER);
 
     /**
@@ -235,6 +245,7 @@ public final class ResolverRegistry {
             .addFilter(Rules.ROTATION_CHECK_6_SAME) // 视线同向
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
+            .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
             .hitVec(Rules.CENTER);
 
     /**
@@ -246,6 +257,7 @@ public final class ResolverRegistry {
             .addFilter(Rules.ROTATION_CHECK_6_OPPOSITE) // 视线反向
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
+            .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
             .hitVec(Rules.CENTER);
 
     /**
@@ -257,6 +269,7 @@ public final class ResolverRegistry {
             .addFilter(Rules.FACE_ATTACHED_CHECK) // 核心复杂逻辑
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
+            .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
             .hitVec(Rules.CENTER);
 
 
@@ -270,6 +283,7 @@ public final class ResolverRegistry {
             .addFilter(Rules.CRAFTER_CHECK) // 核心专用检查
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
+            .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
             .hitVec(Rules.CENTER);
 
     /**
@@ -292,6 +306,7 @@ public final class ResolverRegistry {
             .addFilter(Rules.CLICKABLE_NEIGHBOR)
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
+            .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
             // 点击位置
             .hitVec(Rules.CENTER);
 

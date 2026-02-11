@@ -369,6 +369,40 @@ public final class Rules {
     };
 
     /**
+     * [新增] 过滤器：Reach 距离检查
+     * 确保玩家能够到达要点击的位置（基于 hitVec 而不仅仅是方块中心）
+     *
+     * 【关键改进】Minecraft 的交互距离是基于 hitVec（点击位置）而不是方块中心。
+     * 虽然官方交互范围是 4.5 格，但由于浮点数精度，通常建议使用 4.5 + 0.1 = 4.6 的阈值。
+     *
+     * 计算公式：
+     * - interactionRange = 4.5（Survival Mode 标准值）
+     * - reachDistance = eyePos.distanceTo(hitVec)
+     * - 检查：reachDistance <= interactionRange
+     *
+     * @param ctx 放置上下文
+     * @param opt 候选放置方向
+     * @return true 表示在reach范围内，false 表示超出范围
+     */
+    public static final CandidateFilter REACH_CHECK = (ctx, opt) -> {
+        // 获取 hitVec（点击位置），这是由各个 HitVecCalculator 计算的
+        Vec3d hitVec = opt.hitVec();
+        if (hitVec == null) {
+            // 如果 hitVec 未计算，则回退到方块中心
+            hitVec = Vec3d.ofCenter(opt.getInteractPos(ctx.targetPos()));
+        }
+
+        // 计算从眼部到点击位置的距离
+        double reachDistance = ctx.eyePos().distanceTo(hitVec);
+
+        // Minecraft 标准交互范围：4.5 格
+        // 加上小缓冲（0.1）以应对浮点数精度问题
+        double maxReach = 4.5 + 0.1;
+
+        return reachDistance <= maxReach;
+    };
+
+    /**
      * [通用过滤器] 垂直几何对齐检查
      * * 作用：防止因高度错位导致的放置失败。
      * 核心逻辑：确保"我需要的点击区域"在"邻居身上"是存在的实体。
