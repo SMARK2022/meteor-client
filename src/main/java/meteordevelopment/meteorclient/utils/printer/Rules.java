@@ -396,8 +396,7 @@ public final class Rules {
         double reachDistance = ctx.eyePos().distanceTo(hitVec);
 
         // Minecraft 标准交互范围：4.5 格
-        // 加上小缓冲（0.1）以应对浮点数精度问题
-        double maxReach = 4.5 + 0.1;
+        double maxReach = 4.5;
 
         return reachDistance <= maxReach;
     };

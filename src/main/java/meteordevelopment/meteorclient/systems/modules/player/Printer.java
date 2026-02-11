@@ -186,6 +186,18 @@ public class Printer extends Module {
     // 【新增】交互点显示用的hitVec（调试用途）
     private Vec3d currentHitVec = null;
 
+    // ==================== 双 Tick 旋转架构 ====================
+    // 【关键】为了通过 Grim 的 RotationPlace 检测，必须确保：
+    // Tick N: 发送 Rotation 包 + Flying 包（确保服务端更新朝向）
+    // Tick N+1: 发送 Place 包（此时服务端朝向已更新）
+
+    // 【新增】记录最后计算的旋转（yaw/pitch）
+    private double lastComputedYaw = 0.0;
+    private double lastComputedPitch = 0.0;
+
+    // 【新增】标记是否已经在本轮中发送过有效的旋转（带 Flying 包）
+    private boolean rotationSyncedThisCycle = false;
+
     /**
      * 方块放置状态机
      */
@@ -240,6 +252,7 @@ public class Printer extends Module {
         currentTargetState = null;
         currentBlockNeedsSneak = false;
         placementState = PlacementState.IDLE;
+        rotationSyncedThisCycle = false; // 【新增】重置旋转同步标记
     }
 
     @EventHandler
@@ -274,10 +287,9 @@ public class Printer extends Module {
         tickDelay = 0;
 
         // ==================== 状态机驱动的方块放置流程 ====================
-        // 核心优化：使用 while 循环 + continue 实现状态穿透
-        // 如果某个状态不需要执行（例如不需要潜行），立即跳过并进入下一个状态
-        // 只有在实际需要执行操作时才 break，等待服务端同步
-        // 这样每个 tick 都会尽可能前进，避免空闲 tick
+        // 【重构】双 Tick 旋转架构
+        // 每个状态的 break 都会产生一次 Tick 结束（Flying 包发送）
+        // PLACING_BLOCK 必须在有效的旋转同步后才能执行
 
         while (true) {
             switch (placementState) {
@@ -334,6 +346,11 @@ public class Printer extends Module {
                             return;
                         }
                         // 物品未立即生效，需要等待此 tick
+                        // 【改进】在 break 前调用一次旋转，确保 Flying 包发送
+                        // 即使 rotate 设置为 false，在 STRICT 模式下也需要确保旋转同步
+                        if (placeMode.get() == PlaceMode.STRICT && !rotationSyncedThisCycle) {
+                            rotateAndSync();
+                        }
                         // 物品切换需要与服务端同步，此 tick 就此结束
                         break;
                     }
@@ -345,12 +362,20 @@ public class Printer extends Module {
                         // 需要潜行但玩家未潜行，按下潜行键
                         mc.options.sneakKey.setPressed(true);
                         didPrinterForceSneak = true; // 标记所有权
+                        // 【改进】在 break 前调用一次旋转
+                        if (placeMode.get() == PlaceMode.STRICT && !rotationSyncedThisCycle) {
+                            rotateAndSync();
+                        }
                         // 潜行操作需要与服务端同步，此 tick 结束
                         break;
                     } else if (!currentBlockNeedsSneak && mc.player.isSneaking()) {
                         // 不需要潜行但玩家正在潜行，抬起潜行键
                         mc.options.sneakKey.setPressed(false);
                         didPrinterForceSneak = false; // 释放所有权
+                        // 【改进】在 break 前调用一次旋转
+                        if (placeMode.get() == PlaceMode.STRICT && !rotationSyncedThisCycle) {
+                            rotateAndSync();
+                        }
                         // 潜行操作需要与服务端同步，此 tick 结束
                         break;
                     } else {
@@ -361,12 +386,20 @@ public class Printer extends Module {
                     }
 
                 case PLACING_BLOCK:
+                    // 【关键】双 Tick 架构检查
+                    // 只有在 STRICT 模式下，才需要检查旋转同步
+                    if (placeMode.get() == PlaceMode.STRICT && !rotationSyncedThisCycle) {
+                        // 还没有有效的旋转同步（没有经过一个完整的 Tick），需要先发送旋转
+                        rotateAndSync();
+                        // break 会导致 Flying 包发送，下一个 Tick 再进入 PLACING_BLOCK
+                        break;
+                    }
+
+                    // 【现在可以安全放置】旋转已经同步，Flying 包已发送
                     // 放置状态：执行实际的方块放置
-                    boolean placed = executePlacement(currentTargetPos, currentTargetState);
+                    executePlacement(currentTargetPos, currentTargetState);
 
                     // 无论放置成功与否，都标记为已执行
-                    // 如果放置失败，可能是视线问题或其他临时问题，不阻塞后续方块
-
                     // 放置方块需要与服务端同步，回到空闲状态
                     resetStateMachine();
                     // 此 tick 结束，不立即继续（确保服务端有足够的时间同步）
@@ -377,6 +410,53 @@ public class Printer extends Module {
             // 跳出 while 循环，本 tick 结束
             break;
         }
+    }
+
+    /**
+     * 【新增】旋转并同步函数
+     * 在 STRICT 模式下调用此函数，确保：
+     * 1. 计算正确的 yaw/pitch
+     * 2. 通过 Rotations 队列发送旋转包
+     * 3. 标记本周期的旋转已同步（Flying 包会在 Tick 结束时发送）
+     *
+     * 这是双 Tick 架构的关键：当此函数返回时，Tick 即将结束，
+     * Flying 包将被发送，服务器的朝向信息将被更新。
+     * 下一个 Tick 时，PLACING_BLOCK 的旋转同步标记为 true，
+     * 可以安全地发送放置包。
+     */
+    private void rotateAndSync() {
+        // 如果还没计算过旋转，现在计算
+        if (currentHitVec == null && currentTargetPos != null && currentTargetState != null) {
+            PlacementOption option = getPlacementDirection(currentTargetPos);
+            if (option != null && option.hitVec() != null) {
+                currentHitVec = option.hitVec();
+                lastComputedYaw = Rotations.getYaw(currentHitVec);
+                lastComputedPitch = Rotations.getPitch(currentHitVec);
+            }
+        }
+
+        if (currentHitVec != null) {
+            // 【关键】使用 Rotations.rotate() 的回调机制
+            // 虽然我们可能不实际执行任何操作，但这确保旋转包通过正确的队列
+            // 并在该回调返回后，Flying 包将在 Tick 结束时发送
+            if (rotate.get()) {
+                Rotations.rotate(lastComputedYaw, lastComputedPitch, 50, () -> {
+                    // 回调中不需要做任何事，旋转包已经在队列中
+                });
+            } else {
+                // 【改进】即使 rotate=false，在 STRICT 模式也需要通知 Rotations 系统
+                // 这确保旋转包被正确排序。在 Minecraft 协议中，
+                // 旋转信息通常包含在 Flying 包（PlayerMoveC2SPacket）中，
+                // 调用 Rotations.rotate 确保了这个包的正确发送时机。
+                Rotations.rotate(lastComputedYaw, lastComputedPitch, 0, () -> {
+                    // 即使没有旋转操作，也要通过 Rotations 队列以保证包顺序
+                });
+            }
+        }
+
+        // 【标记】本周期旋转已同步
+        // 这个标记会在 Tick 结束后的下一个 Tick 中有效
+        rotationSyncedThisCycle = true;
     }
 
     /**
@@ -467,6 +547,8 @@ public class Printer extends Module {
      * 【重构后】Resolver 返回的 PlacementOption 已经包含计算好的 hitVec，
      * 并且该 hitVec 已经通过了 NCP 和视线检查。
      *
+     * 【双 Tick 架构】此方法在旋转已同步后被调用，确保 Flying 包先于 Place 包。
+     *
      * @param pos           目标位置（要放置的方块位置）
      * @param requiredState 目标方块状态（包含朝向属性）
      * @return 放置是否成功
@@ -488,15 +570,19 @@ public class Printer extends Module {
         // 【新增】保存 hitVec 用于调试显示
         currentHitVec = hitVec;
 
-        // 计算旋转角度并执行放置
+        // 【改进】在 STRICT 模式下，always 通过 Rotations 队列
+        // 这样可以保证旋转包在之前已经发送（rotationSyncedThisCycle 为 true 才会来到这里）
         double yaw = Rotations.getYaw(hitVec);
         double pitch = Rotations.getPitch(hitVec);
 
+        // 【关键】即使 rotate=false，也要通过 Rotations 队列以保证包顺序
         if (rotate.get()) {
             Rotations.rotate(yaw, pitch, 50, () -> {
                 placeBlockInternal(neighborPos, clickedSide, hitVec);
             });
         } else {
+            // 【改进】不通过 Rotations 回调，而是直接放置
+            // 因为此时旋转已经在前一个 Tick 同步过了
             placeBlockInternal(neighborPos, clickedSide, hitVec);
         }
 
