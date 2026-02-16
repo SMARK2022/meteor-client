@@ -68,6 +68,7 @@ public final class ResolverRegistry {
             .addFilter(Rules.VALID_SELF_TARGET) // 确保不乱点自己
             .addFilter(Rules.NO_MISMATCHED_ALIGNMENT)
             .addFilter(Rules.SLAB_VERTICAL_FACE)
+            .addFilter(Rules.PLACEABILITY_CHECK) // [全局添加]
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
             .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
@@ -97,6 +98,7 @@ public final class ResolverRegistry {
             .addFilter(Rules.CLICKABLE_NEIGHBOR)
             .addFilter(Rules.NO_MISMATCHED_ALIGNMENT)
             .addFilter(Rules.ROTATION_CHECK_SAME)
+            .addFilter(Rules.PLACEABILITY_CHECK) // [全局添加]
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
             .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
@@ -121,6 +123,7 @@ public final class ResolverRegistry {
             .addSource(Rules.AXIS_SPECIFIC)
             // 过滤：基础检查
             .addFilter(Rules.CLICKABLE_NEIGHBOR)
+            .addFilter(Rules.PLACEABILITY_CHECK) // [全局添加]
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
             .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
@@ -138,6 +141,7 @@ public final class ResolverRegistry {
             .addFilter(Rules.NO_MISMATCHED_ALIGNMENT)
 
             .addFilter(Rules.TRAPDOOR_ROTATION_CHECK)
+            .addFilter(Rules.PLACEABILITY_CHECK) // [全局添加]
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
             .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
@@ -150,6 +154,7 @@ public final class ResolverRegistry {
             .addSource(Rules.HOPPER_SUPPORT)
             .addFilter(Rules.CLICKABLE_NEIGHBOR)
             .addFilter(Rules.HOPPER_CHECK)
+            .addFilter(Rules.PLACEABILITY_CHECK) // [全局添加]
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
             .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
@@ -162,6 +167,7 @@ public final class ResolverRegistry {
             .addSource(Rules.FACE_DEPENDENT_SUPPORT)
             .addFilter(Rules.CLICKABLE_NEIGHBOR)
             .addFilter(Rules.FACE_DEPENDENT_CHECK)
+            .addFilter(Rules.PLACEABILITY_CHECK) // [全局添加]
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
             .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
@@ -178,6 +184,7 @@ public final class ResolverRegistry {
             // 过滤：
             .addFilter(Rules.CLICKABLE_NEIGHBOR)
             .addFilter(Rules.WALL_DEGENERATE_ROTATION_CHECK) // 侧面看墙，顶面看人
+            .addFilter(Rules.PLACEABILITY_CHECK) // [全局添加]
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
             .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
@@ -196,6 +203,7 @@ public final class ResolverRegistry {
             .addFilter(Rules.CLICKABLE_NEIGHBOR)
             .addFilter(Rules.BAN_FLOOR_CLICK) // <--- 核心：禁止点地板，防止退化
             .addFilter(Rules.WALL_DEGENERATE_ROTATION_CHECK) // 侧面看墙，顶面看人
+            .addFilter(Rules.PLACEABILITY_CHECK) // [全局添加]
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
             .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
@@ -214,6 +222,7 @@ public final class ResolverRegistry {
             .addSource(Rules.ALL_DIRECTIONS)
             .addFilter(Rules.CLICKABLE_NEIGHBOR)
             .addFilter(Rules.ROTATION_CHECK_OPPOSITE) // 核心：反向检查
+            .addFilter(Rules.PLACEABILITY_CHECK) // [全局添加]
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
             .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
@@ -231,6 +240,7 @@ public final class ResolverRegistry {
             .addSource(Rules.ALL_DIRECTIONS)
             .addFilter(Rules.CLICKABLE_NEIGHBOR)
             .addFilter(Rules.ROTATION_CHECK_SAME) // 核心：同向检查
+            .addFilter(Rules.PLACEABILITY_CHECK) // [全局添加]
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
             .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
@@ -243,6 +253,7 @@ public final class ResolverRegistry {
             .addSource(Rules.ALL_DIRECTIONS)
             .addFilter(Rules.CLICKABLE_NEIGHBOR)
             .addFilter(Rules.ROTATION_CHECK_6_SAME) // 视线同向
+            .addFilter(Rules.PLACEABILITY_CHECK) // [全局添加]
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
             .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
@@ -255,6 +266,7 @@ public final class ResolverRegistry {
             .addSource(Rules.ALL_DIRECTIONS)
             .addFilter(Rules.CLICKABLE_NEIGHBOR)
             .addFilter(Rules.ROTATION_CHECK_6_OPPOSITE) // 视线反向
+            .addFilter(Rules.PLACEABILITY_CHECK) // [全局添加]
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
             .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
@@ -267,6 +279,7 @@ public final class ResolverRegistry {
             .addSource(Rules.ALL_DIRECTIONS)
             .addFilter(Rules.CLICKABLE_NEIGHBOR)
             .addFilter(Rules.FACE_ATTACHED_CHECK) // 核心复杂逻辑
+            .addFilter(Rules.PLACEABILITY_CHECK) // [全局添加]
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
             .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
@@ -281,6 +294,7 @@ public final class ResolverRegistry {
             .addSource(Rules.ALL_DIRECTIONS)
             .addFilter(Rules.CLICKABLE_NEIGHBOR)
             .addFilter(Rules.CRAFTER_CHECK) // 核心专用检查
+            .addFilter(Rules.PLACEABILITY_CHECK) // [全局添加]
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
             .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
@@ -304,6 +318,7 @@ public final class ResolverRegistry {
             .addSource(Rules.ALL_DIRECTIONS)
             // 过滤：基础检查
             .addFilter(Rules.CLICKABLE_NEIGHBOR)
+            .addFilter(Rules.PLACEABILITY_CHECK) // [全局添加]
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
             .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查

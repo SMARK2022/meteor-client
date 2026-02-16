@@ -853,7 +853,20 @@ public final class Rules {
         }
     };
 
+    // ==================== 合法性检查 (Placeability) ====================
 
+    /**
+     * [核心新增] 放置合法性检查
+     * 调用 Minecraft 原生的 canPlaceAt 逻辑，检查目标位置是否允许存在该方块。
+     * 解决：红石粉、地毯、中继器等悬空放置被服务器拒绝的问题。
+     * * 逻辑：
+     * 即使我们可以点击邻居的侧面，但如果目标位置本身不满足生存条件（例如底部无支撑），
+     * canPlaceAt 会返回 false，从而过滤掉这个无效方案。
+     */
+    public static final CandidateFilter PLACEABILITY_CHECK = (ctx, opt) -> {
+        // 使用目标状态和位置，询问世界：我能放在这吗？
+        return ctx.targetState().canPlaceAt(ctx.world(), ctx.targetPos());
+    };
 
     // ==================== HitVecCalculators (点击位置计算器) ====================
 
