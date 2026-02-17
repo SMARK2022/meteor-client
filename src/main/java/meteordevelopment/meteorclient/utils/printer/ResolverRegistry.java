@@ -2,10 +2,6 @@ package meteordevelopment.meteorclient.utils.printer;
 
 import meteordevelopment.meteorclient.utils.printer.PlacementOption;
 import net.minecraft.block.*;
-import net.minecraft.block.Block;
-import net.minecraft.block.BlockState;
-import net.minecraft.block.SlabBlock;
-import net.minecraft.block.StairsBlock;
 import net.minecraft.block.enums.SlabType;
 import net.minecraft.state.property.Properties;
 
@@ -72,6 +68,7 @@ public final class ResolverRegistry {
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
             .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
+            .addFilter(Rules.HEIGHT_COMPLIANCE_CHECK) // [新增] 高度合规性检查
             // 点击位置
             .hitVec(Rules.SLAB);
 
@@ -102,6 +99,7 @@ public final class ResolverRegistry {
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
             .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
+            .addFilter(Rules.HEIGHT_COMPLIANCE_CHECK) // [新增] 高度合规性检查
             // 点击位置
             .hitVec(Rules.STAIR);
 
@@ -145,6 +143,7 @@ public final class ResolverRegistry {
             .addFilter(Rules.NCP_STRICT)
             .addFilter(Rules.LINE_OF_SIGHT)
             .addFilter(Rules.REACH_CHECK) // [新增] Reach 距离检查
+            .addFilter(Rules.HEIGHT_COMPLIANCE_CHECK) // [新增] 高度合规性检查
             .hitVec(Rules.TRAPDOOR); // 之前的 HitVec
 
     /**

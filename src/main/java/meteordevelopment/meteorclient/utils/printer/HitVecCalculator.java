@@ -2,11 +2,15 @@ package meteordevelopment.meteorclient.utils.printer;
 
 import net.minecraft.block.BlockState;
 import net.minecraft.block.SlabBlock;
+import net.minecraft.block.StairsBlock;
+import net.minecraft.block.TrapdoorBlock;
 import net.minecraft.block.enums.BlockHalf;
 import net.minecraft.block.enums.SlabType;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.util.shape.VoxelShape;
+import net.minecraft.world.BlockView;
 
 /**
  * HitVecCalculator - 点击位置计算器接口
@@ -18,11 +22,13 @@ import net.minecraft.util.math.Vec3d;
  * - 精确性：hitVec 决定了方块的最终朝向（尤其是半砖、楼梯）
  * - 灵活性：不同方块类型可以有不同的计算策略
  * - 可复用：通用策略可以被多种方块类型共享
+ * - [核心升级] 基于 VoxelShape 的精确碰撞箱计算，避免点击空气
  *
  * 核心概念：
  * - neighborPos: 我们点击的邻居方块位置
  * - clickedSide: 我们点击的邻居方块的哪个面
  * - hitVec: 精确的点击坐标（世界坐标系）
+ * - VoxelShape: 方块的真实碰撞箱或轮廓形状
  */
 @FunctionalInterface
 public interface HitVecCalculator {
@@ -49,74 +55,102 @@ public interface HitVecCalculator {
         };
     }
 
-    // ==================== hitVec计算方法 ====================
+    // ==================== 核心辅助方法：基于形状计算 ====================
 
     /**
-     * 计算标准方块的hitVec（点击位置）
-     * 点击邻居方块的指定面的中心
+     * 获取邻居方块指定面的中心点（默认期望高度 0.5）
      */
-    static Vec3d getHitVec(BlockPos neighborPos, Direction clickedSide) {
-        return Vec3d.ofCenter(neighborPos).add(Vec3d.of(clickedSide.getVector()).multiply(0.5));
+    static Vec3d getShapeHitVec(BlockView world, BlockPos pos, Direction side) {
+        // 默认期望点击方块中心高度 0.5
+        return getExtremeHitVec(world, pos, side, 0.5);
     }
 
     /**
-     * 计算半砖的hitVec
-     * 水平点击：通过Y偏移决定上/下半砖
-     * 垂直点击：根据邻居类型调整点击高度
+     * [核心升级] 获取邻居方块指定面上的最佳点击点
+     * 根据【期望的相对高度】计算点击位置，并将其 Clamp（限制）在方块实际碰撞箱的有效范围内。
+     *
+     * 应用场景：
+     * - 放置 TOP 半砖：desiredYOffset = 0.8（期望点在上面）
+     * - 放置 BOTTOM 半砖：desiredYOffset = 0.2（期望点在下面）
+     * - 通用中心点击：desiredYOffset = 0.5（中间）
+     *
+     * 逻辑举例：
+     * - 目标 TOP (0.8)，邻居是全方块 (0~1.0) -> 点击点 Y = 0.8（完美）
+     * - 目标 TOP (0.8)，邻居是半砖 (0~0.5) -> 点击点 Y ≈ 0.49（被限制在最高点，随后会被过滤器拒绝）
+     * - 目标 TOP (0.8)，邻居是栅栏 (0~1.5) -> 点击点 Y = 0.8（完美）
+     *
+     * @param world 世界访问视图
+     * @param pos 邻居方块坐标
+     * @param side 要点击的面（UP/DOWN/NORTH/SOUTH/EAST/WEST）
+     * @param desiredYOffset 期望的相对高度偏移（0.0 ~ 1.0+）。例如 0.8 代表期望点击在 y+0.8 的高度。
+     * @return 精确的、被限制在碰撞箱内的点击坐标
      */
-    static Vec3d getHitVecForSlab(BlockPos neighborPos, Direction clickedSide, SlabType targetSlabType, BlockState neighborState) {
-        if (clickedSide.getAxis().isHorizontal()) {
-            // 水平方向：调整Y坐标
-            // TOP: Y + 0.25 (点击上半部分)
-            // BOTTOM: Y - 0.25 (点击下半部分)
-            double yOffset = (targetSlabType == SlabType.TOP) ? 0.25 : -0.25;
-            return new Vec3d(
-                    neighborPos.getX() + 0.5,
-                    neighborPos.getY() + 0.5 + yOffset,
-                    neighborPos.getZ() + 0.5).add(Vec3d.of(clickedSide.getVector()).multiply(0.5));
+    static Vec3d getExtremeHitVec(BlockView world, BlockPos pos, Direction side, double desiredYOffset) {
+        BlockState state = world.getBlockState(pos);
+        VoxelShape shape = state.getOutlineShape(world, pos);
+
+        if (shape.isEmpty()) {
+            return Vec3d.ofCenter(pos).add(Vec3d.of(side.getVector()).multiply(0.5));
         }
 
-        // 垂直方向：检查邻居的半砖状态
-        // 如果邻居是半砖，且我们点击的是它的“半高”面，则需要调整点击位置到中心
-        if (neighborState.getBlock() instanceof SlabBlock && neighborState.contains(SlabBlock.TYPE)) {
-            SlabType neighborType = neighborState.get(SlabBlock.TYPE);
+        // 获取形状在各轴上的边界（相对坐标 0.0 ~ 1.0+）
+        double minX = shape.getMin(Direction.Axis.X);
+        double maxX = shape.getMax(Direction.Axis.X);
+        double minY = shape.getMin(Direction.Axis.Y);
+        double maxY = shape.getMax(Direction.Axis.Y);
+        double minZ = shape.getMin(Direction.Axis.Z);
+        double maxZ = shape.getMax(Direction.Axis.Z);
 
-            // 情况1：邻居是 BOTTOM，我们点它的 UP 面 -> 点击位置在 y=0.5 (即中心)
-            if (neighborType == SlabType.BOTTOM && clickedSide == Direction.UP) {
-                return Vec3d.ofCenter(neighborPos);
+        // [边界收缩] 保留微小余量，防止点击点恰好在边缘导致浮点数判定失效
+        final double MARGIN = 0.001;
+
+        // 计算实际可点击的 Y 范围（Clamp Range）
+        double clampedMinY = minY + MARGIN;
+        double clampedMaxY = maxY - MARGIN;
+
+        // 处理极扁方块（如地毯 0.0625），防止 min > max
+        if (clampedMinY > clampedMaxY) {
+            double mid = (minY + maxY) / 2.0;
+            clampedMinY = mid - 0.001;
+            clampedMaxY = mid + 0.001;
+        }
+
+        // [核心逻辑] 将期望高度（desiredYOffset）限制在有效范围内
+        // 如果邻居方块太矮，会自动吸附到邻居的最高点
+        double finalRelY = Math.min(Math.max(desiredYOffset, clampedMinY), clampedMaxY);
+
+        double x = pos.getX();
+        double y = pos.getY();
+        double z = pos.getZ();
+
+        // 根据点击的面计算点击点
+        switch (side) {
+            case UP -> {
+                // 点击顶面：固定在 Shape 最高点
+                return new Vec3d(x + (minX + maxX) / 2.0, y + maxY, z + (minZ + maxZ) / 2.0);
             }
-
-            // 情况2：邻居是 TOP，我们点它的 DOWN 面 -> 点击位置在 y=0.5 (即中心)
-            if (neighborType == SlabType.TOP && clickedSide == Direction.DOWN) {
-                return Vec3d.ofCenter(neighborPos);
+            case DOWN -> {
+                // 点击底面：固定在 Shape 最低点
+                return new Vec3d(x + (minX + maxX) / 2.0, y + minY, z + (minZ + maxZ) / 2.0);
+            }
+            case NORTH -> {
+                // 点击北面（Z 轴负向）：使用计算出的 finalRelY
+                return new Vec3d(x + (minX + maxX) / 2.0, y + finalRelY, z + minZ);
+            }
+            case SOUTH -> {
+                // 点击南面（Z 轴正向）
+                return new Vec3d(x + (minX + maxX) / 2.0, y + finalRelY, z + maxZ);
+            }
+            case WEST -> {
+                // 点击西面（X 轴负向）
+                return new Vec3d(x + minX, y + finalRelY, z + (minZ + maxZ) / 2.0);
+            }
+            case EAST -> {
+                // 点击东面（X 轴正向）
+                return new Vec3d(x + maxX, y + finalRelY, z + (minZ + maxZ) / 2.0);
             }
         }
-
-        // 默认情况（完整方块或双层半砖）：直接使用面中心
-        return Vec3d.ofCenter(neighborPos).add(Vec3d.of(clickedSide.getVector()).multiply(0.5));
+        return Vec3d.ofCenter(pos);
     }
 
-    /**
-     * 计算楼梯的点击位置
-     * 核心修复：
-     * - 如果要放倒置楼梯 (TOP)，必须点击侧面的上半部分 (Y + 0.25)。
-     * - 如果要放正置楼梯 (BOTTOM)，点击侧面下半部分 (Y - 0.25)。
-     */
-    static Vec3d getHitVecForStairs(BlockPos neighborPos, Direction clickedSide,
-            net.minecraft.block.enums.BlockHalf targetHalf) {
-        // 如果点击的是水平侧面 (东南西北)
-        if (clickedSide.getAxis().isHorizontal()) {
-            // TOP(倒置) -> 向上偏移 0.25
-            // BOTTOM(正置) -> 向下偏移 0.25
-            double yOffset = (targetHalf == net.minecraft.block.enums.BlockHalf.TOP) ? 0.25 : -0.25;
-
-            return new Vec3d(
-                    neighborPos.getX() + 0.5,
-                    neighborPos.getY() + 0.5 + yOffset, // <--- 关键修正
-                    neighborPos.getZ() + 0.5).add(Vec3d.of(clickedSide.getVector()).multiply(0.5));
-        }
-
-        // 如果点击的是上下底面，直接点中心即可（Minecraft 机制保证：点底面必倒置，点顶面必正置）
-        return Vec3d.ofCenter(neighborPos).add(Vec3d.of(clickedSide.getVector()).multiply(0.5));
-    }
 }

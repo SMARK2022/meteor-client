@@ -1,9 +1,6 @@
 package meteordevelopment.meteorclient.utils.printer;
 
 import net.minecraft.block.*;
-import net.minecraft.block.Block;
-import net.minecraft.block.SlabBlock;
-import net.minecraft.block.StairsBlock;
 import net.minecraft.block.enums.BlockHalf;
 import net.minecraft.block.enums.SlabType;
 import net.minecraft.block.enums.BlockFace; // 必须导入这个枚举
@@ -853,8 +850,6 @@ public final class Rules {
         }
     };
 
-    // ==================== 合法性检查 (Placeability) ====================
-
     /**
      * [核心新增] 放置合法性检查
      * 调用 Minecraft 原生的 canPlaceAt 逻辑，检查目标位置是否允许存在该方块。
@@ -868,6 +863,75 @@ public final class Rules {
         return ctx.targetState().canPlaceAt(ctx.world(), ctx.targetPos());
     };
 
+    /**
+     * [新增] 过滤器：高度合规性检查 (HEIGHT_COMPLIANCE_CHECK)
+     *
+     * 作用：验证计算出的 hitVec 的相对高度是否能形成预期的半砖/楼梯顶底状态。
+     *
+     * 核心逻辑：
+     * - TOP 半砖/楼梯：hitVec.y - targetPos.y 必须 > 0.5（表示点击在上半部分）
+     * - BOTTOM 半砖/楼梯：hitVec.y - targetPos.y 必须 <= 0.5（表示点击在下半部分）
+     *
+     * 应用场景：防止"点击矮方块导致无法形成特定朝向"的失败。
+     * 例如：地板上的按钮（高度仅 0.1），无论如何都无法通过侧面点击形成 TOP 半砖。
+     */
+    public static final CandidateFilter HEIGHT_COMPLIANCE_CHECK = (ctx, opt) -> {
+        // 1. 获取点击位置（由 HitVecCalculator 注入）
+        Vec3d hitVec = opt.hitVec();
+        if (hitVec == null) {
+            // 如果尚未计算 hitVec，暂时放行（会在后续 Resolver 中被计算）
+            return true;
+        }
+
+        // 2. 计算相对高度（相对于目标方块坐标）
+        double relativeY = hitVec.getY() - ctx.targetPos().getY();
+
+        // 3. 只针对有 TOP/BOTTOM 属性的方块进行检查
+        boolean isSlabOrStairOrTrapdoor =
+            ctx.hasProperty(SlabBlock.TYPE) ||
+            ctx.hasProperty(StairsBlock.HALF) ||
+            ctx.hasProperty(TrapdoorBlock.HALF);
+
+        if (!isSlabOrStairOrTrapdoor) {
+            // 普通方块无特殊高度要求
+            return true;
+        }
+
+        // 4. 根据方块类型检查高度
+        if (ctx.hasProperty(SlabBlock.TYPE)) {
+            SlabType type = ctx.getProperty(SlabBlock.TYPE);
+            if (type == SlabType.TOP) {
+                // TOP 半砖必须在上半部分
+                return relativeY > 0.5;
+            } else if (type == SlabType.BOTTOM) {
+                // BOTTOM 半砖必须在下半部分
+                return relativeY <= 0.5;
+            }
+            // DOUBLE 类型无特殊高度要求
+            return true;
+        }
+
+        if (ctx.hasProperty(StairsBlock.HALF)) {
+            BlockHalf half = ctx.getProperty(StairsBlock.HALF);
+            if (half == BlockHalf.TOP) {
+                return relativeY > 0.5;
+            } else {
+                return relativeY <= 0.5;
+            }
+        }
+
+        if (ctx.hasProperty(TrapdoorBlock.HALF)) {
+            BlockHalf half = ctx.getProperty(TrapdoorBlock.HALF);
+            if (half == BlockHalf.TOP) {
+                return relativeY > 0.5;
+            } else {
+                return relativeY <= 0.5;
+            }
+        }
+
+        return true;
+    };
+
     // ==================== HitVecCalculators (点击位置计算器) ====================
 
     /**
@@ -878,42 +942,53 @@ public final class Rules {
     public static final HitVecCalculator CENTER = (ctx, opt) -> {
         BlockPos pos = opt.getInteractPos(ctx.targetPos());
         Direction face = opt.getClickedFace();
-        return HitVecCalculator.getHitVec(pos, face);
+        return HitVecCalculator.getShapeHitVec(ctx.world(), pos, face);
     };
+
 
     /**
      * 计算器：半砖点击位置
-     * 水平面点击时根据目标类型（TOP/BOTTOM）调整 Y 坐标偏移
-     * 垂直面点击时使用中心
+     * 根据目标类型（TOP/BOTTOM）在邻居形状的最佳位置进行点击
      *
-     * [重要修复] Self 模式特殊处理：
-     * - BOTTOM 半砖补全：点击 UP 面 -> (center + 0.5*UP)
-     * - TOP 半砖补全：点击 DOWN 面 -> (center + 0.5*DOWN)
+     * [升级逻辑]
+     * - Self 模式：直接点中心（双层补全）
+     * - TOP 半砖：期望高度 0.8（尽量靠上）
+     * - BOTTOM 半砖：期望高度 0.2（尽量靠下）
+     * - 垂直点击：直接用形状中心
+     *
+     * getExtremeHitVec 会尝试达到期望高度，如果邻居太矮会自动吸附到最高点。
+     * 后续 HEIGHT_COMPLIANCE_CHECK 会检查是否达标。
      */
     public static final HitVecCalculator SLAB = (ctx, opt) -> {
         BlockPos pos = opt.getInteractPos(ctx.targetPos());
         Direction face = opt.getClickedFace();
 
-        // [修复] 如果是 Self 模式（双层补全），直接点中心
-        // 对于半砖补全，无论是从下补上(UP面)，还是从上补下(DOWN面)，交界处都在 0.5 (即中心)
-        // 使用通用逻辑会算到 y=1.0 或 y=0.0，那是空气位置
+        // Self 模式：点击自身，用中心即可
         if (opt.isSelf()) {
-            return Vec3d.ofCenter(pos);
+            return HitVecCalculator.getShapeHitVec(ctx.world(), pos, face);
         }
 
+        // 没有 Slab.TYPE 属性的方块，回退到通用计算
         if (!ctx.hasProperty(SlabBlock.TYPE)) {
             return CENTER.calculate(ctx, opt);
         }
 
         SlabType type = ctx.getProperty(SlabBlock.TYPE);
-        var neighborState = ctx.world().getBlockState(pos);
-        return HitVecCalculator.getHitVecForSlab(pos, face, type, neighborState);
+
+        // 垂直点击（UP/DOWN）：直接用形状中心
+        if (face.getAxis().isVertical()) {
+            return HitVecCalculator.getShapeHitVec(ctx.world(), pos, face);
+        }
+
+        // 水平点击（侧面）：根据目标类型选择期望高度
+        // TOP 半砖期望在 0.8，BOTTOM 半砖期望在 0.2
+        double desiredHeight = (type == SlabType.TOP) ? 0.8 : 0.2;
+        return HitVecCalculator.getExtremeHitVec(ctx.world(), pos, face, desiredHeight);
     };
 
     /**
      * 计算器：楼梯点击位置
-     * 水平面点击时根据目标朝向（正置/倒置）调整 Y 坐标偏移
-     * 垂直面点击时使用中心
+     * 根据目标朝向（TOP/BOTTOM）在邻居形状的最佳位置进行点击
      */
     public static final HitVecCalculator STAIR = (ctx, opt) -> {
         BlockPos pos = opt.getInteractPos(ctx.targetPos());
@@ -924,38 +999,42 @@ public final class Rules {
         }
 
         BlockHalf half = ctx.getProperty(StairsBlock.HALF);
-        return HitVecCalculator.getHitVecForStairs(pos, face, half);
+
+        // 水平点击：根据 HALF 选择期望高度
+        if (face.getAxis().isHorizontal()) {
+            double desiredHeight = (half == BlockHalf.TOP) ? 0.8 : 0.2;
+            return HitVecCalculator.getExtremeHitVec(ctx.world(), pos, face, desiredHeight);
+        }
+
+        // 垂直点击：用形状中心
+        return HitVecCalculator.getShapeHitVec(ctx.world(), pos, face);
     };
 
-
-    /**
+        /**
      * 计算器：活板门点击位置
-     * * 核心逻辑：
-     * 1. 如果点击的是侧面 (Wall Placement)：
-     * - HALF=TOP -> 点击上半部 (Y+0.8)
-     * - HALF=BOTTOM -> 点击下半部 (Y+0.2)
-     * 2. 如果点击的是上下底面 (Floor/Ceiling)：
-     * - 直接点击中心
+     * 根据 HALF 属性在邻居形状的最佳位置进行点击
+     *
+     * 核心逻辑：
+     * 1. 侧面点击：根据 HALF 选择期望高度（0.8 或 0.2）
+     * 2. 垂直点击（地板/天花板）：用形状中心
      */
     public static final HitVecCalculator TRAPDOOR = (ctx, opt) -> {
         BlockPos pos = opt.getInteractPos(ctx.targetPos());
         Direction face = opt.getClickedFace();
 
-        // 默认中心
-        Vec3d center = HitVecCalculator.getHitVec(pos, face);
-
-        // 如果没有属性，直接返回
-        if (!ctx.hasProperty(TrapdoorBlock.HALF))
-            return center;
-        BlockHalf half = ctx.getProperty(TrapdoorBlock.HALF);
-
-        // 只有点击侧面时，才需要通过 Y 偏移来控制 HALF
-        if (face.getAxis().isHorizontal()) {
-            // Trapdoor 对点击位置比较敏感，建议偏移量稍微大一点以确保判定
-            double yOffset = (half == BlockHalf.TOP) ? 0.35 : -0.35;
-            return new Vec3d(center.x, center.y + yOffset, center.z);
+        if (!ctx.hasProperty(TrapdoorBlock.HALF)) {
+            return CENTER.calculate(ctx, opt);
         }
 
-        return center;
+        BlockHalf half = ctx.getProperty(TrapdoorBlock.HALF);
+
+        // 侧面点击：根据 HALF 选择期望高度
+        if (face.getAxis().isHorizontal()) {
+            double desiredHeight = (half == BlockHalf.TOP) ? 0.8 : 0.2;
+            return HitVecCalculator.getExtremeHitVec(ctx.world(), pos, face, desiredHeight);
+        }
+
+        // 垂直点击：用形状中心
+        return HitVecCalculator.getShapeHitVec(ctx.world(), pos, face);
     };
 }
