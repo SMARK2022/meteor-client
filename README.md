@@ -22,7 +22,9 @@
 
 1. **🏷️ Nametag（名牌）显示修复** — 修复了现代化 UI 缩放下名牌显示错位的问题
 2. **🖨️ Printer（打印机）模块** — 新增基于 Litematica 蓝图的自动放置方块模块
-3. **🔧 其他小修复** — 旋转优先级逻辑修正、Mixin 兼容性补丁等
+3. **🍖 AutoEat（自动进食）修复** — 修复食物检测逻辑 Bug，优化进食时的暂停/恢复顺序
+4. **⛏️ InfinityMiner（无限矿工）优化** — 新增进食让行机制，避免挖矿与进食冲突
+5. **🔧 其他小修复** — 旋转优先级逻辑修正、Mixin 兼容性补丁等
 
 > **本 README 提供了完整的差异分析和安全性审计，以便使用者了解本分支对原仓库进行了哪些修改。**
 
@@ -30,33 +32,35 @@
 
 ## 📊 差异总览
 
-与上游 `1.21.4` 标签相比，本分支共计 **54 次提交**，涉及 **21 个文件**，新增 **4104 行**，删除 **13 行**。
+与上游 `1.21.4` 标签相比，本分支共计 **55 次提交**，涉及 **24 个文件**，新增 **4566 行**，删除 **179 行**。
 
 ### 修改文件一览
 
-| 文件路径                                       | 类型   | 改动说明                                       |
-| ---------------------------------------------- | ------ | ---------------------------------------------- |
-| `src/.../utils/render/NametagUtils.java`       | ✏️ 修改 | 修复现代化 UI 缩放下的名牌位置偏移             |
-| `src/.../mixin/GameRendererMixin.java`         | ✏️ 修改 | 传递投影矩阵给 NametagUtils（1 行）            |
-| `src/.../systems/modules/Modules.java`         | ✏️ 修改 | 注册新的 Printer 模块（1 行）                  |
-| `src/.../systems/modules/player/Printer.java`  | 🆕 新增 | Printer 打印机模块主体（921 行）               |
-| `src/.../utils/player/ItemSwitchHelper.java`   | 🆕 新增 | 物品切换辅助工具类（196 行）                   |
-| `src/.../utils/printer/BlockUtilHelper.java`   | 🆕 新增 | 方块工具辅助类（292 行）                       |
-| `src/.../utils/printer/CandidateFilter.java`   | 🆕 新增 | 候选方块过滤器（77 行）                        |
-| `src/.../utils/printer/CandidateSource.java`   | 🆕 新增 | 候选方块来源（63 行）                          |
-| `src/.../utils/printer/HitVecCalculator.java`  | 🆕 新增 | 点击位置计算器（156 行）                       |
-| `src/.../utils/printer/PlacementContext.java`  | 🆕 新增 | 放置上下文（117 行）                           |
-| `src/.../utils/printer/PlacementOption.java`   | 🆕 新增 | 放置选项（75 行）                              |
-| `src/.../utils/printer/PlacementResolver.java` | 🆕 新增 | 放置解析器（270 行）                           |
-| `src/.../utils/printer/ResolverRegistry.java`  | 🆕 新增 | 解析器注册表（724 行）                         |
-| `src/.../utils/printer/Rules.java`             | 🆕 新增 | 方块放置规则（1040 行）                        |
-| `src/.../utils/player/Rotations.java`          | ✏️ 修改 | 旋转优先级比较逻辑修正（1 行）                 |
-| `src/.../asm/Asm.java`                         | ✏️ 修改 | Mixin 兼容性补丁（4 行）                       |
-| `build.gradle.kts`                             | ✏️ 修改 | 添加 Litematica/MaLiLib 依赖，升级 fabric-loom |
-| `gradle.properties`                            | ✏️ 修改 | 构建参数调整，添加依赖版本号                   |
-| `gradle/wrapper/gradle-wrapper.properties`     | ✏️ 修改 | Gradle 版本升级至 9.2.0                        |
-| `gradlew.bat`                                  | ✏️ 修改 | 添加 UTF-8 编码设置                            |
-| `prompt`                                       | 🆕 新增 | 开发备忘（非代码文件，不影响运行）             |
+| 文件路径 | 类型 | 改动说明 |
+|---------|------|---------|
+| `src/.../utils/render/NametagUtils.java` | ✏️ 修改 | 修复现代化 UI 缩放下的名牌位置偏移 |
+| `src/.../mixin/GameRendererMixin.java` | ✏️ 修改 | 传递投影矩阵给 NametagUtils（1 行） |
+| `src/.../systems/modules/Modules.java` | ✏️ 修改 | 注册新的 Printer 模块（1 行） |
+| `src/.../systems/modules/player/Printer.java` | 🆕 新增 | Printer 打印机模块主体（921 行） |
+| `src/.../systems/modules/player/AutoEat.java` | ✏️ 修改 | 修复食物检测逻辑，优化进食暂停顺序 |
+| `src/.../systems/modules/world/InfinityMiner.java` | ✏️ 修改 | 新增进食让行机制，优化与 AutoEat 联动 |
+| `src/.../utils/player/ItemSwitchHelper.java` | 🆕 新增 | 物品切换辅助工具类（196 行） |
+| `src/.../utils/printer/BlockUtilHelper.java` | 🆕 新增 | 方块工具辅助类（292 行） |
+| `src/.../utils/printer/CandidateFilter.java` | 🆕 新增 | 候选方块过滤器（77 行） |
+| `src/.../utils/printer/CandidateSource.java` | 🆕 新增 | 候选方块来源（63 行） |
+| `src/.../utils/printer/HitVecCalculator.java` | 🆕 新增 | 点击位置计算器（156 行） |
+| `src/.../utils/printer/PlacementContext.java` | 🆕 新增 | 放置上下文（117 行） |
+| `src/.../utils/printer/PlacementOption.java` | 🆕 新增 | 放置选项（75 行） |
+| `src/.../utils/printer/PlacementResolver.java` | 🆕 新增 | 放置解析器（270 行） |
+| `src/.../utils/printer/ResolverRegistry.java` | 🆕 新增 | 解析器注册表（724 行） |
+| `src/.../utils/printer/Rules.java` | 🆕 新增 | 方块放置规则（1040 行） |
+| `src/.../utils/player/Rotations.java` | ✏️ 修改 | 旋转优先级比较逻辑修正（1 行） |
+| `src/.../asm/Asm.java` | ✏️ 修改 | Mixin 兼容性补丁（4 行） |
+| `build.gradle.kts` | ✏️ 修改 | 添加 Litematica/MaLiLib 依赖，升级 fabric-loom |
+| `gradle.properties` | ✏️ 修改 | 构建参数调整，添加依赖版本号 |
+| `gradle/wrapper/gradle-wrapper.properties` | ✏️ 修改 | Gradle 版本升级至 9.2.0 |
+| `gradlew.bat` | ✏️ 修改 | 添加 UTF-8 编码设置 |
+| `prompt` | 🆕 新增 | 开发备忘（非代码文件，不影响运行） |
 
 ---
 
@@ -74,12 +78,12 @@
 
 #### `NametagUtils.java` — 坐标计算修正
 
-| 改动项                    | 说明                                                                                                                                                     |
-| ------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `onRender()` 方法签名变更 | 新增 `Matrix4f projectionMatrix` 参数，直接接收渲染管线的投影矩阵，而非通过 `RenderSystem.getProjectionMatrix()` 获取（避免时序错位）                    |
-| `toScreen()` 坐标计算     | 将 `x / windowScale` 替换为直接使用 `x`，将 `y` 从 `framebufferHeight - y / windowScale` 改为 `framebufferHeight - y`，修正了 GUI 缩放带来的二次缩放问题 |
-| `begin()` 矩阵缩放        | 在 `matrices.translate()` 之前新增 `matrices.scale(1/scaleFactor, 1/scaleFactor, 1)`，确保名牌在不同 GUI 缩放下正确渲染                                  |
-| 调试日志                  | 添加了条件调试日志（默认 **已禁用**，`DEBUG_ENABLED = false`），不会在正常运行时产生任何输出                                                             |
+| 改动项 | 说明 |
+|-------|------|
+| `onRender()` 方法签名变更 | 新增 `Matrix4f projectionMatrix` 参数，直接接收渲染管线的投影矩阵，而非通过 `RenderSystem.getProjectionMatrix()` 获取（避免时序错位） |
+| `toScreen()` 坐标计算 | 将 `x / windowScale` 替换为直接使用 `x`，将 `y` 从 `framebufferHeight - y / windowScale` 改为 `framebufferHeight - y`，修正了 GUI 缩放带来的二次缩放问题 |
+| `begin()` 矩阵缩放 | 在 `matrices.translate()` 之前新增 `matrices.scale(1/scaleFactor, 1/scaleFactor, 1)`，确保名牌在不同 GUI 缩放下正确渲染 |
+| 调试日志 | 添加了条件调试日志（默认 **已禁用**，`DEBUG_ENABLED = false`），不会在正常运行时产生任何输出 |
 
 #### `GameRendererMixin.java` — 投影矩阵传递
 
@@ -135,7 +139,88 @@ modImplementation("fi.dy.masa.malilib:malilib-fabric-1.21.4:0.23.5")
 
 ---
 
-### 3. 🔧 其他修改
+### 3. 🍖 AutoEat（自动进食）修复
+
+**修改文件**：`src/.../systems/modules/player/AutoEat.java`
+
+**原始问题**：原版 AutoEat 模块存在食物检测逻辑 Bug，且进食时暂停/恢复光环（Aura）和 Baritone 的顺序不合理，可能导致冲突。
+
+**具体改动**：
+
+| 改动项 | 说明 |
+|-------|------|
+| 食物检测逻辑修复 | 将 `if (foodComponent != null)` 修正为 `if (foodComponent == null)`，修复了当前手持物品不是食物时未能正确切换的 Bug |
+| 新增 `isEating()` 公开方法 | 暴露进食状态给其他模块查询（如 InfinityMiner），便于模块间联动 |
+| 进食启动顺序优化 | 将 `eat()` 调用从 `startEating()` 开头移至末尾，确保先暂停光环和 Baritone **再** 开始进食，避免操作冲突 |
+| 停止进食顺序优化 | 在 `stopEating()` 中将 `setPressed(false)` 移到 `changeSlot(prevSlot)` 之前，确保先停止进食动作再切换回原物品 |
+
+**关键修复代码**：
+
+```java
+// 原始代码（Bug：!= null 条件反了，应该检查食物为空的情况）
+if (mc.player.getInventory().getStack(slot).get(DataComponentTypes.FOOD) != null) {
+// 修复后
+if (mc.player.getInventory().getStack(slot).get(DataComponentTypes.FOOD) == null) {
+```
+
+```java
+// 原始顺序：先吃再暂停
+private void startEating() {
+    prevSlot = mc.player.getInventory().selectedSlot;
+    eat();           // ← 先吃
+    // Pause auras   // ← 后暂停
+}
+
+// 修复后顺序：先暂停再吃
+private void startEating() {
+    prevSlot = mc.player.getInventory().selectedSlot;
+    // Pause auras first  // ← 先暂停
+    // Pause baritone first
+    eat();                // ← 后吃
+}
+```
+
+---
+
+### 4. ⛏️ InfinityMiner（无限矿工）优化
+
+**修改文件**：`src/.../systems/modules/world/InfinityMiner.java`
+
+**原始问题**：InfinityMiner 在玩家需要进食时不会让步，导致挖矿操作与 AutoEat 的进食操作产生冲突（例如快捷栏物品切换冲突）。
+
+**具体改动**：
+
+| 改动项 | 说明 |
+|-------|------|
+| 新增 `yieldingToEating` 状态 | 布尔标志，跟踪当前是否正在为进食让行 |
+| 新增 `shouldYieldToEating()` 方法 | 检查 AutoEat 模块是否处于活跃状态且正在进食 |
+| 进食让行逻辑 | 当检测到 AutoEat 正在进食时，暂停 Baritone 寻路，跳过所有镐子查找和挖矿操作，避免快捷栏冲突 |
+| Tick 逻辑重排 | 将 `checkThresholds()` 检查移至 `findPickaxe()` 之前，进食让行检查插入二者之间 |
+
+**关键新增代码**：
+
+```java
+// 新增：进食让行检查
+private boolean shouldYieldToEating() {
+    AutoEat autoEat = Modules.get().get(AutoEat.class);
+    return autoEat != null && autoEat.isActive() && autoEat.isEating();
+}
+```
+
+```java
+// tick 中的让行逻辑
+if (shouldYieldToEating()) {
+    if (!yieldingToEating) {
+        yieldingToEating = true;
+        baritone.getPathingBehavior().cancelEverything(); // 暂停挖矿
+    }
+    return; // 跳过本 tick
+}
+```
+
+---
+
+### 5. 🔧 其他修改
 
 #### `Rotations.java` — 旋转优先级修正
 
@@ -161,15 +246,15 @@ public boolean couldTransformClass(MixinEnvironment environment, String name) {
 
 #### 构建配置变更
 
-| 配置项             | 原始值                   | 修改后                   |
-| ------------------ | ------------------------ | ------------------------ |
-| `fabric-loom` 版本 | `1.9-SNAPSHOT`           | `1.14.10`                |
-| Gradle 版本        | `8.12`                   | `9.2.0`                  |
-| JVM 内存           | `-Xmx2G`                 | `-Xmx4G`                 |
-| `sodium_version`   | `mc1.21.4-0.6.6-fabric`  | `mc1.21.4-0.6.13-fabric` |
-| `lithium_version`  | `mc1.21.4-0.14.3-fabric` | `mc1.21.4-0.15.3-fabric` |
-| `iris_version`     | `1.8.5+1.21.4-fabric`    | `1.8.8+1.21.4-fabric`    |
-| `modmenu_version`  | `13.0.2`                 | `13.0.3`                 |
+| 配置项 | 原始值 | 修改后 |
+|-------|-------|-------|
+| `fabric-loom` 版本 | `1.9-SNAPSHOT` | `1.14.10` |
+| Gradle 版本 | `8.12` | `9.2.0` |
+| JVM 内存 | `-Xmx2G` | `-Xmx4G` |
+| `sodium_version` | `mc1.21.4-0.6.6-fabric` | `mc1.21.4-0.6.13-fabric` |
+| `lithium_version` | `mc1.21.4-0.14.3-fabric` | `mc1.21.4-0.15.3-fabric` |
+| `iris_version` | `1.8.5+1.21.4-fabric` | `1.8.8+1.21.4-fabric` |
+| `modmenu_version` | `13.0.2` | `13.0.3` |
 
 > ⚠️ **注意**：`gradle.properties` 中包含了开发者本地配置（如 `org.gradle.java.home=F:\\include\\jdk-21.0.2` 和代理设置 `proxyHost=127.0.0.1:15236`），这些仅在开发者本地生效，不影响其他用户构建。
 
@@ -222,7 +307,7 @@ public boolean couldTransformClass(MixinEnvironment environment, String name) {
 
 #### ✅ 5. 网络数据包分析
 
-唯一的网络数据包发送位于 `Printer.java` 第 608 行：
+**Printer.java** 中唯一的网络数据包发送位于第 608 行：
 
 ```java
 mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(Hand.MAIN_HAND));
@@ -231,6 +316,10 @@ mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(Hand.MAIN_HAND));
 这是标准的 **手臂挥动动画数据包**，是 Minecraft 客户端放置方块时的正常行为，仅包含 `Hand.MAIN_HAND` 枚举值，**不包含任何坐标信息**。
 
 方块放置本身通过 `mc.interactionManager.interactBlock()` 执行，这是 Minecraft 原版客户端 API，与正常手动放置方块的行为完全一致。
+
+**InfinityMiner.java** 中存在 `sendPacket(new DisconnectS2CPacket(...))` 调用，但此代码 **与上游原版完全一致**，用于在背包满时断开连接，属于该模块原有的断线功能，**并非本分支新增**。
+
+**AutoEat.java** 中 **无任何** `sendPacket`、`getNetworkHandler` 或网络相关调用。所有操作均为本地客户端状态管理（切换物品栏、模拟右键点击等）。
 
 #### ✅ 6. `gradle.properties` 中的代理配置
 
@@ -246,7 +335,7 @@ systemProp.http.proxyPort=15236
 
 **本分支的所有修改代码均不包含任何形式的坐标泄露、隐私回传或恶意后门。** 所有新增代码的功能范围严格限于：
 - 本地 UI 渲染修正（名牌显示）
-- 本地游戏交互逻辑（方块放置）
+- 本地游戏交互逻辑（方块放置、自动进食、无限矿工联动）
 - 标准 Minecraft 客户端-服务器通信协议
 
 ---
@@ -295,14 +384,14 @@ cd meteor-client
 
 ## 📁 仓库文件说明
 
-| 文件/目录           | 说明                                         |
-| ------------------- | -------------------------------------------- |
-| `src/`              | Java 源代码                                  |
-| `build.gradle.kts`  | Gradle 构建脚本                              |
-| `gradle.properties` | 构建属性和依赖版本                           |
-| `prompt`            | 开发过程备忘文件（非代码，不影响构建和运行） |
-| `launch/`           | 启动配置                                     |
-| `.github/`          | GitHub Actions 配置                          |
+| 文件/目录 | 说明 |
+|----------|------|
+| `src/` | Java 源代码 |
+| `build.gradle.kts` | Gradle 构建脚本 |
+| `gradle.properties` | 构建属性和依赖版本 |
+| `prompt` | 开发过程备忘文件（非代码，不影响构建和运行） |
+| `launch/` | 启动配置 |
+| `.github/` | GitHub Actions 配置 |
 
 ---
 
