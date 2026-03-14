@@ -32,7 +32,8 @@ import java.util.function.BiPredicate;
 
 public class AutoEat extends Module {
     @SuppressWarnings("unchecked")
-    private static final Class<? extends Module>[] AURAS = new Class[]{KillAura.class, CrystalAura.class, AnchorAura.class, BedAura.class};
+    private static final Class<? extends Module>[] AURAS = new Class[] { KillAura.class, CrystalAura.class,
+            AnchorAura.class, BedAura.class };
 
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgThreshold = settings.createGroup("Threshold");
@@ -40,68 +41,65 @@ public class AutoEat extends Module {
     // General
 
     public final Setting<List<Item>> blacklist = sgGeneral.add(new ItemListSetting.Builder()
-        .name("blacklist")
-        .description("Which items to not eat.")
-        .defaultValue(
-            Items.ENCHANTED_GOLDEN_APPLE,
-            Items.GOLDEN_APPLE,
-            Items.CHORUS_FRUIT,
-            Items.POISONOUS_POTATO,
-            Items.PUFFERFISH,
-            Items.CHICKEN,
-            Items.ROTTEN_FLESH,
-            Items.SPIDER_EYE,
-            Items.SUSPICIOUS_STEW
-        )
-        .filter(item -> item.getComponents().get(DataComponentTypes.FOOD) != null)
-        .build()
-    );
+            .name("blacklist")
+            .description("Which items to not eat.")
+            .defaultValue(
+                    Items.ENCHANTED_GOLDEN_APPLE,
+                    Items.GOLDEN_APPLE,
+                    Items.CHORUS_FRUIT,
+                    Items.POISONOUS_POTATO,
+                    Items.PUFFERFISH,
+                    Items.CHICKEN,
+                    Items.ROTTEN_FLESH,
+                    Items.SPIDER_EYE,
+                    Items.SUSPICIOUS_STEW)
+            .filter(item -> item.getComponents().get(DataComponentTypes.FOOD) != null)
+            .build());
 
     private final Setting<Boolean> pauseAuras = sgGeneral.add(new BoolSetting.Builder()
-        .name("pause-auras")
-        .description("Pauses all auras when eating.")
-        .defaultValue(true)
-        .build()
-    );
+            .name("pause-auras")
+            .description("Pauses all auras when eating.")
+            .defaultValue(true)
+            .build());
 
     private final Setting<Boolean> pauseBaritone = sgGeneral.add(new BoolSetting.Builder()
-        .name("pause-baritone")
-        .description("Pause baritone when eating.")
-        .defaultValue(true)
-        .build()
-    );
+            .name("pause-baritone")
+            .description("Pause baritone when eating.")
+            .defaultValue(true)
+            .build());
 
     // Threshold
 
     private final Setting<ThresholdMode> thresholdMode = sgThreshold.add(new EnumSetting.Builder<ThresholdMode>()
-        .name("threshold-mode")
-        .description("The threshold mode to trigger auto eat.")
-        .defaultValue(ThresholdMode.Any)
-        .build()
-    );
+            .name("threshold-mode")
+            .description("The threshold mode to trigger auto eat.")
+            .defaultValue(ThresholdMode.Any)
+            .build());
 
     private final Setting<Double> healthThreshold = sgThreshold.add(new DoubleSetting.Builder()
-        .name("health-threshold")
-        .description("The level of health you eat at.")
-        .defaultValue(10)
-        .range(1, 19)
-        .sliderRange(1, 19)
-        .visible(() -> thresholdMode.get() != ThresholdMode.Hunger)
-        .build()
-    );
+            .name("health-threshold")
+            .description("The level of health you eat at.")
+            .defaultValue(10)
+            .range(1, 19)
+            .sliderRange(1, 19)
+            .visible(() -> thresholdMode.get() != ThresholdMode.Hunger)
+            .build());
 
     private final Setting<Integer> hungerThreshold = sgThreshold.add(new IntSetting.Builder()
-        .name("hunger-threshold")
-        .description("The level of hunger you eat at.")
-        .defaultValue(16)
-        .range(1, 19)
-        .sliderRange(1, 19)
-        .visible(() -> thresholdMode.get() != ThresholdMode.Health)
-        .build()
-    );
+            .name("hunger-threshold")
+            .description("The level of hunger you eat at.")
+            .defaultValue(16)
+            .range(1, 19)
+            .sliderRange(1, 19)
+            .visible(() -> thresholdMode.get() != ThresholdMode.Health)
+            .build());
 
     public boolean eating;
     private int slot, prevSlot;
+
+    public boolean isEating() {
+        return eating;
+    }
 
     private final List<Class<? extends Module>> wasAura = new ArrayList<>();
     private boolean wasBaritone = false;
@@ -112,19 +110,21 @@ public class AutoEat extends Module {
 
     @Override
     public void onDeactivate() {
-        if (eating) stopEating();
+        if (eating)
+            stopEating();
     }
 
     @EventHandler(priority = EventPriority.LOW)
     private void onTick(TickEvent.Pre event) {
         // Skip if Auto Gap is already eating
-        if (Modules.get().get(AutoGap.class).isEating()) return;
+        if (Modules.get().get(AutoGap.class).isEating())
+            return;
 
         if (eating) {
             // If we are eating check if we should still be eating
             if (shouldEat()) {
                 // Check if the item in current slot is not food
-                if (mc.player.getInventory().getStack(slot).get(DataComponentTypes.FOOD) != null) {
+                if (mc.player.getInventory().getStack(slot).get(DataComponentTypes.FOOD) == null) {
                     // If not try finding a new slot
                     int slot = findSlot();
 
@@ -153,21 +153,22 @@ public class AutoEat extends Module {
                 slot = findSlot();
 
                 // If slot was found then start eating
-                if (slot != -1) startEating();
+                if (slot != -1)
+                    startEating();
             }
         }
     }
 
     @EventHandler
     private void onItemUseCrosshairTarget(ItemUseCrosshairTargetEvent event) {
-        if (eating) event.target = null;
+        if (eating)
+            event.target = null;
     }
 
     private void startEating() {
         prevSlot = mc.player.getInventory().selectedSlot;
-        eat();
 
-        // Pause auras
+        // Pause auras first
         wasAura.clear();
         if (pauseAuras.get()) {
             for (Class<? extends Module> klass : AURAS) {
@@ -180,24 +181,27 @@ public class AutoEat extends Module {
             }
         }
 
-        // Pause baritone
+        // Pause baritone first
         if (pauseBaritone.get() && PathManagers.get().isPathing() && !wasBaritone) {
             wasBaritone = true;
             PathManagers.get().pause();
         }
+
+        eat();
     }
 
     private void eat() {
         changeSlot(slot);
         setPressed(true);
-        if (!mc.player.isUsingItem()) Utils.rightClick();
+        if (!mc.player.isUsingItem())
+            Utils.rightClick();
 
         eating = true;
     }
 
     private void stopEating() {
-        changeSlot(prevSlot);
         setPressed(false);
+        changeSlot(prevSlot);
 
         eating = false;
 
@@ -243,13 +247,15 @@ public class AutoEat extends Module {
             // Skip if item isn't food
             Item item = mc.player.getInventory().getStack(i).getItem();
             FoodComponent foodComponent = item.getComponents().get(DataComponentTypes.FOOD);
-            if (foodComponent == null) continue;
+            if (foodComponent == null)
+                continue;
 
             // Check if hunger value is better
             int hunger = foodComponent.nutrition();
             if (hunger > bestHunger) {
                 // Skip if item is in blacklist
-                if (blacklist.get().contains(item)) continue;
+                if (blacklist.get().contains(item))
+                    continue;
 
                 // Select the current item
                 slot = i;
@@ -258,7 +264,8 @@ public class AutoEat extends Module {
         }
 
         Item offHandItem = mc.player.getOffHandStack().getItem();
-        if (offHandItem.getComponents().get(DataComponentTypes.FOOD) != null && !blacklist.get().contains(offHandItem) && offHandItem.getComponents().get(DataComponentTypes.FOOD).nutrition() > bestHunger)
+        if (offHandItem.getComponents().get(DataComponentTypes.FOOD) != null && !blacklist.get().contains(offHandItem)
+                && offHandItem.getComponents().get(DataComponentTypes.FOOD).nutrition() > bestHunger)
             slot = SlotUtils.OFFHAND;
 
         return slot;
