@@ -3,15 +3,14 @@
  * Copyright (c) Meteor Development.
  *
  * Printer module - Auto places blocks based on Litematica schematic.
- * Restored and enhanced from original obfuscated GGboy code.
  *
- * Features:
- * - Two placement modes: STRICT (anti-cheat bypass with NCP direction checks) and LEGIT (standard placement)
- * - Block direction/orientation support for proper placement
- * - Movement pause option
- * - Configurable delay, range, and blocks per tick
- * - Visual rendering of blocks to be placed
- * - Line of sight checking for anti-cheat bypass
+ * 【方案B重构】三阶段同 tick 架构：
+ * 1. TickEvent.Pre: 规划（选块、切物品、sneak、生成 PlacementPlan）
+ * 2. PlayerTickMovementEvent: 预应用 yaw/pitch（在 movement 物理前）
+ * 3. SendMovementPacketsEvent.Post: 执行放置（movement 包发出后立即 place）
+ *
+ * 这确保了 movement 物理、movement packet、place packet 使用同一拍同一个角度，
+ * 最接近合法玩家"边走边转头边放置"的行为。
  */
 
 package meteordevelopment.meteorclient.systems.modules.player;
@@ -20,14 +19,14 @@ import fi.dy.masa.litematica.data.DataManager;
 import fi.dy.masa.litematica.world.SchematicWorldHandler;
 import fi.dy.masa.litematica.world.WorldSchematic;
 import com.mojang.blaze3d.systems.RenderSystem;
+import meteordevelopment.meteorclient.events.entity.player.PlayerTickMovementEvent;
+import meteordevelopment.meteorclient.events.entity.player.SendMovementPacketsEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
-import meteordevelopment.meteorclient.systems.modules.player.Printer.PlaceMode;
-import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.ItemSwitchHelper;
 import meteordevelopment.meteorclient.utils.player.Rotations;
@@ -36,7 +35,6 @@ import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.meteorclient.utils.printer.BlockUtilHelper;
 import meteordevelopment.meteorclient.utils.printer.PlacementContext;
 import meteordevelopment.meteorclient.utils.printer.PlacementOption;
-import meteordevelopment.meteorclient.utils.printer.PlacementResolver;
 import meteordevelopment.meteorclient.utils.printer.ResolverRegistry;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.*;
@@ -53,18 +51,21 @@ import net.minecraft.network.packet.c2s.play.HandSwingC2SPacket;
 import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
-import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.*;
-import net.minecraft.world.RaycastContext;
 
 import java.util.*;
 
 /**
  * Printer Module - Automatically places blocks based on Litematica schematic.
  *
- * This module integrates with the Litematica mod to read schematic data and
- * automatically place blocks to match the schematic. It supports two placement
- * modes for different anti-cheat bypass requirements.
+ * 【方案B架构】事件执行顺序：
+ * 1. TickEvent.Pre (MinecraftClient.tick HEAD) → 规划阶段
+ * 2. PlayerTickMovementEvent (tickMovement HEAD) → 预应用旋转
+ * 3. sendMovementPackets → vanilla movement packet（带有正确的 yaw/pitch）
+ * 4. SendMovementPacketsEvent.Post (sendMovementPackets TAIL) → 执行放置
+ * 5. TickEvent.Post (MinecraftClient.tick TAIL) → 无操作
+ *
+ * 这样 movement 物理、movement packet、place packet 使用同一个角度。
  */
 public class Printer extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
@@ -83,14 +84,6 @@ public class Printer extends Module {
             .defaultValue(PlaceMode.STRICT)
             .build());
 
-    private final Setting<Integer> placeNums = sgGeneral.add(new IntSetting.Builder()
-            .name("blocks-per-tick")
-            .description("How many blocks to place per tick.")
-            .defaultValue(1)
-            .min(1)
-            .sliderRange(1, 6)
-            .build());
-
     private final Setting<Integer> placeDelay = sgGeneral.add(new IntSetting.Builder()
             .name("place-delay")
             .description("Delay in ticks between placing blocks.")
@@ -99,9 +92,6 @@ public class Printer extends Module {
             .sliderRange(0, 10)
             .build());
 
-    // ==================== 距离设置 ====================
-    // [改进] 支持浮点数精度，预选范围 = range + 1.0
-    // 这样可以提前把接近边界但 reach 不足的方块排除
     private final Setting<Double> placeRange = sgGeneral.add(new DoubleSetting.Builder()
             .name("range")
             .description("The range within which to place blocks (float).")
@@ -155,7 +145,6 @@ public class Printer extends Module {
             .defaultValue(new SettingColor(20, 200, 20, 255))
             .build());
 
-    // 交互点显示设置
     private final Setting<Boolean> renderHitVec = sgRender.add(new BoolSetting.Builder()
             .name("render-hit-vec")
             .description("Renders a cube at the block placement hit point for debugging.")
@@ -168,45 +157,42 @@ public class Printer extends Module {
             .defaultValue(new SettingColor(255, 100, 100, 255))
             .build());
 
-    // Internal state
+    // ==================== 方案B: 不可变放置计划 ====================
+
+    /**
+     * PlacementPlan - 一次放置操作的完整不可变快照
+     * 在 TickEvent.Pre 阶段创建后，整个 tick 内不再重新 resolve。
+     * 确保 movement 物理、movement packet、place packet 使用完全一致的参数。
+     */
+    private record PlacementPlan(
+        BlockPos targetPos,
+        BlockPos interactPos,
+        Direction clickedFace,
+        Vec3d hitVec,
+        float yaw,
+        float pitch,
+        Item item,
+        boolean needsSneak
+    ) {}
+
+    // ==================== 内部状态 ====================
+
     private final List<BlockPos> placePositions = new ArrayList<>();
     private final Map<BlockPos, Item> placeItems = new HashMap<>();
     private int tickDelay = 0;
 
-    // 状态机：当前正在处理的方块及其状态
-    private BlockPos currentTargetPos = null;
-    private Item currentTargetItem = null;
-    private BlockState currentTargetState = null;
-    private PlacementState placementState = PlacementState.IDLE;
-    private boolean currentBlockNeedsSneak = false;
+    // 方案B核心：当前 tick 的放置计划
+    private PlacementPlan armedPlan = null;
 
-    // 【新增】标记变量：记录当前潜行状态是否由打印机强制触发
+    // 旋转预应用状态
+    private boolean printerRotApplied = false;
+    private float savedYaw, savedPitch;
+
+    // 标记变量：记录当前潜行状态是否由打印机强制触发
     private boolean didPrinterForceSneak = false;
 
-    // 【新增】交互点显示用的hitVec（调试用途）
+    // 交互点显示用的 hitVec（调试渲染）
     private Vec3d currentHitVec = null;
-
-    // ==================== 双 Tick 旋转架构 ====================
-    // 【关键】为了通过 Grim 的 RotationPlace 检测，必须确保：
-    // Tick N: 发送 Rotation 包 + Flying 包（确保服务端更新朝向）
-    // Tick N+1: 发送 Place 包（此时服务端朝向已更新）
-
-    // 【新增】记录最后计算的旋转（yaw/pitch）
-    private double lastComputedYaw = 0.0;
-    private double lastComputedPitch = 0.0;
-
-    // 【新增】标记是否已经在本轮中发送过有效的旋转（带 Flying 包）
-    private boolean rotationSyncedThisCycle = false;
-
-    /**
-     * 方块放置状态机
-     */
-    private enum PlacementState {
-        IDLE, // 空闲状态，等待选择下一个方块
-        SWITCHING_ITEM, // 正在切换物品
-        PRESSING_SNEAK, // 处理潜行状态（按下或抬起）
-        PLACING_BLOCK // 正在放置方块
-    }
 
     public Printer() {
         super(Categories.Player, "printer", "Automatically places blocks based on Litematica schematic.");
@@ -217,7 +203,7 @@ public class Printer extends Module {
         tickDelay = 0;
         placePositions.clear();
         placeItems.clear();
-        resetStateMachine();
+        clearPlan();
     }
 
     @Override
@@ -225,14 +211,13 @@ public class Printer extends Module {
         tickDelay = 0;
         placePositions.clear();
         placeItems.clear();
-        resetStateMachine();
+        clearPlan();
         resetSneakState();
     }
 
     /**
      * 安全重置潜行状态
      * 只有当潜行是由打印机强制开启时，才将其关闭。
-     * 这样可以保护玩家手动按住 Shift 的情况不被干扰。
      */
     private void resetSneakState() {
         if (didPrinterForceSneak) {
@@ -244,32 +229,42 @@ public class Printer extends Module {
     }
 
     /**
-     * 重置状态机到空闲状态
+     * 清除当前放置计划和所有相关缓存
      */
-    private void resetStateMachine() {
-        currentTargetPos = null;
-        currentTargetItem = null;
-        currentTargetState = null;
-        currentBlockNeedsSneak = false;
-        placementState = PlacementState.IDLE;
-        rotationSyncedThisCycle = false; // 【新增】重置旋转同步标记
+    private void clearPlan() {
+        armedPlan = null;
+        currentHitVec = null;
+        printerRotApplied = false;
     }
 
+    // ==================== 阶段 1: TickEvent.Pre 规划 ====================
+
+    /**
+     * 【方案B - 阶段1】在 tick 最早期进行规划
+     *
+     * 执行顺序：MinecraftClient.tick() HEAD
+     * 此时还没有执行 movement 物理，也没有发送 movement packet。
+     *
+     * 在此阶段：
+     * 1. 更新可放置方块列表
+     * 2. 选择最佳目标
+     * 3. 切换物品
+     * 4. 处理潜行
+     * 5. Resolve 一次，生成不可变的 PlacementPlan
+     *
+     * 如果物品/潜行需要等待同步，本 tick 不生成 plan，下一 tick 再尝试。
+     */
     @EventHandler
-    private void onTick(TickEvent.Post event) {
-        // Critical: Stop immediately if module is disabled
-        if (!isActive())
-            return;
+    private void onTickPre(TickEvent.Pre event) {
+        if (!isActive() || mc.player == null || mc.world == null) return;
 
-        // Check if player is moving and moveStop is enabled
-        if (moveStop.get() && isPlayerMoving()) {
-            return;
-        }
+        // 如果已有未执行的 plan，跳过（不应该发生，但防御性检查）
+        if (armedPlan != null) return;
 
-        if (mc.player == null || mc.world == null)
-            return;
+        // 移动中暂停
+        if (moveStop.get() && isPlayerMoving()) return;
 
-        // Check if Litematica schematic is loaded
+        // 检查 Litematica 原理图
         WorldSchematic worldSchematic = SchematicWorldHandler.getSchematicWorld();
         if (worldSchematic == null) {
             if (isActive()) {
@@ -279,326 +274,218 @@ public class Printer extends Module {
             return;
         }
 
-        // Handle delay
+        // 处理延迟
         if (tickDelay < placeDelay.get()) {
             tickDelay++;
             return;
         }
         tickDelay = 0;
 
-        // ==================== 状态机驱动的方块放置流程 ====================
-        // 【重构】双 Tick 旋转架构
-        // 每个状态的 break 都会产生一次 Tick 结束（Flying 包发送）
-        // PLACING_BLOCK 必须在有效的旋转同步后才能执行
+        // 更新候选列表
+        updatePlacePositions(worldSchematic);
+        if (placePositions.isEmpty()) {
+            resetSneakState();
+            return;
+        }
 
-        while (true) {
-            switch (placementState) {
-                case IDLE:
-                    // 空闲状态：更新可放置方块列表，选择下一个目标
-                    updatePlacePositions(worldSchematic);
+        // 尝试为列表中最近的可行方块生成 plan
+        armedPlan = selectBestPlan(worldSchematic);
 
-                    if (placePositions.isEmpty()) {
-                        // 【修改】列表为空，任务结束
-                        // 调用安全复位：如果是打印机蹲的，打印机站起来；如果是玩家蹲的，保持蹲着
-                        resetSneakState();
-                        resetStateMachine();
-                        return;
-                    }
-
-                    // 选择第一个方块作为目标（已按距离排序）
-                    currentTargetPos = placePositions.get(0);
-                    currentTargetItem = placeItems.get(currentTargetPos);
-                    currentTargetState = worldSchematic.getBlockState(currentTargetPos);
-
-                    if (currentTargetItem == null || currentTargetState == null) {
-                        resetStateMachine();
-                        return;
-                    }
-
-                    // 检查是否需要潜行（预先计算，以便在 SWITCHING_ITEM 状态使用）
-                    PlacementOption option = getPlacementDirection(currentTargetPos);
-                    if (option == null) {
-                        resetStateMachine();
-                        return;
-                    }
-
-                    BlockPos neighborPos = option.getInteractPos(currentTargetPos);
-                    BlockState neighborState = mc.world.getBlockState(neighborPos);
-                    currentBlockNeedsSneak = BlockUtilHelper.SNEAK_BLOCKS.contains(neighborState.getBlock());
-
-                    // 进入物品切换状态
-                    placementState = PlacementState.SWITCHING_ITEM;
-                    // 不 break，继续执行下一个状态（状态穿透）
-                    continue;
-
-                case SWITCHING_ITEM:
-                    // 检查物品是否已经拿到（立即生效）
-                    if (ItemSwitchHelper.isItemInMainHand(currentTargetItem)) {
-                        // 物品已拿到，立即进入潜行处理状态（无需等待）
-                        placementState = PlacementState.PRESSING_SNEAK;
-                        // 继续执行下一个状态，不 break
-                        continue;
-                    } else {
-                        // 物品切换状态：切换到目标物品
-                        if (!ItemSwitchHelper.switchToItem(currentTargetItem, true, false)) {
-                            // 物品不存在或切换失败，放弃当前方块，回到空闲状态
-                            resetStateMachine();
-                            return;
-                        }
-                        // 物品未立即生效，需要等待此 tick
-                        // 【改进】在 break 前调用一次旋转，确保 Flying 包发送
-                        // 即使 rotate 设置为 false，在 STRICT 模式下也需要确保旋转同步
-                        if (placeMode.get() == PlaceMode.STRICT && !rotationSyncedThisCycle) {
-                            rotateAndSync();
-                        }
-                        // 物品切换需要与服务端同步，此 tick 就此结束
-                        break;
-                    }
-
-                case PRESSING_SNEAK:
-                    // 潜行状态处理：根据需求按下或抬起潜行键
-                    // 关键优化：判断是否真的需要执行潜行操作
-                    if (currentBlockNeedsSneak && !mc.player.isSneaking()) {
-                        // 需要潜行但玩家未潜行，按下潜行键
-                        mc.options.sneakKey.setPressed(true);
-                        didPrinterForceSneak = true; // 标记所有权
-                        // 【改进】在 break 前调用一次旋转
-                        if (placeMode.get() == PlaceMode.STRICT && !rotationSyncedThisCycle) {
-                            rotateAndSync();
-                        }
-                        // 潜行操作需要与服务端同步，此 tick 结束
-                        break;
-                    } else if (!currentBlockNeedsSneak && mc.player.isSneaking()) {
-                        // 不需要潜行但玩家正在潜行，抬起潜行键
-                        mc.options.sneakKey.setPressed(false);
-                        didPrinterForceSneak = false; // 释放所有权
-                        // 【改进】在 break 前调用一次旋转
-                        if (placeMode.get() == PlaceMode.STRICT && !rotationSyncedThisCycle) {
-                            rotateAndSync();
-                        }
-                        // 潜行操作需要与服务端同步，此 tick 结束
-                        break;
-                    } else {
-                        // 潜行状态已满足要求，无需执行潜行操作，立即进入放置状态
-                        placementState = PlacementState.PLACING_BLOCK;
-                        // 继续执行下一个状态，不 break
-                        continue;
-                    }
-
-                case PLACING_BLOCK:
-                    // 【关键】双 Tick 架构检查
-                    // 只有在 STRICT 模式下，才需要检查旋转同步
-                    if (placeMode.get() == PlaceMode.STRICT && !rotationSyncedThisCycle) {
-                        // 还没有有效的旋转同步（没有经过一个完整的 Tick），需要先发送旋转
-                        rotateAndSync();
-                        // break 会导致 Flying 包发送，下一个 Tick 再进入 PLACING_BLOCK
-                        break;
-                    }
-
-                    // 【现在可以安全放置】旋转已经同步，Flying 包已发送
-                    // 放置状态：执行实际的方块放置
-                    executePlacement(currentTargetPos, currentTargetState);
-
-                    // 无论放置成功与否，都标记为已执行
-                    // 放置方块需要与服务端同步，回到空闲状态
-                    resetStateMachine();
-                    // 此 tick 结束，不立即继续（确保服务端有足够的时间同步）
-                    break;
-            }
-
-            // 如果执行到此处，说明某个状态触发了 break
-            // 跳出 while 循环，本 tick 结束
-            break;
+        if (armedPlan != null) {
+            // 保存 hitVec 用于渲染
+            currentHitVec = armedPlan.hitVec();
         }
     }
 
     /**
-     * 【新增】旋转并同步函数
-     * 在 STRICT 模式下调用此函数，确保：
-     * 1. 计算正确的 yaw/pitch
-     * 2. 通过 Rotations 队列发送旋转包
-     * 3. 标记本周期的旋转已同步（Flying 包会在 Tick 结束时发送）
-     *
-     * 这是双 Tick 架构的关键：当此函数返回时，Tick 即将结束，
-     * Flying 包将被发送，服务器的朝向信息将被更新。
-     * 下一个 Tick 时，PLACING_BLOCK 的旋转同步标记为 true，
-     * 可以安全地发送放置包。
+     * 选择最佳放置计划
+     * 遍历候选列表，找到第一个物品/潜行都满足条件的方块，生成 plan。
      */
-    private void rotateAndSync() {
-        // 如果还没计算过旋转，现在计算
-        if (currentHitVec == null && currentTargetPos != null && currentTargetState != null) {
-            PlacementOption option = getPlacementDirection(currentTargetPos);
-            if (option != null && option.hitVec() != null) {
-                currentHitVec = option.hitVec();
-                lastComputedYaw = Rotations.getYaw(currentHitVec);
-                lastComputedPitch = Rotations.getPitch(currentHitVec);
-            }
-        }
+    private PlacementPlan selectBestPlan(WorldSchematic worldSchematic) {
+        for (BlockPos pos : placePositions) {
+            Item item = placeItems.get(pos);
+            BlockState requiredState = worldSchematic.getBlockState(pos);
+            if (item == null || requiredState == null) continue;
 
-        if (currentHitVec != null) {
-            // 【关键】使用 Rotations.rotate() 的回调机制
-            // 虽然我们可能不实际执行任何操作，但这确保旋转包通过正确的队列
-            // 并在该回调返回后，Flying 包将在 Tick 结束时发送
-            if (rotate.get()) {
-                Rotations.rotate(lastComputedYaw, lastComputedPitch, 50, () -> {
-                    // 回调中不需要做任何事，旋转包已经在队列中
-                });
-            } else {
-                // 【改进】即使 rotate=false，在 STRICT 模式也需要通知 Rotations 系统
-                // 这确保旋转包被正确排序。在 Minecraft 协议中，
-                // 旋转信息通常包含在 Flying 包（PlayerMoveC2SPacket）中，
-                // 调用 Rotations.rotate 确保了这个包的正确发送时机。
-                Rotations.rotate(lastComputedYaw, lastComputedPitch, 0, () -> {
-                    // 即使没有旋转操作，也要通过 Rotations 队列以保证包顺序
-                });
-            }
-        }
+            // 解析放置方向（只 resolve 一次！）
+            PlacementOption option = resolvePlacement(pos, requiredState);
+            if (option == null || option.hitVec() == null) continue;
 
-        // 【标记】本周期旋转已同步
-        // 这个标记会在 Tick 结束后的下一个 Tick 中有效
-        rotationSyncedThisCycle = true;
+            // 检查是否需要潜行
+            BlockPos interactPos = option.getInteractPos(pos);
+            BlockState interactState = mc.world.getBlockState(interactPos);
+            boolean needsSneak = BlockUtilHelper.SNEAK_BLOCKS.contains(interactState.getBlock());
+
+            // 尝试确保物品就绪
+            if (!ensureItemReady(item)) continue;
+
+            // 尝试确保潜行状态就绪
+            if (!ensureSneakReady(needsSneak)) {
+                // 潜行状态刚切换，本 tick 不放（等服务端同步），但保留 sneak 状态
+                // 不生成 plan，下一 tick 再来
+                return null;
+            }
+
+            // 物品和潜行都就绪，生成不可变的 plan
+            Vec3d hitVec = option.hitVec();
+            float yaw = (float) Rotations.getYaw(hitVec);
+            float pitch = (float) Rotations.getPitch(hitVec);
+
+            return new PlacementPlan(
+                pos,
+                interactPos,
+                option.getClickedFace(),
+                hitVec,
+                yaw,
+                pitch,
+                item,
+                needsSneak
+            );
+        }
+        return null;
     }
 
     /**
-     * 获取当前目标方块的放置方向
-     * 使用规则引擎架构，根据模式选择使用STRICT或LEGIT的方向检查
-     *
-     * @param pos 目标位置
-     * @return 放置方向，如果无法放置则返回null
+     * 确保目标物品在主手
+     * @return true 如果物品已就绪（在主手或副手）
      */
-    private PlacementOption getPlacementDirection(BlockPos pos) {
-        WorldSchematic worldSchematic = SchematicWorldHandler.getSchematicWorld();
-        if (worldSchematic == null)
-            return null;
+    private boolean ensureItemReady(Item item) {
+        if (ItemSwitchHelper.isItemInMainHand(item)) return true;
+        // 副手检查
+        if (mc.player.getOffHandStack().getItem() == item) return true;
+        // 尝试切换
+        return ItemSwitchHelper.switchToItem(item, true, false)
+            && ItemSwitchHelper.isItemInMainHand(item);
+    }
 
-        BlockState requiredState = worldSchematic.getBlockState(pos);
+    /**
+     * 确保潜行状态满足要求
+     * @return true 如果潜行状态已经正确（无需等待同步）
+     */
+    private boolean ensureSneakReady(boolean needsSneak) {
+        if (needsSneak && !mc.player.isSneaking()) {
+            mc.options.sneakKey.setPressed(true);
+            didPrinterForceSneak = true;
+            return false; // 刚按下，等下一 tick 同步
+        } else if (!needsSneak && didPrinterForceSneak && mc.player.isSneaking()) {
+            mc.options.sneakKey.setPressed(false);
+            didPrinterForceSneak = false;
+            return false; // 刚松开，等下一 tick 同步
+        }
+        return true; // 状态已满足
+    }
+
+    // ==================== 阶段 2: PlayerTickMovementEvent 预应用旋转 ====================
+
+    /**
+     * 【方案B - 阶段2】在 movement 物理之前应用目标 yaw/pitch
+     *
+     * 执行顺序：ClientPlayerEntity.tickMovement() HEAD
+     * 此时 movement 物理还未开始，通过在此处设置 yaw/pitch，
+     * 可以确保本 tick 的 movement 物理使用与放置相同的角度。
+     *
+     * 这是让打印机"像合法玩家边走边转头"的关键：
+     * movement 物理按目标角度计算 → movement packet 带目标角度 → place packet 紧随其后
+     */
+    @EventHandler
+    private void onPlayerTickMovement(PlayerTickMovementEvent event) {
+        if (armedPlan == null || mc.player == null) return;
+
+        // 只在 rotate 开启且 STRICT 模式下预应用旋转
+        // LEGIT 模式不需要如此严格的角度同步
+        if (!rotate.get() && placeMode.get() == PlaceMode.LEGIT) return;
+
+        // 保存玩家当前 yaw/pitch，用于放置后恢复
+        savedYaw = mc.player.getYaw();
+        savedPitch = mc.player.getPitch();
+
+        // 预应用目标角度 → movement 物理将使用这个角度
+        mc.player.setYaw(armedPlan.yaw());
+        mc.player.setPitch(armedPlan.pitch());
+        printerRotApplied = true;
+    }
+
+    // ==================== 阶段 3: SendMovementPacketsEvent.Post 执行放置 ====================
+
+    /**
+     * 【方案B - 阶段3】在 movement packet 发出后立即放置
+     *
+     * 执行顺序：ClientPlayerEntity.sendMovementPackets() TAIL
+     * 此时本 tick 的 movement packet 已经发出（带有正确的 yaw/pitch），
+     * 立即发送 place packet，确保 place 与 movement 在同一 tick 内完成。
+     *
+     * 这完美模拟了合法玩家的操作序列：
+     * 转头 → 走一步 → 发 movement 包 → 右键放置
+     */
+    @EventHandler
+    private void onSendMovementPacketsPost(SendMovementPacketsEvent.Post event) {
+        if (armedPlan != null && mc.player != null) {
+            // 验证 plan 是否仍然有效
+            if (isPlanStillValid(armedPlan)) {
+                placeBlockInternal(
+                    armedPlan.interactPos(),
+                    armedPlan.clickedFace(),
+                    armedPlan.hitVec()
+                );
+            }
+            armedPlan = null;
+        }
+
+        // 恢复玩家原始视角（避免视觉上的强制转头）
+        if (printerRotApplied && mc.player != null) {
+            mc.player.setYaw(savedYaw);
+            mc.player.setPitch(savedPitch);
+            printerRotApplied = false;
+        }
+    }
+
+    /**
+     * 验证 PlacementPlan 在执行时是否仍然有效
+     * 防止在 plan 创建到执行之间世界状态发生变化
+     */
+    private boolean isPlanStillValid(PlacementPlan plan) {
+        if (mc.player == null || mc.world == null) return false;
+
+        // 检查交互位置是否仍然存在可点击方块
+        BlockState interactState = mc.world.getBlockState(plan.interactPos());
+        if (!BlockUtilHelper.isClickable(interactState, mc.world, plan.interactPos())) {
+            // 自我放置（如双层半砖）的情况，interactPos 就是 targetPos
+            // 此时 targetPos 可能目前是空气或可替换方块
+            if (!plan.interactPos().equals(plan.targetPos())) {
+                return false;
+            }
+        }
+
+        // 检查目标物品是否仍在手中
+        if (!ItemSwitchHelper.isItemInMainHand(plan.item())
+            && mc.player.getOffHandStack().getItem() != plan.item()) {
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * 使用规则引擎解析指定位置的放置选项
+     * 只 resolve 一次，生成包含 hitVec 的完整 PlacementOption。
+     */
+    private PlacementOption resolvePlacement(BlockPos pos, BlockState requiredState) {
         boolean strict = placeMode.get() == PlaceMode.STRICT;
         boolean checkLos = strict && checkLineOfSight.get();
-
-        // 创建放置上下文（传入 placeRange 作为 maxReach）
         PlacementContext ctx = PlacementContext.of(mc.world, pos, requiredState, mc.player, strict, checkLos, placeRange.get());
-
-        // 使用规则引擎解析最佳方向
         return ResolverRegistry.resolve(ctx);
     }
 
     /**
-     * 执行实际的方块放置操作
-     * 此方法在PLACING_BLOCK状态时调用，假设物品已切换，潜行已按下（如果需要）
+     * 执行方块放置
+     * 直接使用 plan 中预计算好的参数，不再重新 resolve。
      *
-     * @param pos           目标位置
-     * @param requiredState 目标方块状态
-     * @return 放置是否成功
+     * @param interactPos 要点击的方块位置
+     * @param side        要点击的方块面
+     * @param hitVec      精确点击坐标
      */
-    private boolean executePlacement(BlockPos pos, BlockState requiredState) {
-        if (placeMode.get() == PlaceMode.LEGIT) {
-            return placeBlockLegit(pos, requiredState);
-        } else {
-            return placeBlockStrict(pos, requiredState);
-        }
-    }
-
-    /**
-     * 普通模式放置方块（LEGIT模式）
-     * 使用规则引擎，不进行严格的反作弊检查
-     *
-     * 【重构后】Resolver 返回的 PlacementOption 已经包含计算好的 hitVec，
-     * 无需再次手动计算。
-     *
-     * @param pos           目标位置
-     * @param requiredState 目标方块状态
-     * @return 放置是否成功
-     */
-    private boolean placeBlockLegit(BlockPos pos, BlockState requiredState) {
-        // 创建放置上下文（LEGIT 模式：strict=false, checkLos=false，传入 placeRange）
-        PlacementContext ctx = PlacementContext.of(mc.world, pos, requiredState, mc.player, false, false, placeRange.get());
-
-        // 使用规则引擎解析最佳方向（内部已经计算了 hitVec 并通过了过滤）
-        PlacementOption option = ResolverRegistry.resolve(ctx);
-        if (option == null)
-            return false;
-
-        // 直接从 option 中获取结果，无需再次计算
-        BlockPos neighborPos = option.getInteractPos(pos);
-        Direction clickedSide = option.getClickedFace();
-        Vec3d hitVec = option.hitVec(); // 【关键】直接拿，不用再算一遍！
-
-        // 【新增】保存 hitVec 用于调试显示
-        currentHitVec = hitVec;
-
-        // 执行放置
-        if (rotate.get()) {
-            double yaw = Rotations.getYaw(hitVec);
-            double pitch = Rotations.getPitch(hitVec);
-            Rotations.rotate(yaw, pitch, 50, () -> {
-                placeBlockInternal(neighborPos, clickedSide, hitVec);
-            });
-        } else {
-            placeBlockInternal(neighborPos, clickedSide, hitVec);
-        }
-
-        return true;
-    }
-
-    /**
-     * 使用STRICT模式放置方块，包含反作弊绕过和方向检查
-     * 使用规则引擎，hitVec（点击位置）决定了方块的朝向
-     *
-     * 【重构后】Resolver 返回的 PlacementOption 已经包含计算好的 hitVec，
-     * 并且该 hitVec 已经通过了 NCP 和视线检查。
-     *
-     * 【双 Tick 架构】此方法在旋转已同步后被调用，确保 Flying 包先于 Place 包。
-     *
-     * @param pos           目标位置（要放置的方块位置）
-     * @param requiredState 目标方块状态（包含朝向属性）
-     * @return 放置是否成功
-     */
-    private boolean placeBlockStrict(BlockPos pos, BlockState requiredState) {
-        // 创建放置上下文（STRICT 模式：strict=true, checkLos 根据设置，传入 placeRange）
-        PlacementContext ctx = PlacementContext.of(mc.world, pos, requiredState, mc.player, true, checkLineOfSight.get(), placeRange.get());
-
-        // 使用规则引擎解析最佳方向（内部已经计算了 hitVec 并通过了过滤）
-        PlacementOption option = ResolverRegistry.resolve(ctx);
-        if (option == null)
-            return false;
-
-        // 直接从 option 中获取结果，无需再次计算
-        BlockPos neighborPos = option.getInteractPos(pos);
-        Direction clickedSide = option.getClickedFace();
-        Vec3d hitVec = option.hitVec(); // 【关键】直接拿，不用再算一遍！
-
-        // 【新增】保存 hitVec 用于调试显示
-        currentHitVec = hitVec;
-
-        // 【改进】在 STRICT 模式下，always 通过 Rotations 队列
-        // 这样可以保证旋转包在之前已经发送（rotationSyncedThisCycle 为 true 才会来到这里）
-        double yaw = Rotations.getYaw(hitVec);
-        double pitch = Rotations.getPitch(hitVec);
-
-        // 【关键】即使 rotate=false，也要通过 Rotations 队列以保证包顺序
-        if (rotate.get()) {
-            Rotations.rotate(yaw, pitch, 50, () -> {
-                placeBlockInternal(neighborPos, clickedSide, hitVec);
-            });
-        } else {
-            // 【改进】不通过 Rotations 回调，而是直接放置
-            // 因为此时旋转已经在前一个 Tick 同步过了
-            placeBlockInternal(neighborPos, clickedSide, hitVec);
-        }
-
-        return true;
-    }
-
-    /**
-     * Internal block placement using BlockHitResult.
-     * 直接执行方块放置，不处理潜行（由状态机负责）
-     *
-     * @param neighborPos The block being interacted with.
-     * @param side        The face of the neighbor block being clicked.
-     * @param hitVec      The exact position of the click.
-     */
-    private void placeBlockInternal(BlockPos neighborPos, Direction side, Vec3d hitVec) {
-        BlockHitResult hitResult = new BlockHitResult(hitVec, side, neighborPos, false);
+    private void placeBlockInternal(BlockPos interactPos, Direction side, Vec3d hitVec) {
+        BlockHitResult hitResult = new BlockHitResult(hitVec, side, interactPos, false);
         ActionResult result = mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hitResult);
 
         if (result.isAccepted()) {
@@ -896,9 +783,8 @@ public class Printer extends Module {
 
     @Override
     public String getInfoString() {
-        // 显示当前状态和待放置方块数量
-        if (placementState != PlacementState.IDLE) {
-            return placementState.name() + " (" + placePositions.size() + ")";
+        if (armedPlan != null) {
+            return "ARMED (" + placePositions.size() + ")";
         }
         return String.valueOf(placePositions.size());
     }
