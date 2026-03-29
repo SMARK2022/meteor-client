@@ -4,6 +4,7 @@ import meteordevelopment.meteorclient.utils.printer.PlacementOption;
 import net.minecraft.block.*;
 import net.minecraft.block.enums.SlabType;
 import net.minecraft.state.property.Properties;
+import net.minecraft.block.WallRedstoneTorchBlock;
 
 /**
  * ResolverRegistry - 策略注册表
@@ -372,6 +373,7 @@ public final class ResolverRegistry {
         // 2. 地板退化类 (Degenerate on Floor)
         // 这些方块在墙上正常，点地板会变身，点天花板(可能)走视线逻辑
         if (block instanceof WallTorchBlock // 墙上火把
+                || block instanceof WallRedstoneTorchBlock // 墙上红石火把
                 || block instanceof WallSignBlock // 墙上告示牌
                 || block instanceof WallBannerBlock // 墙上旗帜
                 || block instanceof WallSkullBlock // 墙上头颅
@@ -508,6 +510,7 @@ public final class ResolverRegistry {
         // 2. 地板退化类 (Degenerate on Floor)
         // 这些方块在墙上正常，点地板会变身，点天花板(可能)走视线逻辑
         if (block instanceof WallTorchBlock // 墙上火把
+                || block instanceof WallRedstoneTorchBlock // 墙上红石火把
                 || block instanceof WallSignBlock // 墙上告示牌
                 || block instanceof WallBannerBlock // 墙上旗帜
                 || block instanceof WallSkullBlock // 墙上头颅
