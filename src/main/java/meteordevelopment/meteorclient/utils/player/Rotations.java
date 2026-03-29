@@ -38,6 +38,13 @@ public class Rotations {
     private static boolean sentLastRotation;
     public static boolean rotating = false;
 
+    // GrimSafe mode: when enabled, spoofed rotations are NOT injected into the vanilla
+    // PositionLook packet while the player is moving. This prevents Grim's Simulation
+    // check from failing due to yaw mismatch with actual movement direction.
+    // Extra Look-only packets are also suppressed to avoid Timer detection.
+    public static boolean grimSafeMode = true;
+    private static boolean didModifyPlayerRotation = false;
+
     private Rotations() {
     }
 
@@ -83,17 +90,37 @@ public class Rotations {
         }
     }
 
+    /**
+     * Checks if the player is moving enough that the vanilla Flying packet will include position data.
+     * Vanilla threshold: movement² > 9.0E-4 (≈0.03 blocks).
+     * When this is true, Grim runs movement prediction using the packet's yaw.
+     */
+    public static boolean isPlayerSignificantlyMoving() {
+        if (mc.player == null) return false;
+        Vec3d vel = mc.player.getVelocity();
+        return vel.x * vel.x + vel.z * vel.z > 9.0E-4;
+    }
+
     @EventHandler
     private static void onSendMovementPacketsPre(SendMovementPacketsEvent.Pre event) {
         if (mc.cameraEntity != mc.player) return;
         sentLastRotation = false;
+        didModifyPlayerRotation = false;
 
         if (!rotations.isEmpty()) {
             rotating = true;
             resetLastRotation();
 
             Rotation rotation = rotations.get(i);
-            setupMovementPacketRotation(rotation);
+            boolean shouldInject = !grimSafeMode || !isPlayerSignificantlyMoving() || rotation.clientSide;
+
+            if (shouldInject) {
+                setupMovementPacketRotation(rotation);
+                didModifyPlayerRotation = true;
+            } else {
+                // GrimSafe + moving: only track rotation, don't inject into vanilla packet
+                setCamRotation(rotation.yaw, rotation.pitch);
+            }
 
             if (rotations.size() > 1) rotationPool.free(rotation);
 
@@ -103,7 +130,14 @@ public class Rotations {
                 resetLastRotation();
                 rotating = false;
             } else {
-                setupMovementPacketRotation(lastRotation);
+                boolean shouldInject = !grimSafeMode || !isPlayerSignificantlyMoving() || lastRotation.clientSide;
+
+                if (shouldInject) {
+                    setupMovementPacketRotation(lastRotation);
+                    didModifyPlayerRotation = true;
+                } else {
+                    setCamRotation(lastRotation.yaw, lastRotation.pitch);
+                }
                 sentLastRotation = true;
 
                 lastRotationTimer++;
@@ -132,16 +166,31 @@ public class Rotations {
 
                 if (rotations.size() == 1) lastRotation = rotations.get(i - 1);
 
-                resetPreRotation();
+                if (didModifyPlayerRotation) {
+                    resetPreRotation();
+                }
             }
+
+            boolean movingGrimSafe = grimSafeMode && isPlayerSignificantlyMoving();
 
             for (; i < rotations.size(); i++) {
                 Rotation rotation = rotations.get(i);
 
                 setCamRotation(rotation.yaw, rotation.pitch);
-                if (rotation.clientSide) setClientRotation(rotation);
-                rotation.sendPacket();
-                if (rotation.clientSide) resetPreRotation();
+
+                if (rotation.clientSide) {
+                    // Client-side rotations always get injected
+                    setClientRotation(rotation);
+                    rotation.sendPacket();
+                    resetPreRotation();
+                } else if (!movingGrimSafe) {
+                    // Normal mode or stationary: send extra Look packet
+                    rotation.sendPacket();
+                } else {
+                    // GrimSafe + moving: don't send extra Look packet (Timer risk)
+                    // Just run the callback so the action still executes
+                    rotation.runCallback();
+                }
 
                 if (i == rotations.size() - 1) lastRotation = rotation;
                 else rotationPool.free(rotation);
@@ -149,7 +198,7 @@ public class Rotations {
 
             rotations.clear();
             i = 0;
-        } else if (sentLastRotation) {
+        } else if (sentLastRotation && didModifyPlayerRotation) {
             resetPreRotation();
         }
     }

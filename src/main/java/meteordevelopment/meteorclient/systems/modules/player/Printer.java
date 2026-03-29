@@ -389,10 +389,17 @@ public class Printer extends Module {
                     // 【关键】双 Tick 架构检查
                     // 只有在 STRICT 模式下，才需要检查旋转同步
                     if (placeMode.get() == PlaceMode.STRICT && !rotationSyncedThisCycle) {
-                        // 还没有有效的旋转同步（没有经过一个完整的 Tick），需要先发送旋转
-                        rotateAndSync();
-                        // break 会导致 Flying 包发送，下一个 Tick 再进入 PLACING_BLOCK
-                        break;
+                        // GrimSafe 优化：当玩家在移动时，旋转不会被注入到 Flying 包中，
+                        // 所以等待旋转同步没有意义。直接放置，避免浪费 1 tick。
+                        if (Rotations.grimSafeMode && Rotations.isPlayerSignificantlyMoving()) {
+                            // 移动中：跳过旋转同步，直接放置
+                            // Grim 的 RotationPlace 可能会标记（因为 yaw 不匹配），
+                            // 但 Simulation 不会标记（真实运动 yaw 在 Flying 包中）
+                        } else {
+                            // 静止时：需要旋转同步，等待下一个 Tick
+                            rotateAndSync();
+                            break;
+                        }
                     }
 
                     // 【现在可以安全放置】旋转已经同步，Flying 包已发送
@@ -575,9 +582,15 @@ public class Printer extends Module {
         double yaw = Rotations.getYaw(hitVec);
         double pitch = Rotations.getPitch(hitVec);
 
+        // 【GrimSafe 兼容】判断是否需要强制注入旋转
+        // 当 grimSafeMode 开启且玩家在移动时，普通旋转不会注入到 Flying 包中，
+        // 导致 Grim 的 RotationPlace 检查失败。
+        // 使用 clientSide=true 强制注入，接受单 tick 的 Simulation 偏差。
+        boolean forceInject = Rotations.grimSafeMode && Rotations.isPlayerSignificantlyMoving();
+
         // 【关键】即使 rotate=false，也要通过 Rotations 队列以保证包顺序
-        if (rotate.get()) {
-            Rotations.rotate(yaw, pitch, 50, () -> {
+        if (rotate.get() || forceInject) {
+            Rotations.rotate(yaw, pitch, 50, forceInject, () -> {
                 placeBlockInternal(neighborPos, clickedSide, hitVec);
             });
         } else {

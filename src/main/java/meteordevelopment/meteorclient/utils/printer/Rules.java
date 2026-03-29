@@ -692,6 +692,22 @@ public final class Rules {
     };
 
     /**
+     * [新增] 过滤器：仅允许水平面点击
+     * 用于 WallTorch、WallRedstoneTorch、WallSign 等严格贴墙方块。
+     *
+     * 核心逻辑：
+     * - 点击地板 (UP面) → 游戏会退化成 Standing 变种 → 拒绝
+     * - 点击天花板 (DOWN面) → 游戏可能退化成 Standing 变种或放置失败 → 拒绝
+     * - 只有点击侧面 (水平面) 才能正确放置墙上变种
+     *
+     * 这是对 BAN_FLOOR_CLICK 的加强版，BAN_FLOOR_CLICK 仅禁止 UP 面，
+     * HORIZONTAL_CLICK_ONLY 同时禁止 UP 和 DOWN 面。
+     */
+    public static final CandidateFilter HORIZONTAL_CLICK_ONLY = (ctx, opt) -> {
+        return opt.getClickedFace().getAxis().isHorizontal();
+    };
+
+    /**
      * [新增] 混合旋转检查 (墙面/视线)
      * 适用于 WallTorch, WallSign 等。
      * 逻辑：
