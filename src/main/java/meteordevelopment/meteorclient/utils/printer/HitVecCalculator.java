@@ -123,31 +123,36 @@ public interface HitVecCalculator {
         double y = pos.getY();
         double z = pos.getZ();
 
+        // [Fix] 面坐标轻微内缩，避免精确边界上的面判定抖动
+        final double FACE_EPS = 1.0e-3;
+        double cx = x + (minX + maxX) / 2.0;
+        double cz = z + (minZ + maxZ) / 2.0;
+
         // 根据点击的面计算点击点
         switch (side) {
             case UP -> {
-                // 点击顶面：固定在 Shape 最高点
-                return new Vec3d(x + (minX + maxX) / 2.0, y + maxY, z + (minZ + maxZ) / 2.0);
+                // 点击顶面：固定在 Shape 最高点（轻微内缩）
+                return new Vec3d(cx, y + Math.max(minY, maxY - FACE_EPS), cz);
             }
             case DOWN -> {
-                // 点击底面：固定在 Shape 最低点
-                return new Vec3d(x + (minX + maxX) / 2.0, y + minY, z + (minZ + maxZ) / 2.0);
+                // 点击底面：固定在 Shape 最低点（轻微内缩）
+                return new Vec3d(cx, y + Math.min(maxY, minY + FACE_EPS), cz);
             }
             case NORTH -> {
                 // 点击北面（Z 轴负向）：使用计算出的 finalRelY
-                return new Vec3d(x + (minX + maxX) / 2.0, y + finalRelY, z + minZ);
+                return new Vec3d(cx, y + finalRelY, z + Math.min(maxZ, minZ + FACE_EPS));
             }
             case SOUTH -> {
                 // 点击南面（Z 轴正向）
-                return new Vec3d(x + (minX + maxX) / 2.0, y + finalRelY, z + maxZ);
+                return new Vec3d(cx, y + finalRelY, z + Math.max(minZ, maxZ - FACE_EPS));
             }
             case WEST -> {
                 // 点击西面（X 轴负向）
-                return new Vec3d(x + minX, y + finalRelY, z + (minZ + maxZ) / 2.0);
+                return new Vec3d(x + Math.min(maxX, minX + FACE_EPS), y + finalRelY, cz);
             }
             case EAST -> {
                 // 点击东面（X 轴正向）
-                return new Vec3d(x + maxX, y + finalRelY, z + (minZ + maxZ) / 2.0);
+                return new Vec3d(x + Math.max(minX, maxX - FACE_EPS), y + finalRelY, cz);
             }
         }
         return Vec3d.ofCenter(pos);

@@ -192,5 +192,20 @@ public class ItemSwitchHelper {
         previousSlot = -1;
         didInventoryTransfer = false;
     }
+
+    /**
+     * 检查本 tick 是否刚执行过背包→热栏转移
+     * 用于让 Printer 在转移后等待 1 tick 再放置，避免物品同步未稳定
+     */
+    public static boolean didInventoryTransferThisTick() {
+        return didInventoryTransfer;
+    }
+
+    /**
+     * 重置背包转移标记（在下一 tick 开始时调用）
+     */
+    public static void resetTransferFlag() {
+        didInventoryTransfer = false;
+    }
 }
 

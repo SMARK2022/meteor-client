@@ -347,16 +347,22 @@ public final class Rules {
      * 确保玩家能够看到要点击的方块面
      * 只在 checkLos 启用时生效
      *
-     * 【升级】这是本次重构的最大受益者。
-     * 以前我们检查方块中心是否可见 -> 半砖时经常误判。
-     * 现在我们直接检查 opt.hitVec() 是否可见。
+     * 【升级】使用 canSeeFacePoint（基于 OUTLINE ShapeType）替代 canSeePoint（COLLIDER）。
+     * 这确保了铁轨、地毯、红石线等薄方块不会被错误地视为可穿透。
+     * 同时验证击中的是正确的方块和正确的面。
      */
     public static final CandidateFilter LINE_OF_SIGHT = (ctx, opt) -> {
         if (!ctx.checkLos()) return true; // 未启用视线检查，全部通过
 
-        // 直接使用解析器算好的精确坐标进行 Raycast
+        // 使用基于 OUTLINE 的面可见性检查
         if (opt.hitVec() != null) {
-            return BlockUtilHelper.canSeePoint(opt.hitVec(), ctx.world(), ctx.player());
+            return BlockUtilHelper.canSeeFacePoint(
+                opt.getInteractPos(ctx.targetPos()),
+                opt.getClickedFace(),
+                opt.hitVec(),
+                ctx.world(),
+                ctx.player()
+            );
         }
 
         // 回退方案（理论上不应该走到这里，因为 Resolver 已经注入了 hitVec）

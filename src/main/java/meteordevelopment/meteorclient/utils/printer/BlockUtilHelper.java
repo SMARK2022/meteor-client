@@ -273,6 +273,51 @@ public class BlockUtilHelper {
     }
 
     /**
+     * 【新增】基于 OUTLINE 的面可见性检查
+     * 使用 ShapeType.OUTLINE 进行射线检测，确保薄方块（铁轨、地毯、红石线等）
+     * 不会被错误地视为可穿透。
+     *
+     * 同时验证射线确实击中了目标方块的正确面，防止"跨过铁轨去点远侧面"。
+     *
+     * @param blockPos   要点击的方块位置
+     * @param face       要点击的方块面
+     * @param targetPoint 精确的点击坐标
+     * @param world      游戏世界
+     * @param player     玩家实体
+     * @return 是否能看到该方块面上的目标点
+     */
+    public static boolean canSeeFacePoint(BlockPos blockPos, Direction face, Vec3d targetPoint,
+                                           World world, PlayerEntity player) {
+        if (targetPoint == null || world == null || player == null) return false;
+
+        // 关键：向被点击方块内部轻微缩进，避免"刚好在面上"导致 MISS
+        final double EPS = 1.0e-3;
+        Vec3d end = targetPoint.add(
+            -face.getOffsetX() * EPS,
+            -face.getOffsetY() * EPS,
+            -face.getOffsetZ() * EPS
+        );
+
+        net.minecraft.util.hit.BlockHitResult hit = world.raycast(new net.minecraft.world.RaycastContext(
+            player.getEyePos(),
+            end,
+            net.minecraft.world.RaycastContext.ShapeType.OUTLINE,
+            net.minecraft.world.RaycastContext.FluidHandling.NONE,
+            player
+        ));
+
+        // 必须击中方块
+        if (hit.getType() != net.minecraft.util.hit.HitResult.Type.BLOCK) return false;
+        // 必须击中正确的方块
+        if (!hit.getBlockPos().equals(blockPos)) return false;
+        // 必须击中正确的面
+        if (hit.getSide() != face) return false;
+
+        // 击中点应该接近目标点
+        return hit.getPos().squaredDistanceTo(end) < 0.0001;
+    }
+
+    /**
      * 获取球形范围内的所有方块位置
      */
     public static List<BlockPos> getSphere(int range, Vec3d center) {

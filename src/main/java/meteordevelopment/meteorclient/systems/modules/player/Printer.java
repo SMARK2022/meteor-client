@@ -172,7 +172,11 @@ public class Printer extends Module {
         float yaw,
         float pitch,
         Item item,
-        boolean needsSneak
+        Hand hand,
+        BlockState requiredState,
+        Vec3d plannedEyePos,
+        boolean needsSneak,
+        boolean selfPlacement
     ) {}
 
     // ==================== 内部状态 ====================
@@ -302,6 +306,12 @@ public class Printer extends Module {
      * 遍历候选列表，找到第一个物品/潜行都满足条件的方块，生成 plan。
      */
     private PlacementPlan selectBestPlan(WorldSchematic worldSchematic) {
+        // 如果本 tick 刚做过背包→热栏转移，跳过（等待 1 tick 同步）
+        if (ItemSwitchHelper.didInventoryTransferThisTick()) {
+            ItemSwitchHelper.resetTransferFlag();
+            return null;
+        }
+
         for (BlockPos pos : placePositions) {
             Item item = placeItems.get(pos);
             BlockState requiredState = worldSchematic.getBlockState(pos);
@@ -316,13 +326,13 @@ public class Printer extends Module {
             BlockState interactState = mc.world.getBlockState(interactPos);
             boolean needsSneak = BlockUtilHelper.SNEAK_BLOCKS.contains(interactState.getBlock());
 
-            // 尝试确保物品就绪
-            if (!ensureItemReady(item)) continue;
+            // 尝试确保物品就绪并获取使用的手
+            Hand hand = ensureItemReadyAndGetHand(item);
+            if (hand == null) continue;
 
             // 尝试确保潜行状态就绪
             if (!ensureSneakReady(needsSneak)) {
                 // 潜行状态刚切换，本 tick 不放（等服务端同步），但保留 sneak 状态
-                // 不生成 plan，下一 tick 再来
                 return null;
             }
 
@@ -330,6 +340,7 @@ public class Printer extends Module {
             Vec3d hitVec = option.hitVec();
             float yaw = (float) Rotations.getYaw(hitVec);
             float pitch = (float) Rotations.getPitch(hitVec);
+            boolean selfPlacement = interactPos.equals(pos);
 
             return new PlacementPlan(
                 pos,
@@ -339,23 +350,29 @@ public class Printer extends Module {
                 yaw,
                 pitch,
                 item,
-                needsSneak
+                hand,
+                requiredState,
+                mc.player.getEyePos(),
+                needsSneak,
+                selfPlacement
             );
         }
         return null;
     }
 
     /**
-     * 确保目标物品在主手
-     * @return true 如果物品已就绪（在主手或副手）
+     * 确保目标物品在手中，并返回使用哪只手
+     * @return 可用的 Hand，如果无法就绪返回 null
      */
-    private boolean ensureItemReady(Item item) {
-        if (ItemSwitchHelper.isItemInMainHand(item)) return true;
-        // 副手检查
-        if (mc.player.getOffHandStack().getItem() == item) return true;
-        // 尝试切换
-        return ItemSwitchHelper.switchToItem(item, true, false)
-            && ItemSwitchHelper.isItemInMainHand(item);
+    private Hand ensureItemReadyAndGetHand(Item item) {
+        if (mc.player.getMainHandStack().getItem() == item) return Hand.MAIN_HAND;
+        if (mc.player.getOffHandStack().getItem() == item) return Hand.OFF_HAND;
+        // 尝试切换到主手
+        if (ItemSwitchHelper.switchToItem(item, true, false)
+            && ItemSwitchHelper.isItemInMainHand(item)) {
+            return Hand.MAIN_HAND;
+        }
+        return null;
     }
 
     /**
@@ -422,13 +439,10 @@ public class Printer extends Module {
         if (armedPlan != null && mc.player != null) {
             // 验证 plan 是否仍然有效
             if (isPlanStillValid(armedPlan)) {
-                placeBlockInternal(
-                    armedPlan.interactPos(),
-                    armedPlan.clickedFace(),
-                    armedPlan.hitVec()
-                );
+                placeBlockInternal(armedPlan);
             }
             armedPlan = null;
+            currentHitVec = null;
         }
 
         // 恢复玩家原始视角（避免视觉上的强制转头）
@@ -441,28 +455,101 @@ public class Printer extends Module {
 
     /**
      * 验证 PlacementPlan 在执行时是否仍然有效
-     * 防止在 plan 创建到执行之间世界状态发生变化
+     * 使用当前 eyePos 重新验证几何条件，防止 movement 后 plan 过期
      */
     private boolean isPlanStillValid(PlacementPlan plan) {
         if (mc.player == null || mc.world == null) return false;
 
-        // 检查交互位置是否仍然存在可点击方块
-        BlockState interactState = mc.world.getBlockState(plan.interactPos());
-        if (!BlockUtilHelper.isClickable(interactState, mc.world, plan.interactPos())) {
-            // 自我放置（如双层半砖）的情况，interactPos 就是 targetPos
-            // 此时 targetPos 可能目前是空气或可替换方块
-            if (!plan.interactPos().equals(plan.targetPos())) {
+        // 1. 目标仍然需要放置（未被满足/占用）
+        if (isTargetAlreadySatisfied(plan)) return false;
+
+        // 2. 交互块仍然可用
+        if (!isInteractStillValid(plan)) return false;
+
+        // 3. 手里确实还是这件物品
+        if (!isPlanHandStillHoldingItem(plan)) return false;
+
+        // 4. sneak 条件满足
+        if (plan.needsSneak() && !mc.player.isSneaking()) return false;
+
+        // 5. 使用当前 eyePos 重新验证几何合法性
+        Vec3d currentEye = mc.player.getEyePos();
+
+        // Reach 检查
+        if (currentEye.distanceTo(plan.hitVec()) > placeRange.get() + 0.1) return false;
+
+        if (placeMode.get() == PlaceMode.STRICT) {
+            // NCP 方向检查
+            if (!BlockUtilHelper.getPlaceDirectionsNCP(currentEye, plan.hitVec())
+                    .contains(plan.clickedFace())) {
+                return false;
+            }
+
+            // LOS 检查
+            if (checkLineOfSight.get()
+                && !BlockUtilHelper.canSeeFacePoint(
+                    plan.interactPos(),
+                    plan.clickedFace(),
+                    plan.hitVec(),
+                    mc.world,
+                    mc.player)) {
                 return false;
             }
         }
 
-        // 检查目标物品是否仍在手中
-        if (!ItemSwitchHelper.isItemInMainHand(plan.item())
-            && mc.player.getOffHandStack().getItem() != plan.item()) {
-            return false;
+        return true;
+    }
+
+    /**
+     * 检查目标位置是否已经被满足（不再需要放置）
+     */
+    private boolean isTargetAlreadySatisfied(PlacementPlan plan) {
+        BlockState current = mc.world.getBlockState(plan.targetPos());
+        BlockState required = plan.requiredState();
+
+        // 如果目标已经就是所需状态，说明已经放好了
+        if (current.getBlock() == required.getBlock()) {
+            // 半砖升级的特殊处理
+            if (current.getBlock() instanceof SlabBlock
+                && current.contains(SlabBlock.TYPE)
+                && required.contains(SlabBlock.TYPE)) {
+                SlabType currentType = current.get(SlabBlock.TYPE);
+                SlabType requiredType = required.get(SlabBlock.TYPE);
+                if (requiredType == SlabType.DOUBLE && currentType != SlabType.DOUBLE) {
+                    return false; // 仍然需要升级
+                }
+            }
+            return true; // 已满足
+        }
+        return false;
+    }
+
+    /**
+     * 检查交互方块是否仍然可用
+     */
+    private boolean isInteractStillValid(PlacementPlan plan) {
+        BlockState interactState = mc.world.getBlockState(plan.interactPos());
+
+        if (!plan.selfPlacement()) {
+            return BlockUtilHelper.isClickable(interactState, mc.world, plan.interactPos());
         }
 
-        return true;
+        // selfPlacement: 当前 target 仍然必须是允许 self 的状态（单层半砖）
+        BlockState current = mc.world.getBlockState(plan.targetPos());
+        if (!(current.getBlock() instanceof SlabBlock)) return false;
+        if (!current.contains(SlabBlock.TYPE)) return false;
+        return current.get(SlabBlock.TYPE) != SlabType.DOUBLE;
+    }
+
+    /**
+     * 检查计划中的手是否仍然持有目标物品
+     */
+    private boolean isPlanHandStillHoldingItem(PlacementPlan plan) {
+        if (plan.hand() == Hand.MAIN_HAND) {
+            return mc.player.getMainHandStack().getItem() == plan.item();
+        } else {
+            return mc.player.getOffHandStack().getItem() == plan.item();
+        }
     }
 
     /**
@@ -480,19 +567,17 @@ public class Printer extends Module {
      * 执行方块放置
      * 直接使用 plan 中预计算好的参数，不再重新 resolve。
      *
-     * @param interactPos 要点击的方块位置
-     * @param side        要点击的方块面
-     * @param hitVec      精确点击坐标
+     * @param plan 完整的放置计划（包含手、位置、面、hitVec）
      */
-    private void placeBlockInternal(BlockPos interactPos, Direction side, Vec3d hitVec) {
-        BlockHitResult hitResult = new BlockHitResult(hitVec, side, interactPos, false);
-        ActionResult result = mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND, hitResult);
+    private void placeBlockInternal(PlacementPlan plan) {
+        BlockHitResult hitResult = new BlockHitResult(plan.hitVec(), plan.clickedFace(), plan.interactPos(), false);
+        ActionResult result = mc.interactionManager.interactBlock(mc.player, plan.hand(), hitResult);
 
         if (result.isAccepted()) {
             if (swingHand.get()) {
-                mc.player.swingHand(Hand.MAIN_HAND);
+                mc.player.swingHand(plan.hand());
             } else {
-                mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(Hand.MAIN_HAND));
+                mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(plan.hand()));
             }
         }
     }
