@@ -1103,7 +1103,7 @@ public class CrystalAura extends Module {
         }
 
         setRotation(false, null, yaw, targetPitch);
-        Rotations.rotate(yaw, targetPitch, -100, null); // Priority -100 so it sends the packet as the last one, im pretty sure it doesn't matte but idc
+        Rotations.rotate(yaw, targetPitch, -100, null); // Low priority: just maintaining facing direction
         return false;
     }
 

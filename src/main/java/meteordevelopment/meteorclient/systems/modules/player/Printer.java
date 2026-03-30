@@ -4,13 +4,12 @@
  *
  * Printer module - Auto places blocks based on Litematica schematic.
  *
- * 【方案B重构】三阶段同 tick 架构：
- * 1. TickEvent.Pre: 规划（选块、切物品、sneak、生成 PlacementPlan）
- * 2. PlayerTickMovementEvent: 预应用 yaw/pitch（在 movement 物理前）
- * 3. SendMovementPacketsEvent.Post: 执行放置（movement 包发出后立即 place）
+ * 两阶段架构 (旋转由 Rotations 协调器统一管理)：
+ * 1. TickEvent.Pre: 规划（选块、切物品、sneak、生成 PlacementPlan、提交旋转请求）
+ * 2. SendMovementPacketsEvent.Post: 执行放置（movement 包发出后立即 place）
  *
- * 这确保了 movement 物理、movement packet、place packet 使用同一拍同一个角度，
- * 最接近合法玩家"边走边转头边放置"的行为。
+ * Rotations 协调器在 PlayerTickMovementEvent 中预应用角度，确保
+ * movement 物理、movement packet、place packet 使用同一拍同一个角度。
  */
 
 package meteordevelopment.meteorclient.systems.modules.player;
@@ -19,7 +18,6 @@ import fi.dy.masa.litematica.data.DataManager;
 import fi.dy.masa.litematica.world.SchematicWorldHandler;
 import fi.dy.masa.litematica.world.WorldSchematic;
 import com.mojang.blaze3d.systems.RenderSystem;
-import meteordevelopment.meteorclient.events.entity.player.PlayerTickMovementEvent;
 import meteordevelopment.meteorclient.events.entity.player.SendMovementPacketsEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
@@ -58,12 +56,12 @@ import java.util.*;
 /**
  * Printer Module - Automatically places blocks based on Litematica schematic.
  *
- * 【方案B架构】事件执行顺序：
- * 1. TickEvent.Pre (MinecraftClient.tick HEAD) → 规划阶段
- * 2. PlayerTickMovementEvent (tickMovement HEAD) → 预应用旋转
+ * 事件执行顺序：
+ * 1. TickEvent.Pre (MinecraftClient.tick HEAD) → 规划阶段 + 提交旋转请求
+ * 2. Rotations.onPlayerTickMovement → 自动预应用 yaw/pitch (由协调器处理)
  * 3. sendMovementPackets → vanilla movement packet（带有正确的 yaw/pitch）
  * 4. SendMovementPacketsEvent.Post (sendMovementPackets TAIL) → 执行放置
- * 5. TickEvent.Post (MinecraftClient.tick TAIL) → 无操作
+ *    (Rotations 协调器在此之后自动恢复视角)
  *
  * 这样 movement 物理、movement packet、place packet 使用同一个角度。
  */
@@ -188,10 +186,6 @@ public class Printer extends Module {
     // 方案B核心：当前 tick 的放置计划
     private PlacementPlan armedPlan = null;
 
-    // 旋转预应用状态
-    private boolean printerRotApplied = false;
-    private float savedYaw, savedPitch;
-
     // 标记变量：记录当前潜行状态是否由打印机强制触发
     private boolean didPrinterForceSneak = false;
 
@@ -238,7 +232,6 @@ public class Printer extends Module {
     private void clearPlan() {
         armedPlan = null;
         currentHitVec = null;
-        printerRotApplied = false;
     }
 
     // ==================== 阶段 1: TickEvent.Pre 规划 ====================
@@ -298,6 +291,13 @@ public class Printer extends Module {
         if (armedPlan != null) {
             // 保存 hitVec 用于渲染
             currentHitVec = armedPlan.hitVec();
+
+            // 通过 Rotations 协调器提交旋转请求 (priority=50 for block placement)
+            // Rotations 会在 PlayerTickMovementEvent 中预应用角度,
+            // 并在 SendMovementPacketsEvent.Post 后自动恢复视角
+            if (rotate.get()) {
+                Rotations.requestPreMovement(armedPlan.yaw(), armedPlan.pitch(), 50, null);
+            }
         }
     }
 
@@ -392,47 +392,16 @@ public class Printer extends Module {
         return true; // 状态已满足
     }
 
-    // ==================== 阶段 2: PlayerTickMovementEvent 预应用旋转 ====================
+    // ==================== 阶段 2: SendMovementPacketsEvent.Post 执行放置 ====================
 
     /**
-     * 【方案B - 阶段2】在 movement 物理之前应用目标 yaw/pitch
-     *
-     * 执行顺序：ClientPlayerEntity.tickMovement() HEAD
-     * 此时 movement 物理还未开始，通过在此处设置 yaw/pitch，
-     * 可以确保本 tick 的 movement 物理使用与放置相同的角度。
-     *
-     * 这是让打印机"像合法玩家边走边转头"的关键：
-     * movement 物理按目标角度计算 → movement packet 带目标角度 → place packet 紧随其后
-     */
-    @EventHandler
-    private void onPlayerTickMovement(PlayerTickMovementEvent event) {
-        if (armedPlan == null || mc.player == null) return;
-
-        // 只在 rotate 开启且 STRICT 模式下预应用旋转
-        // LEGIT 模式不需要如此严格的角度同步
-        if (!rotate.get() && placeMode.get() == PlaceMode.LEGIT) return;
-
-        // 保存玩家当前 yaw/pitch，用于放置后恢复
-        savedYaw = mc.player.getYaw();
-        savedPitch = mc.player.getPitch();
-
-        // 预应用目标角度 → movement 物理将使用这个角度
-        mc.player.setYaw(armedPlan.yaw());
-        mc.player.setPitch(armedPlan.pitch());
-        printerRotApplied = true;
-    }
-
-    // ==================== 阶段 3: SendMovementPacketsEvent.Post 执行放置 ====================
-
-    /**
-     * 【方案B - 阶段3】在 movement packet 发出后立即放置
+     * 【方案B - 阶段2】在 movement packet 发出后立即放置
      *
      * 执行顺序：ClientPlayerEntity.sendMovementPackets() TAIL
-     * 此时本 tick 的 movement packet 已经发出（带有正确的 yaw/pitch），
+     * 此时本 tick 的 movement packet 已经发出（Rotations 已预应用正确的 yaw/pitch），
      * 立即发送 place packet，确保 place 与 movement 在同一 tick 内完成。
      *
-     * 这完美模拟了合法玩家的操作序列：
-     * 转头 → 走一步 → 发 movement 包 → 右键放置
+     * 旋转的预应用和视角恢复现在由 Rotations 协调器统一管理。
      */
     @EventHandler
     private void onSendMovementPacketsPost(SendMovementPacketsEvent.Post event) {
@@ -443,13 +412,6 @@ public class Printer extends Module {
             }
             armedPlan = null;
             currentHitVec = null;
-        }
-
-        // 恢复玩家原始视角（避免视觉上的强制转头）
-        if (printerRotApplied && mc.player != null) {
-            mc.player.setYaw(savedYaw);
-            mc.player.setPitch(savedPitch);
-            printerRotApplied = false;
         }
     }
 
