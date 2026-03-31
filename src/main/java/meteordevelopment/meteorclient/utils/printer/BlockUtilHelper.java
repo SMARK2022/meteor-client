@@ -8,7 +8,10 @@ import net.minecraft.registry.Registries;
 import net.minecraft.state.property.Properties;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
+import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.util.shape.VoxelShape;
+import net.minecraft.world.BlockView;
 import net.minecraft.world.World;
 
 import java.util.ArrayList;
@@ -273,48 +276,115 @@ public class BlockUtilHelper {
     }
 
     /**
-     * 【新增】基于 OUTLINE 的面可见性检查
-     * 使用 ShapeType.OUTLINE 进行射线检测，确保薄方块（铁轨、地毯、红石线等）
-     * 不会被错误地视为可穿透。
+     * 【旧版兼容】基于 OUTLINE 的面可见性检查
+     * 委托给带 placementTargetPos 的新版本，placementTargetPos 传 null（不做 replaceable 豁免）。
      *
-     * 同时验证射线确实击中了目标方块的正确面，防止"跨过铁轨去点远侧面"。
-     *
-     * @param blockPos   要点击的方块位置
-     * @param face       要点击的方块面
+     * @param interactPos 要点击的方块位置
+     * @param face        要点击的方块面
      * @param targetPoint 精确的点击坐标
-     * @param world      游戏世界
-     * @param player     玩家实体
+     * @param world       游戏世界
+     * @param player      玩家实体
      * @return 是否能看到该方块面上的目标点
      */
-    public static boolean canSeeFacePoint(BlockPos blockPos, Direction face, Vec3d targetPoint,
+    public static boolean canSeeFacePoint(BlockPos interactPos, Direction face, Vec3d targetPoint,
                                            World world, PlayerEntity player) {
+        return canSeeFacePoint(interactPos, face, targetPoint, world, player, null);
+    }
+
+    /**
+     * 【放置专用 LOS】基于 OUTLINE 的面可见性检查（支持 replaceable 豁免）
+     *
+     * 以 OUTLINE 为基础进行自定义射线检测：
+     * - 铁轨、地毯、红石线等薄 outline 方块正常阻挡（不可穿透）
+     * - 仅 placementTargetPos 上的可替换方块（草、小花、雪层等）做透明化处理，
+     *   允许"压在草上放方块"的合法交互
+     * - 真正要点击的 interactPos 永远不会被忽略（保证半砖自我补全等场景不误穿）
+     *
+     * @param interactPos         要点击的方块位置
+     * @param face                要点击的方块面
+     * @param targetPoint         精确的点击坐标
+     * @param world               游戏世界
+     * @param player              玩家实体
+     * @param placementTargetPos  放置目标位置（其上的 replaceable 方块将被忽略），可为 null
+     * @return 是否能看到该方块面上的目标点
+     */
+    public static boolean canSeeFacePoint(BlockPos interactPos, Direction face, Vec3d targetPoint,
+                                           World world, PlayerEntity player,
+                                           BlockPos placementTargetPos) {
         if (targetPoint == null || world == null || player == null) return false;
 
         // 关键：向被点击方块内部轻微缩进，避免"刚好在面上"导致 MISS
         final double EPS = 1.0e-3;
+        Vec3d start = player.getEyePos();
         Vec3d end = targetPoint.add(
             -face.getOffsetX() * EPS,
             -face.getOffsetY() * EPS,
             -face.getOffsetZ() * EPS
         );
 
-        net.minecraft.util.hit.BlockHitResult hit = world.raycast(new net.minecraft.world.RaycastContext(
-            player.getEyePos(),
+        // 使用 BlockView.raycast 自定义逐方块射线检测：
+        // - 对每个经过的 BlockPos 查询 outline shape
+        // - 若该方块应被"透明化"（targetPos 上的 replaceable），返回 null 继续射线
+        // - 否则正常做 shape.raycast
+        BlockHitResult hit = BlockView.raycast(
+            start,
             end,
-            net.minecraft.world.RaycastContext.ShapeType.OUTLINE,
-            net.minecraft.world.RaycastContext.FluidHandling.NONE,
-            player
-        ));
+            null,
+            (ignored, pos) -> {
+                BlockState state = world.getBlockState(pos);
 
-        // 必须击中方块
-        if (hit.getType() != net.minecraft.util.hit.HitResult.Type.BLOCK) return false;
+                // 只忽略"目标位上的可替换遮挡物"，且绝不忽略真正要点击的 interactPos
+                if (shouldIgnoreForPlacementLos(state, pos, interactPos, placementTargetPos)) {
+                    return null;
+                }
+
+                VoxelShape shape = state.getOutlineShape(world, pos);
+                if (shape.isEmpty()) return null;
+
+                return shape.raycast(start, end, pos);
+            },
+            ignored -> null
+        );
+
+        // 必须命中
+        if (hit == null) return false;
         // 必须击中正确的方块
-        if (!hit.getBlockPos().equals(blockPos)) return false;
+        if (!hit.getBlockPos().equals(interactPos)) return false;
         // 必须击中正确的面
         if (hit.getSide() != face) return false;
 
-        // 击中点应该接近目标点
-        return hit.getPos().squaredDistanceTo(end) < 0.0001;
+        // 击中点应该接近目标点（用 targetPoint 判断更直观）
+        return hit.getPos().squaredDistanceTo(targetPoint) < 0.0001;
+    }
+
+    /**
+     * 判断射线经过某位置时，是否应将其视为"透明"而忽略。
+     *
+     * 语义边界：
+     * - interactPos（真正要点击的方块）永远不忽略
+     * - 仅 placementTargetPos 上的可替换/空气/纯流体方块允许忽略
+     * - 其余方块（包括不在 targetPos 上的 replaceable 植物）一律阻挡
+     *
+     * @param state              该位置的方块状态
+     * @param pos                该位置坐标
+     * @param interactPos        真正要点击的方块位置
+     * @param placementTargetPos 放置目标位置（可为 null）
+     * @return true 表示应忽略此方块，射线继续前进
+     */
+    private static boolean shouldIgnoreForPlacementLos(
+        BlockState state, BlockPos pos,
+        BlockPos interactPos, BlockPos placementTargetPos
+    ) {
+        // 真正要点击的那个方块，永远不能忽略
+        if (pos.equals(interactPos)) return false;
+
+        // 只有目标位才允许"透明化"
+        if (placementTargetPos == null || !pos.equals(placementTargetPos)) return false;
+
+        // 目标位上的空气/replaceable/纯流体可以忽略
+        if (state.isAir()) return true;
+        if (state.getBlock() instanceof FluidBlock) return true;
+        return state.isReplaceable();
     }
 
     /**

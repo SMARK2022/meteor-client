@@ -454,7 +454,8 @@ public class Printer extends Module {
                     plan.clickedFace(),
                     plan.hitVec(),
                     mc.world,
-                    mc.player)) {
+                    mc.player,
+                    plan.targetPos())) {
                 return false;
             }
         }

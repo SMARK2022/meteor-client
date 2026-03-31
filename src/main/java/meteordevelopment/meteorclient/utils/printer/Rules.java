@@ -361,7 +361,8 @@ public final class Rules {
                 opt.getClickedFace(),
                 opt.hitVec(),
                 ctx.world(),
-                ctx.player()
+                ctx.player(),
+                ctx.targetPos()
             );
         }
 
