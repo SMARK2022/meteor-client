@@ -13,7 +13,9 @@ import meteordevelopment.meteorclient.utils.PreInit;
 import meteordevelopment.meteorclient.utils.entity.Target;
 import meteordevelopment.orbit.EventHandler;
 import meteordevelopment.orbit.EventPriority;
+import net.minecraft.client.input.Input;
 import net.minecraft.entity.Entity;
+import net.minecraft.util.PlayerInput;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
@@ -61,6 +63,12 @@ public class Rotations {
     // hold 逻辑状态 (只记账, 不注入)
     private static int holdTimer;
     private static final int HOLD_TICKS = 9;
+
+    // ==================== MovementFix 状态 ====================
+    /** 是否需要在 input.tick() TAIL 进行输入重映射 */
+    private static boolean needsMoveFix;
+    /** 预应用前保存的原始视觉 yaw (用于计算输入重映射) */
+    private static float originalVisualYaw;
 
     private Rotations() {
     }
@@ -147,7 +155,6 @@ public class Rotations {
 
         movementPhasePassed = true;
 
-        // 把来不及的请求 (如果有标记为 deferred) 跳过, 本轮只处理当前 pending
         // 仲裁: 选出 priority 最大的 winner
         RotationRequest winner = null;
         for (RotationRequest req : pending) {
@@ -170,6 +177,11 @@ public class Rotations {
             // 预应用到 player yaw/pitch — movement 物理将使用此角度
             savedYaw = mc.player.getYaw();
             savedPitch = mc.player.getPitch();
+
+            // 保存原始视觉 yaw, 用于 input.tick() TAIL 中做 MovementFix
+            originalVisualYaw = savedYaw;
+            needsMoveFix = true;
+
             mc.player.setYaw(active.yaw);
             mc.player.setPitch(active.pitch);
             appliedThisTick = true;
@@ -180,6 +192,7 @@ public class Rotations {
             }
         } else {
             // 没有新请求: hold 逻辑 (只维持状态标记, 不注入 packet)
+            needsMoveFix = false;
             if (rotating) {
                 holdTimer++;
                 if (holdTimer > HOLD_TICKS) {
@@ -220,6 +233,81 @@ public class Rotations {
         }
 
         active = null;
+    }
+
+    // ==================== MovementFix — 输入重映射 ====================
+
+    /**
+     * 是否需要在 input.tick() TAIL 做输入重映射。
+     * 由 KeyboardInputMixin 在 input.tick() TAIL 调用。
+     */
+    public static boolean needsMoveFix() {
+        return needsMoveFix;
+    }
+
+    /**
+     * 在 input.tick() TAIL 中调用: 将 WASD 输入重映射到 targetYaw 下仍能保持原始移动方向的 8 向合法按键。
+     *
+     * 原理: 玩家视觉 yaw=originalVisualYaw 时, 按 W 向前走;
+     * 我们把 yaw 改成 target 后, 需要换一组按键让 movement 物理仍走出相同的世界方向。
+     * 使用离散 8 向搜索: 只用合法 WASD 组合, 不产生任意连续浮点。
+     *
+     * @param input 当前 player.input, 此时 input.tick() 刚执行完, 值是最新的键盘状态
+     */
+    public static void applyMoveFix(Input input) {
+        if (!needsMoveFix || mc.player == null || active == null) return;
+        needsMoveFix = false;
+
+        float forward = input.movementForward;
+        float sideways = input.movementSideways;
+
+        // 没有移动输入, 不需要重映射
+        if (forward == 0 && sideways == 0) return;
+
+        float targetYaw = active.yaw;
+        float yawDelta = targetYaw - originalVisualYaw;
+
+        // yaw 差异可以忽略, 不处理
+        if (Math.abs(MathHelper.wrapDegrees(yawDelta)) < 1.0f) return;
+
+        float deltaRad = (float) Math.toRadians(yawDelta);
+        float cos = MathHelper.cos(deltaRad);
+        float sin = MathHelper.sin(deltaRad);
+
+        // 旋转输入向量: 在 targetYaw 下产生与 originalYaw + 原始输入 相同的世界方向
+        float newForward = forward * cos + sideways * sin;
+        float newSideways = sideways * cos - forward * sin;
+
+        // 转成角度, 用于匹配最近的 8 向
+        float angle = (float) Math.toDegrees(Math.atan2(newSideways, newForward));
+        // 归一化到 [0, 360)
+        angle = ((angle % 360) + 360) % 360;
+
+        // 寻找最近的 45° 整数倍方向
+        int snapped = Math.round(angle / 45.0f) * 45;
+        snapped = ((snapped % 360) + 360) % 360;
+
+        // 8 向 → WASD 按键
+        boolean w, s, a, d;
+        switch (snapped) {
+            case 0:   w=true;  s=false; a=false; d=false; break; // W
+            case 45:  w=true;  s=false; a=true;  d=false; break; // W+A
+            case 90:  w=false; s=false; a=true;  d=false; break; // A
+            case 135: w=false; s=true;  a=true;  d=false; break; // S+A
+            case 180: w=false; s=true;  a=false; d=false; break; // S
+            case 225: w=false; s=true;  a=false; d=true;  break; // S+D
+            case 270: w=false; s=false; a=false; d=true;  break; // D
+            case 315: w=true;  s=false; a=false; d=true;  break; // W+D
+            default:  return;
+        }
+
+        // 更新 playerInput (保留 jump/sneak/sprint)
+        PlayerInput pi = input.playerInput;
+        input.playerInput = new PlayerInput(w, s, a, d, pi.jump(), pi.sneak(), pi.sprint());
+
+        // 同步 movementForward / movementSideways
+        input.movementForward = w == s ? 0 : (w ? 1.0f : -1.0f);
+        input.movementSideways = a == d ? 0 : (a ? 1.0f : -1.0f);
     }
 
     // ==================== 工具方法 (角度计算) ====================
