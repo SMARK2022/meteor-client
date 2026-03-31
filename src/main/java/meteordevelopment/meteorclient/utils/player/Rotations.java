@@ -92,7 +92,8 @@ public class Rotations {
      */
     public static void rotate(double yaw, double pitch, int priority, Runnable callback) {
         if (mc.player == null) return;
-        pending.add(new RotationRequest((float) yaw, (float) pitch, priority, callback, false));
+        // 如果 movement 阶段已过, 本 tick 无法预应用, 自动 defer 到下一 tick
+        pending.add(new RotationRequest((float) yaw, (float) pitch, priority, callback, movementPhasePassed));
     }
 
     /**
@@ -250,7 +251,10 @@ public class Rotations {
      *
      * 原理: 玩家视觉 yaw=originalVisualYaw 时, 按 W 向前走;
      * 我们把 yaw 改成 target 后, 需要换一组按键让 movement 物理仍走出相同的世界方向。
-     * 使用离散 8 向搜索: 只用合法 WASD 组合, 不产生任意连续浮点。
+     *
+     * 使用"当前帧舒适评分"方式: 枚举 8 个合法 WASD 候选,
+     * 按 (方向误差 + 输入结构保持 + sprint 保护) 打分, 选最优。
+     * 不依赖上一帧状态, 不产生连续浮点中间量。
      *
      * @param input 当前 player.input, 此时 input.tick() 刚执行完, 值是最新的键盘状态
      */
@@ -265,39 +269,88 @@ public class Rotations {
         if (forward == 0 && sideways == 0) return;
 
         float targetYaw = active.yaw;
-        float yawDelta = targetYaw - originalVisualYaw;
+        float yawDelta = MathHelper.wrapDegrees(targetYaw - originalVisualYaw);
 
-        // yaw 差异可以忽略, 不处理
-        if (Math.abs(MathHelper.wrapDegrees(yawDelta)) < 1.0f) return;
+        // 死区: 小角差不修输入, 避免微小旋转引发不必要的按键跳变
+        if (Math.abs(yawDelta) < 7.0f) return;
 
-        float deltaRad = (float) Math.toRadians(yawDelta);
-        float cos = MathHelper.cos(deltaRad);
-        float sin = MathHelper.sin(deltaRad);
+        // Step 1: 计算 rawInput + renderYaw 下的"目标世界方向向量"
+        // Minecraft movement: worldX = sideways*cos(yaw) - forward*sin(yaw)
+        //                     worldZ = forward*cos(yaw)  + sideways*sin(yaw)
+        float renderRad = (float) Math.toRadians(originalVisualYaw);
+        float renderCos = MathHelper.cos(renderRad);
+        float renderSin = MathHelper.sin(renderRad);
+        float desiredX = sideways * renderCos - forward * renderSin;
+        float desiredZ = forward * renderCos + sideways * renderSin;
 
-        // 旋转输入向量: 在 targetYaw 下产生与 originalYaw + 原始输入 相同的世界方向
-        float newForward = forward * cos + sideways * sin;
-        float newSideways = sideways * cos - forward * sin;
+        float desiredLen = MathHelper.sqrt(desiredX * desiredX + desiredZ * desiredZ);
+        if (desiredLen < 1.0e-6f) return;
+        desiredX /= desiredLen;
+        desiredZ /= desiredLen;
 
-        // 转成角度, 用于匹配最近的 8 向
-        float angle = (float) Math.toDegrees(Math.atan2(newSideways, newForward));
-        // 归一化到 [0, 360)
-        angle = ((angle % 360) + 360) % 360;
+        // Step 2: 枚举 8 个合法 WASD 候选, 在 packetYaw 下计算世界方向并打分
+        float packetRad = (float) Math.toRadians(targetYaw);
+        float packetCos = MathHelper.cos(packetRad);
+        float packetSin = MathHelper.sin(packetRad);
 
-        // 寻找最近的 45° 整数倍方向
-        int snapped = Math.round(angle / 45.0f) * 45;
-        snapped = ((snapped % 360) + 360) % 360;
+        // 候选: [forward, sideways] — 顺序对应 W, W+A, A, S+A, S, S+D, D, W+D
+        final float[][] CANDIDATES = {
+            { 1,  0}, { 1,  1}, { 0,  1}, {-1,  1},
+            {-1,  0}, {-1, -1}, { 0, -1}, { 1, -1}
+        };
 
-        // 8 向 → WASD 按键
+        float bestScore = Float.MAX_VALUE;
+        int bestIdx = -1;
+        boolean sprinting = mc.player.isSprinting();
+        boolean rawHasForward = forward > 0;
+        boolean rawHasBackward = forward < 0;
+
+        for (int i = 0; i < CANDIDATES.length; i++) {
+            float cf = CANDIDATES[i][0];
+            float cs = CANDIDATES[i][1];
+
+            // 归一化 (对角线输入长度为 sqrt(2))
+            float len = MathHelper.sqrt(cf * cf + cs * cs);
+            float nf = cf / len;
+            float ns = cs / len;
+
+            // 该候选在 packetYaw 下的世界方向
+            float wx = ns * packetCos - nf * packetSin;
+            float wz = nf * packetCos + ns * packetSin;
+
+            // 评分 A: 世界方向角度误差 (0 ~ PI)
+            float dot = desiredX * wx + desiredZ * wz;
+            dot = MathHelper.clamp(dot, -1.0f, 1.0f);
+            float dirError = (float) Math.acos(dot);
+
+            // 评分 B: 输入结构保持 — 尽量不把前进变后退
+            float structurePenalty = 0;
+            if (rawHasForward && cf < 0) structurePenalty += 0.5f;
+            if (rawHasBackward && cf > 0) structurePenalty += 0.3f;
+
+            // 评分 C: sprint 保护 — 后退会打断 sprint
+            float sprintPenalty = (sprinting && cf < 0) ? 1.0f : 0;
+
+            float score = dirError * 2.0f + structurePenalty + sprintPenalty;
+            if (score < bestScore) {
+                bestScore = score;
+                bestIdx = i;
+            }
+        }
+
+        if (bestIdx < 0) return;
+
+        // 将最优候选映射到 WASD 标志
         boolean w, s, a, d;
-        switch (snapped) {
+        switch (bestIdx) {
             case 0:   w=true;  s=false; a=false; d=false; break; // W
-            case 45:  w=true;  s=false; a=true;  d=false; break; // W+A
-            case 90:  w=false; s=false; a=true;  d=false; break; // A
-            case 135: w=false; s=true;  a=true;  d=false; break; // S+A
-            case 180: w=false; s=true;  a=false; d=false; break; // S
-            case 225: w=false; s=true;  a=false; d=true;  break; // S+D
-            case 270: w=false; s=false; a=false; d=true;  break; // D
-            case 315: w=true;  s=false; a=false; d=true;  break; // W+D
+            case 1:   w=true;  s=false; a=true;  d=false; break; // W+A
+            case 2:   w=false; s=false; a=true;  d=false; break; // A
+            case 3:   w=false; s=true;  a=true;  d=false; break; // S+A
+            case 4:   w=false; s=true;  a=false; d=false; break; // S
+            case 5:   w=false; s=true;  a=false; d=true;  break; // S+D
+            case 6:   w=false; s=false; a=false; d=true;  break; // D
+            case 7:   w=true;  s=false; a=false; d=true;  break; // W+D
             default:  return;
         }
 

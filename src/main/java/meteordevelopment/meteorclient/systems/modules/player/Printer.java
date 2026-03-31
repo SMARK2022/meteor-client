@@ -302,8 +302,14 @@ public class Printer extends Module {
     }
 
     /**
-     * 选择最佳放置计划
-     * 遍历候选列表，找到第一个物品/潜行都满足条件的方块，生成 plan。
+     * 选择最佳放置计划（舒适度评分版）
+     *
+     * 不再使用"第一个最近可用"策略，而是：
+     * 1. 对所有候选 resolve，计算 hitVec / yaw
+     * 2. 综合距离、yaw 差、sneak 成本、物品切换成本、reach 边界风险打分
+     * 3. 选分数最低的候选尝试执行
+     *
+     * 这样打印机会优先选择"放起来最舒服"的块，而不是"最近的块"。
      */
     private PlacementPlan selectBestPlan(WorldSchematic worldSchematic) {
         // 如果本 tick 刚做过背包→热栏转移，跳过（等待 1 tick 同步）
@@ -312,48 +318,85 @@ public class Printer extends Module {
             return null;
         }
 
+        // Phase 1: 对所有候选做纯计算评分（无副作用）
+        record ScoredCandidate(BlockPos pos, Item item, BlockState requiredState,
+                               PlacementOption option, boolean needsSneak, double score) {}
+
+        List<ScoredCandidate> scored = new ArrayList<>();
+        float renderYaw = mc.player.getYaw();
+        Vec3d eyePos = mc.player.getEyePos();
+        double maxReach = placeRange.get();
+
         for (BlockPos pos : placePositions) {
             Item item = placeItems.get(pos);
             BlockState requiredState = worldSchematic.getBlockState(pos);
             if (item == null || requiredState == null) continue;
 
-            // 解析放置方向（只 resolve 一次！）
+            // 解析放置方向（只 resolve 一次）
             PlacementOption option = resolvePlacement(pos, requiredState);
             if (option == null || option.hitVec() == null) continue;
 
-            // 检查是否需要潜行
+            Vec3d hitVec = option.hitVec();
+            double dist2 = eyePos.squaredDistanceTo(hitVec);
+
+            // 计算 yaw 差
+            float yaw = (float) Rotations.getYaw(hitVec);
+            float yawDelta = Math.abs(MathHelper.wrapDegrees(yaw - renderYaw));
+
+            // sneak / 物品切换成本
             BlockPos interactPos = option.getInteractPos(pos);
             BlockState interactState = mc.world.getBlockState(interactPos);
             boolean needsSneak = BlockUtilHelper.SNEAK_BLOCKS.contains(interactState.getBlock());
+            boolean needsItemSwitch = mc.player.getMainHandStack().getItem() != item
+                && mc.player.getOffHandStack().getItem() != item;
 
-            // 尝试确保物品就绪并获取使用的手
-            Hand hand = ensureItemReadyAndGetHand(item);
+            // reach 边界风险
+            double reachDist = eyePos.distanceTo(hitVec);
+            boolean nearReachEdge = reachDist > maxReach * 0.85;
+
+            // 综合评分 (越低越好)
+            double score = dist2 * 1.0
+                + yawDelta * 0.08
+                + (needsSneak ? 1.5 : 0.0)
+                + (needsItemSwitch ? 1.0 : 0.0)
+                + (nearReachEdge ? 1.2 : 0.0);
+
+            scored.add(new ScoredCandidate(pos, item, requiredState, option, needsSneak, score));
+        }
+
+        // Phase 2: 按评分排序，依次尝试执行（物品/潜行有副作用）
+        scored.sort(Comparator.comparingDouble(ScoredCandidate::score));
+
+        for (ScoredCandidate candidate : scored) {
+            // 尝试确保物品就绪
+            Hand hand = ensureItemReadyAndGetHand(candidate.item());
             if (hand == null) continue;
 
             // 尝试确保潜行状态就绪
-            if (!ensureSneakReady(needsSneak)) {
-                // 潜行状态刚切换，本 tick 不放（等服务端同步），但保留 sneak 状态
+            if (!ensureSneakReady(candidate.needsSneak())) {
+                // 潜行状态刚切换，本 tick 不放（等服务端同步）
                 return null;
             }
 
             // 物品和潜行都就绪，生成不可变的 plan
-            Vec3d hitVec = option.hitVec();
+            Vec3d hitVec = candidate.option().hitVec();
             float yaw = (float) Rotations.getYaw(hitVec);
             float pitch = (float) Rotations.getPitch(hitVec);
-            boolean selfPlacement = interactPos.equals(pos);
+            BlockPos interactPos = candidate.option().getInteractPos(candidate.pos());
+            boolean selfPlacement = interactPos.equals(candidate.pos());
 
             return new PlacementPlan(
-                pos,
+                candidate.pos(),
                 interactPos,
-                option.getClickedFace(),
+                candidate.option().getClickedFace(),
                 hitVec,
                 yaw,
                 pitch,
-                item,
+                candidate.item(),
                 hand,
-                requiredState,
+                candidate.requiredState(),
                 mc.player.getEyePos(),
-                needsSneak,
+                candidate.needsSneak(),
                 selfPlacement
             );
         }
