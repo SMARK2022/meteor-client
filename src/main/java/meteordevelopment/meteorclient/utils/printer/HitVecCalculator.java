@@ -7,10 +7,15 @@ import net.minecraft.block.TrapdoorBlock;
 import net.minecraft.block.enums.BlockHalf;
 import net.minecraft.block.enums.SlabType;
 import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.shape.VoxelShape;
 import net.minecraft.world.BlockView;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
 
 /**
  * HitVecCalculator - 点击位置计算器接口
@@ -156,6 +161,184 @@ public interface HitVecCalculator {
             }
         }
         return Vec3d.ofCenter(pos);
+    }
+
+    // ==================== 面片抽取与区域选点 ====================
+
+    /**
+     * 从 VoxelShape 抽取指定面上所有外露的面片。
+     * 遍历 shape 的所有子 box，收集面坐标贴合外边界的矩形区域。
+     *
+     * 例如：上半砖的 EAST 面，只会产出 v∈[0.5,1] 的 patch，
+     * 而不是整个 [0,1] 区间。
+     */
+    static List<FacePatch> getFacePatches(BlockView world, BlockPos pos, Direction face) {
+        BlockState state = world.getBlockState(pos);
+        VoxelShape shape = state.getOutlineShape(world, pos);
+        if (shape.isEmpty()) return List.of();
+
+        // 确定该面的外边界坐标
+        double outerCoord = switch (face) {
+            case EAST  -> shape.getMax(Direction.Axis.X);
+            case WEST  -> shape.getMin(Direction.Axis.X);
+            case UP    -> shape.getMax(Direction.Axis.Y);
+            case DOWN  -> shape.getMin(Direction.Axis.Y);
+            case SOUTH -> shape.getMax(Direction.Axis.Z);
+            case NORTH -> shape.getMin(Direction.Axis.Z);
+        };
+
+        final double TOL = 0.001;
+        List<FacePatch> patches = new ArrayList<>();
+
+        for (Box box : shape.getBoundingBoxes()) {
+            double fc, minU, maxU, minV, maxV;
+            switch (face) {
+                case EAST:  fc = box.maxX; minU = box.minZ; maxU = box.maxZ; minV = box.minY; maxV = box.maxY; break;
+                case WEST:  fc = box.minX; minU = box.minZ; maxU = box.maxZ; minV = box.minY; maxV = box.maxY; break;
+                case UP:    fc = box.maxY; minU = box.minX; maxU = box.maxX; minV = box.minZ; maxV = box.maxZ; break;
+                case DOWN:  fc = box.minY; minU = box.minX; maxU = box.maxX; minV = box.minZ; maxV = box.maxZ; break;
+                case SOUTH: fc = box.maxZ; minU = box.minX; maxU = box.maxX; minV = box.minY; maxV = box.maxY; break;
+                case NORTH: fc = box.minZ; minU = box.minX; maxU = box.maxX; minV = box.minY; maxV = box.maxY; break;
+                default: continue;
+            }
+            if (Math.abs(fc - outerCoord) <= TOL) {
+                patches.add(new FacePatch(face, outerCoord, minU, maxU, minV, maxV));
+            }
+        }
+        return patches;
+    }
+
+    /**
+     * 在面片内生成 5 个稳定的确定性采样 (u, v) 坐标。
+     * 每个点均做 1/64 内缩，避免落在边缘/角点。
+     *
+     * 采样布局：
+     * 1. preferred-clamped（偏好点，尽量靠近期望高度）
+     * 2. center（面片几何中心）
+     * 3. u=25%, v=preferred（左偏）
+     * 4. u=75%, v=preferred（右偏）
+     * 5. u=center, v=alternative（对侧高度）
+     */
+    private static double[][] sampleUV(FacePatch patch, double preferredU, double preferredV) {
+        final double INSET = 1.0 / 64.0;
+        double sMinU = patch.minU() + INSET, sMaxU = patch.maxU() - INSET;
+        double sMinV = patch.minV() + INSET, sMaxV = patch.maxV() - INSET;
+
+        // 极窄 patch 退化为中心点
+        if (sMinU > sMaxU) { sMinU = sMaxU = (patch.minU() + patch.maxU()) / 2; }
+        if (sMinV > sMaxV) { sMinV = sMaxV = (patch.minV() + patch.maxV()) / 2; }
+
+        double cU = Math.max(sMinU, Math.min(preferredU, sMaxU));
+        double cV = Math.max(sMinV, Math.min(preferredV, sMaxV));
+        double midU = (sMinU + sMaxU) / 2;
+        double midV = (sMinV + sMaxV) / 2;
+        double u25 = sMinU + (sMaxU - sMinU) * 0.25;
+        double u75 = sMinU + (sMaxU - sMinU) * 0.75;
+        double altV = (cV > midV)
+            ? sMinV + (sMaxV - sMinV) * 0.25
+            : sMinV + (sMaxV - sMinV) * 0.75;
+
+        return new double[][] {
+            { cU, cV },       // 1. preferred
+            { midU, midV },   // 2. center
+            { u25, cV },      // 3. left + preferred height
+            { u75, cV },      // 4. right + preferred height
+            { midU, altV }    // 5. center + alt height
+        };
+    }
+
+    /**
+     * 在指定面的所有面片中搜索最优可行点击点。
+     *
+     * 对每个 patch 的 5 个采样点逐一检查：
+     * - Reach 合法
+     * - NCP 方向合法（strict 模式）
+     * - LOS 合法（如果启用）
+     * 然后按「离边缘越远 + 越接近偏好高度」打分，取最优。
+     *
+     * 这是"初始点失败后 refinement"的核心方法。
+     *
+     * @param ctx             放置上下文
+     * @param opt             当前候选（提供交互位置和面信息）
+     * @param preferredHeight 期望的 Y 偏移（侧面有效，UP/DOWN 自动用 0.5）
+     * @param checkLos        是否执行视线检测
+     * @return 最优合法点，如果没有合法点则返回 null
+     */
+    static Vec3d findBestPointOnFace(PlacementContext ctx, PlacementOption opt,
+                                     double preferredHeight, boolean checkLos) {
+        BlockPos interactPos = opt.getInteractPos(ctx.targetPos());
+        Direction face = opt.getClickedFace();
+
+        List<FacePatch> patches = getFacePatches(ctx.world(), interactPos, face);
+        if (patches.isEmpty()) return null;
+
+        Vec3d eyePos = ctx.eyePos();
+        double maxReach = ctx.maxReach();
+        boolean strict = ctx.strict();
+        BlockPos targetPos = ctx.targetPos();
+
+        // 侧面用 preferredHeight 作为 V 轴偏好；垂直面（UP/DOWN）V 映射到 Z，无高度偏好
+        double prefV = face.getAxis().isVertical() ? 0.5 : preferredHeight;
+        double prefU = 0.5;
+
+        Vec3d bestPoint = null;
+        double bestScore = Double.NEGATIVE_INFINITY;
+
+        for (FacePatch patch : patches) {
+            double[][] samples = sampleUV(patch, prefU, prefV);
+            for (double[] uv : samples) {
+                double u = uv[0], v = uv[1];
+                Vec3d point = patch.toWorld(interactPos, u, v);
+
+                // Reach
+                if (eyePos.distanceTo(point) > maxReach + 0.1) continue;
+
+                // NCP
+                if (strict) {
+                    Set<Direction> validDirs = BlockUtilHelper.getPlaceDirectionsNCP(eyePos, point);
+                    if (!validDirs.contains(face)) continue;
+                }
+
+                // LOS
+                if (checkLos) {
+                    if (!BlockUtilHelper.canSeeFacePoint(
+                            interactPos, face, point,
+                            ctx.world(), ctx.player(), targetPos)) continue;
+                }
+
+                // 打分：居中越好 (+)，偏离偏好越差 (-)
+                double margin = patch.centerMargin(u, v);
+                double distToPref = Math.abs(v - prefV);
+                double score = 4.0 * margin - 2.0 * distToPref;
+
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestPoint = point;
+                }
+            }
+        }
+        return bestPoint;
+    }
+
+    /**
+     * 根据方块上下文推断期望的 Y 偏移高度。
+     * - TOP 半砖/楼梯/活板门 → 0.8
+     * - BOTTOM 半砖/楼梯/活板门 → 0.2
+     * - 其他 → 0.5（中心）
+     */
+    static double getPreferredHeight(PlacementContext ctx) {
+        if (ctx.hasProperty(SlabBlock.TYPE)) {
+            SlabType type = ctx.getProperty(SlabBlock.TYPE);
+            if (type == SlabType.TOP) return 0.8;
+            if (type == SlabType.BOTTOM) return 0.2;
+        }
+        if (ctx.hasProperty(StairsBlock.HALF)) {
+            return ctx.getProperty(StairsBlock.HALF) == BlockHalf.TOP ? 0.8 : 0.2;
+        }
+        if (ctx.hasProperty(TrapdoorBlock.HALF)) {
+            return ctx.getProperty(TrapdoorBlock.HALF) == BlockHalf.TOP ? 0.8 : 0.2;
+        }
+        return 0.5;
     }
 
 }

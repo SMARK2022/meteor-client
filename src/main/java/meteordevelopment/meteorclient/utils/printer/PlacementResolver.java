@@ -106,39 +106,43 @@ public class PlacementResolver {
      *
      * 【核心重构】执行流程变更：
      * 1. Source 产生基础方向候选
-     * 2. 【关键】立即计算 HitVec（在过滤前）
+     * 2. 立即计算 HitVec（在过滤前）
      * 3. Filter 基于方向 AND HitVec 进行检查
-     * 4. 返回第一个完全合法的选项（包含现成的 HitVec）
+     * 4. 如果初始点未通过过滤，触发面片级 refinement 搜索同面更优点
+     * 5. 返回第一个完全合法的选项（包含可行的 HitVec）
      *
-     * 这解决了"点击位置误差导致过滤器误判"的问题：
-     * - 旧流程：判定(只看方块) -> 选定方向 -> 计算HitVec -> 执行
-     * - 新流程：产生方向 -> 计算HitVec -> 判定(看精确点) -> 执行
+     * Refinement 策略（路线B）：
+     * - 先用快速中心/偏好点算初始 hitVec
+     * - 过滤通过则直接用（大多数普通完整块走此路径）
+     * - 过滤失败且失败可能因点选差（LOS/NCP/Reach），触发面片搜索
+     * - 面片搜索在同面实际暴露区域内采 5 个稳定样本，选最优合法点
      */
     public Optional<PlacementOption> resolveOptional(PlacementContext ctx) {
         return getCandidateStream(ctx)
-            // 1. 先计算 HitVec（注入到 Option 中）
+            // 1. 先计算初始 HitVec（快速路径）
             .map(opt -> {
-                // 如果 Option 中已经指定了特殊状态（如 Bottom Slab），
-                // 创建一个临时 Context 用于计算 HitVec
                 PlacementContext calcCtx = (opt.actualTargetState() != null)
                     ? ctx.withTargetState(opt.actualTargetState())
                     : ctx;
-
                 Vec3d vec = hitVecCalculator.calculate(calcCtx, opt);
                 return opt.withHitVec(vec);
             })
-            // 2. 再进行过滤（现在过滤器可以访问 opt.hitVec() 了）
-            .filter(opt -> passAllFilters(ctx, opt))
+            // 2. 过滤 + refinement fallback
+            .flatMap(opt -> {
+                if (passAllFilters(ctx, opt)) return Stream.of(opt);
+                PlacementOption refined = refineIfNeeded(ctx, opt);
+                if (refined != null && passAllFilters(ctx, refined)) return Stream.of(refined);
+                return Stream.empty();
+            })
             .findFirst();
     }
 
     /**
      * 获取所有通过过滤的选项列表
-     * 用于需要多个候选的场景
+     * 用于需要多个候选的场景（同样支持 refinement）
      */
     public List<PlacementOption> resolveAll(PlacementContext ctx) {
         return getCandidateStream(ctx)
-            // 先计算 HitVec
             .map(opt -> {
                 PlacementContext calcCtx = (opt.actualTargetState() != null)
                     ? ctx.withTargetState(opt.actualTargetState())
@@ -146,8 +150,12 @@ public class PlacementResolver {
                 Vec3d vec = hitVecCalculator.calculate(calcCtx, opt);
                 return opt.withHitVec(vec);
             })
-            // 再过滤
-            .filter(opt -> passAllFilters(ctx, opt))
+            .flatMap(opt -> {
+                if (passAllFilters(ctx, opt)) return Stream.of(opt);
+                PlacementOption refined = refineIfNeeded(ctx, opt);
+                if (refined != null && passAllFilters(ctx, refined)) return Stream.of(refined);
+                return Stream.empty();
+            })
             .toList();
     }
 
@@ -208,6 +216,28 @@ public class PlacementResolver {
         return sources.stream()
             .flatMap(source -> source.getCandidates(ctx))
             .distinct();
+    }
+
+    /**
+     * 面片级 refinement：当初始 hitVec 未通过过滤器时，
+     * 在同一面的实际 patch 区域内搜索更优的可行点。
+     *
+     * 开销极低：每个 patch 只采 5 个点，大多数方块只有 1~2 个 patch。
+     * 普通完整块的初始点几乎总能通过，不会触发此方法。
+     *
+     * @return 携带新 hitVec 的 PlacementOption，如果无法修复则返回 null
+     */
+    private PlacementOption refineIfNeeded(PlacementContext ctx, PlacementOption opt) {
+        if (opt == null || opt.hitVec() == null) return null;
+
+        PlacementContext calcCtx = (opt.actualTargetState() != null)
+            ? ctx.withTargetState(opt.actualTargetState()) : ctx;
+
+        double preferredHeight = HitVecCalculator.getPreferredHeight(calcCtx);
+        Vec3d refined = HitVecCalculator.findBestPointOnFace(
+            calcCtx, opt, preferredHeight, calcCtx.checkLos());
+
+        return refined != null ? opt.withHitVec(refined) : null;
     }
 
     /**

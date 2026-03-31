@@ -143,6 +143,18 @@ public class Printer extends Module {
             .defaultValue(new SettingColor(20, 200, 20, 255))
             .build());
 
+    private final Setting<SettingColor> plannedSideColor = sgRender.add(new ColorSetting.Builder()
+            .name("planned-side-color")
+            .description("The side color of the currently planned placement target.")
+            .defaultValue(new SettingColor(20, 200, 255, 80))
+            .build());
+
+    private final Setting<SettingColor> plannedLineColor = sgRender.add(new ColorSetting.Builder()
+            .name("planned-line-color")
+            .description("The line color of the currently planned placement target.")
+            .defaultValue(new SettingColor(20, 200, 255, 255))
+            .build());
+
     private final Setting<Boolean> renderHitVec = sgRender.add(new BoolSetting.Builder()
             .name("render-hit-vec")
             .description("Renders a cube at the block placement hit point for debugging.")
@@ -183,14 +195,16 @@ public class Printer extends Module {
     private final Map<BlockPos, Item> placeItems = new HashMap<>();
     private int tickDelay = 0;
 
-    // 方案B核心：当前 tick 的放置计划
+    // 方案B核心：当前 tick 的放置计划（逻辑态）
     private PlacementPlan armedPlan = null;
 
     // 标记变量：记录当前潜行状态是否由打印机强制触发
     private boolean didPrinterForceSneak = false;
 
-    // 交互点显示用的 hitVec（调试渲染）
-    private Vec3d currentHitVec = null;
+    // 渲染态（与逻辑态分离，确保 hit 点稳定显示 1~2 tick）
+    private PlacementPlan lastPlan = null;
+    private Vec3d lastHitVec = null;
+    private int lastHitVecTicks = 0;
 
     public Printer() {
         super(Categories.Player, "printer", "Automatically places blocks based on Litematica schematic.");
@@ -231,7 +245,33 @@ public class Printer extends Module {
      */
     private void clearPlan() {
         armedPlan = null;
-        currentHitVec = null;
+        lastPlan = null;
+        lastHitVec = null;
+        lastHitVecTicks = 0;
+    }
+
+    /**
+     * 发布渲染计划快照
+     * 将逻辑态的 plan 复制到渲染态，并设置显示倒计时。
+     */
+    private void publishRenderPlan(PlacementPlan plan) {
+        lastPlan = plan;
+        lastHitVec = plan != null ? plan.hitVec() : null;
+        lastHitVecTicks = plan != null ? 2 : 0;
+    }
+
+    /**
+     * 每 tick 衰减渲染态倒计时
+     * 归零后清空渲染快照，避免残影。
+     */
+    private void tickRenderState() {
+        if (lastHitVecTicks > 0) {
+            lastHitVecTicks--;
+            if (lastHitVecTicks <= 0) {
+                lastPlan = null;
+                lastHitVec = null;
+            }
+        }
     }
 
     // ==================== 阶段 1: TickEvent.Pre 规划 ====================
@@ -254,6 +294,9 @@ public class Printer extends Module {
     @EventHandler
     private void onTickPre(TickEvent.Pre event) {
         if (!isActive() || mc.player == null || mc.world == null) return;
+
+        // 每 tick 衰减渲染态倒计时
+        tickRenderState();
 
         // 如果已有未执行的 plan，跳过（不应该发生，但防御性检查）
         if (armedPlan != null) return;
@@ -289,8 +332,8 @@ public class Printer extends Module {
         armedPlan = selectBestPlan(worldSchematic);
 
         if (armedPlan != null) {
-            // 保存 hitVec 用于渲染
-            currentHitVec = armedPlan.hitVec();
+            // 发布渲染快照（与逻辑态分离，确保 hit 点稳定显示）
+            publishRenderPlan(armedPlan);
 
             // 通过 Rotations 协调器提交旋转请求 (priority=50 for block placement)
             // Rotations 会在 PlayerTickMovementEvent 中预应用角度,
@@ -454,7 +497,7 @@ public class Printer extends Module {
                 placeBlockInternal(armedPlan);
             }
             armedPlan = null;
-            currentHitVec = null;
+            // 渲染态 (lastPlan/lastHitVec) 由 tickRenderState 管理，不在此清除
         }
     }
 
@@ -808,16 +851,21 @@ public class Printer extends Module {
 
     @EventHandler
     private void onRender(Render3DEvent event) {
-        // Critical: Stop immediately if module is disabled or no blocks to render
-        if (!isActive() || !render.get() || placePositions.isEmpty())
-            return;
+        if (!isActive() || !render.get()) return;
 
+        // 候选方块（淡绿色，排除当前计划目标）
         for (BlockPos pos : placePositions) {
+            if (lastPlan != null && pos.equals(lastPlan.targetPos())) continue;
             event.renderer.box(pos, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
         }
 
-        // 【新增】渲染交互点立方体
-        if (renderHitVec.get() && currentHitVec != null) {
+        // 当前计划目标（醒目青色高亮）
+        if (lastPlan != null) {
+            event.renderer.box(lastPlan.targetPos(), plannedSideColor.get(), plannedLineColor.get(), shapeMode.get(), 0);
+        }
+
+        // 交互点（红橙色小立方体）
+        if (renderHitVec.get() && lastHitVec != null && lastHitVecTicks > 0) {
             renderHitVecCube(event);
         }
     }
@@ -829,16 +877,16 @@ public class Printer extends Module {
      * - 第二层：30%不透明度的立方体（禁用深度测试，始终可见）
      */
     private void renderHitVecCube(Render3DEvent event) {
-        if (currentHitVec == null)
+        if (lastHitVec == null)
             return;
 
         // 立方体的半边长（总边长为0.1，所以每边0.05）
         double halfSize = 0.05;
 
         // 立方体的中心坐标
-        double x = currentHitVec.x;
-        double y = currentHitVec.y;
-        double z = currentHitVec.z;
+        double x = lastHitVec.x;
+        double y = lastHitVec.y;
+        double z = lastHitVec.z;
 
         // 获取颜色
         SettingColor color = hitVecColor.get();
