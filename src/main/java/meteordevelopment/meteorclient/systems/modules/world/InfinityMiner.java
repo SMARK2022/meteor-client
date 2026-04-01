@@ -15,6 +15,8 @@ import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.systems.modules.Modules;
+import meteordevelopment.meteorclient.systems.modules.player.AutoEat;
 import meteordevelopment.meteorclient.utils.Utils;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
@@ -104,6 +106,7 @@ public class InfinityMiner extends Module {
 
     private boolean prevMineScanDroppedItems;
     private boolean repairing;
+    private boolean yieldingToEating;
 
     public InfinityMiner() {
         super(Categories.World, "infinity-miner", "Allows you to essentially mine forever by mining repair blocks when the durability gets low. Needs a mending pickaxe.");
@@ -115,12 +118,14 @@ public class InfinityMiner extends Module {
         baritoneSettings.mineScanDroppedItems.value = true;
         homePos.set(mc.player.getBlockPos());
         repairing = false;
+        yieldingToEating = false;
     }
 
     @Override
     public void onDeactivate() {
         baritone.getPathingBehavior().cancelEverything();
         baritoneSettings.mineScanDroppedItems.value = prevMineScanDroppedItems;
+        yieldingToEating = false;
     }
 
     @EventHandler
@@ -142,19 +147,25 @@ public class InfinityMiner extends Module {
             return;
         }
 
-        if (!findPickaxe()) {
-            error("Could not find a usable mending pickaxe.");
-            toggle();
-            return;
-        }
-
         if (!checkThresholds()) {
             error("Start mining value can't be lower than start repairing value.");
             toggle();
             return;
         }
 
-        if (repairing) {
+        // Yield control to AutoEat before touching hotbar / pickaxe / baritone mining logic.
+        if (shouldYieldToEating()) {
+            if (!yieldingToEating) {
+                yieldingToEating = true;
+                baritone.getPathingBehavior().cancelEverything();
+            }
+            return;
+        }
+        if (yieldingToEating) {
+            yieldingToEating = false;
+        }
+
+        if (!findPickaxe()) {
             if (!needsRepair()) {
                 warning("Finished repairing, going back to mining.");
                 repairing = false;
@@ -225,6 +236,11 @@ public class InfinityMiner extends Module {
 
     private boolean isBaritoneNotWalking() {
         return !(baritone.getPathingControlManager().mostRecentInControl().orElse(null) instanceof ICustomGoalProcess);
+    }
+
+    private boolean shouldYieldToEating() {
+        AutoEat autoEat = Modules.get().get(AutoEat.class);
+        return autoEat != null && autoEat.isActive() && autoEat.isEating();
     }
 
     private boolean filterBlocks(Block block) {
