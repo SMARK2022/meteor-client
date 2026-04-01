@@ -436,6 +436,7 @@ public class Modules extends System<Modules> {
         add(new OffhandCrash());
         add(new Portals());
         add(new PotionSaver());
+        add(new Printer());
         add(new Reach());
         add(new Rotation());
         add(new SpeedMine());

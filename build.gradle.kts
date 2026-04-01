@@ -1,5 +1,5 @@
 plugins {
-    id("fabric-loom") version "1.10-SNAPSHOT"
+    id("fabric-loom") version "1.14.10"
     id("maven-publish")
     id("com.gradleup.shadow") version "9.0.0-beta11"
 }
@@ -34,6 +34,15 @@ repositories {
         name = "ViaVersion"
         url = uri("https://repo.viaversion.com")
     }
+
+    maven {
+        name = "MaLiLib Maven"
+        url = uri("https://masa.dy.fi/maven/sakura-ryoko")
+        content { includeGroupAndSubgroups("fi.dy.masa") }
+    }
+
+    maven { url = uri("https://api.modrinth.com/maven") }
+
     mavenCentral()
 
     exclusiveContent {
@@ -92,6 +101,12 @@ dependencies {
     // ModMenu (https://github.com/TerraformersMC/ModMenu)
     modCompileOnly("com.terraformersmc:modmenu:${properties["modmenu_version"] as String}")
 
+    // Litematica
+    modImplementation("maven.modrinth:litematica:${properties["litematica_version"] as String}")
+
+    // MaLiLib - Required by Litematica as a transitive dependency
+    modImplementation("fi.dy.masa.malilib:malilib-fabric-${properties["minecraft_version"] as String}:${properties["malilib_version"] as String}")
+
     // Libraries
     library("meteordevelopment:orbit:${properties["orbit_version"] as String}")
     library("org.meteordev:starscript:${properties["starscript_version"] as String}")
@@ -105,8 +120,15 @@ dependencies {
     shadow(project(":launch"))
 }
 
+tasks.withType<JavaCompile> {
+    options.encoding = "UTF-8"
+    options.compilerArgs.add("-Xlint:all,-processing")
+    options.compilerArgs.add("-Xlint:-unchecked")
+}
+
 loom {
     accessWidenerPath = file("src/main/resources/meteor-client.accesswidener")
+
 }
 
 afterEvaluate {
