@@ -4,13 +4,15 @@
 
 <h1 align="center">Meteor Client — SMARK 修改版</h1>
 <p align="center">
-基于 <a href="https://github.com/MeteorDevelopment/meteor-client">MeteorDevelopment/meteor-client</a> 的 <code>1.21.4</code> 标签构建的修改分支<br/>
-适用于 Minecraft 1.21.4 的 Fabric 实用工具模组
+基于 <a href="https://github.com/MeteorDevelopment/meteor-client">MeteorDevelopment/meteor-client</a> 的上游代码构建的修改分支<br/>
+适用于 Minecraft <strong>1.21.8</strong> 的 Fabric 实用工具模组
 </p>
 
 <div align="center">
     <a href="https://github.com/MeteorDevelopment/meteor-client"><img src="https://img.shields.io/badge/上游仓库-MeteorDevelopment%2Fmeteor--client-blue" alt="上游仓库"/></a>
-    <img src="https://img.shields.io/badge/基线标签-1.21.4-green" alt="基线标签"/>
+    <img src="https://img.shields.io/badge/Minecraft-1.21.8-brightgreen" alt="Minecraft 版本"/>
+    <img src="https://img.shields.io/badge/Fabric_Loom-1.14.10-blue" alt="Fabric Loom"/>
+    <img src="https://img.shields.io/badge/Gradle-9.2.0-blue" alt="Gradle"/>
     <img src="https://img.shields.io/badge/许可证-GPL--3.0-orange" alt="License"/>
 </div>
 
@@ -18,33 +20,36 @@
 
 ## 📖 项目简介
 
-本仓库是 [MeteorDevelopment/meteor-client](https://github.com/MeteorDevelopment/meteor-client) 的个人修改分支，基于上游仓库的 **`1.21.4` 标签**（提交 `a96efdc`）进行修改。主要改动包括：
+本仓库是 [MeteorDevelopment/meteor-client](https://github.com/MeteorDevelopment/meteor-client) 的个人修改分支。修改工作起初基于上游 **`1.21.4` 标签**进行，现已完整移植并适配到上游 **Minecraft 1.21.8** 版本，分支名为 `1.21.8-nametags-hotfix`。主要改动包括：
 
 1. **🏷️ Nametag（名牌）显示修复** — 修复了现代化 UI 缩放下名牌显示错位的问题
 2. **🖨️ Printer（打印机）模块** — 新增基于 Litematica 蓝图的自动放置方块模块
-3. **🍖 AutoEat（自动进食）修复** — 修复食物检测逻辑 Bug，优化进食时的暂停/恢复顺序
-4. **⛏️ InfinityMiner（无限矿工）优化** — 新增进食让行机制，避免挖矿与进食冲突
+3. **🍖 AutoEat（自动进食）修复** — 修复食物检测逻辑 Bug，优化进食时的暂停/恢复顺序，暴露 `isEating()` 接口
+4. **⛏️ InfinityMiner（无限矿工）优化** — 新增进食让行机制，避免挖矿与进食快捷栏冲突
 5. **🔧 其他小修复** — 旋转优先级逻辑修正、Mixin 兼容性补丁等
+6. **⚙️ 构建系统升级** — Gradle 9.2.0 + Fabric Loom 1.14.10，适配 1.21.8 全量依赖
 
-> **本 README 提供了完整的差异分析和安全性审计，以便使用者了解本分支对原仓库进行了哪些修改。**
+> **本 README 提供了完整的差异分析、API 适配说明和安全性审计，以便使用者了解本分支对原仓库进行了哪些修改。**
 
 ---
 
 ## 📊 差异总览
 
-与上游 `1.21.4` 标签相比，本分支共计 **55 次提交**，涉及 **24 个文件**，新增 **4566 行**，删除 **179 行**。
+### vs 上游 `1.21.4` 标签（SMARK 完整修改内容）
 
-### 修改文件一览
+本分支相对上游 `1.21.4` 标签共新增 **14 个文件**，修改 **9 个文件**。
 
 | 文件路径 | 类型 | 改动说明 |
 |---------|------|---------|
 | `src/.../utils/render/NametagUtils.java` | ✏️ 修改 | 修复现代化 UI 缩放下的名牌位置偏移 |
-| `src/.../mixin/GameRendererMixin.java` | ✏️ 修改 | 传递投影矩阵给 NametagUtils（1 行） |
-| `src/.../systems/modules/Modules.java` | ✏️ 修改 | 注册新的 Printer 模块（1 行） |
+| `src/.../mixin/GameRendererMixin.java` | ✏️ 修改 | 传递投影矩阵给 NametagUtils |
+| `src/.../mixin/KeyboardInputMixin.java` | ✏️ 修改 | 集成 Rotations MovementFix + movementVector 同步 |
+| `src/.../systems/modules/Modules.java` | ✏️ 修改 | 注册新的 Printer 模块 |
 | `src/.../systems/modules/player/Printer.java` | 🆕 新增 | Printer 打印机模块主体（921 行） |
-| `src/.../systems/modules/player/AutoEat.java` | ✏️ 修改 | 修复食物检测逻辑，优化进食暂停顺序 |
+| `src/.../systems/modules/player/AutoEat.java` | ✏️ 修改 | 修复食物检测逻辑，优化进食暂停顺序，新增 `isEating()` |
 | `src/.../systems/modules/world/InfinityMiner.java` | ✏️ 修改 | 新增进食让行机制，优化与 AutoEat 联动 |
 | `src/.../utils/player/ItemSwitchHelper.java` | 🆕 新增 | 物品切换辅助工具类（196 行） |
+| `src/.../utils/player/Rotations.java` | ✏️ 修改 | 旋转优先级比较逻辑修正 + MovementFix |
 | `src/.../utils/printer/BlockUtilHelper.java` | 🆕 新增 | 方块工具辅助类（292 行） |
 | `src/.../utils/printer/CandidateFilter.java` | 🆕 新增 | 候选方块过滤器（77 行） |
 | `src/.../utils/printer/CandidateSource.java` | 🆕 新增 | 候选方块来源（63 行） |
@@ -54,13 +59,24 @@
 | `src/.../utils/printer/PlacementResolver.java` | 🆕 新增 | 放置解析器（270 行） |
 | `src/.../utils/printer/ResolverRegistry.java` | 🆕 新增 | 解析器注册表（724 行） |
 | `src/.../utils/printer/Rules.java` | 🆕 新增 | 方块放置规则（1040 行） |
-| `src/.../utils/player/Rotations.java` | ✏️ 修改 | 旋转优先级比较逻辑修正（1 行） |
-| `src/.../asm/Asm.java` | ✏️ 修改 | Mixin 兼容性补丁（4 行） |
-| `build.gradle.kts` | ✏️ 修改 | 添加 Litematica/MaLiLib 依赖，升级 fabric-loom |
-| `gradle.properties` | ✏️ 修改 | 构建参数调整，添加依赖版本号 |
+| `src/.../asm/Asm.java` | ✏️ 修改 | Mixin 兼容性补丁 |
+| `build.gradle.kts` | ✏️ 修改 | 添加 Litematica/MaLiLib 依赖，升级 Fabric Loom |
+| `gradle.properties` | ✏️ 修改 | 构建参数调整，适配 1.21.8 全量版本号 |
 | `gradle/wrapper/gradle-wrapper.properties` | ✏️ 修改 | Gradle 版本升级至 9.2.0 |
-| `gradlew.bat` | ✏️ 修改 | 添加 UTF-8 编码设置 |
-| `prompt` | 🆕 新增 | 开发备忘（非代码文件，不影响运行） |
+
+### vs 上游 `1.21.8` 分支（从 1.21.4 移植时的 API 冲突与适配）
+
+将上述 SMARK 修改从 1.21.4 合并到 1.21.8 时，上游引入了以下 API 破坏性变更，均已完整适配：
+
+| 影响文件 | 1.21.4 API | 1.21.8 新 API | 原因 |
+|---------|-----------|-------------|------|
+| `NametagUtils.java` | `MatrixStack` / `matrices.push()` / `matrices.pop()` | `Matrix3x2fStack` / `pushMatrix()` / `popMatrix()` | JOML 渲染栈重构 |
+| `NametagUtils.java` | `matrices.scale(x, y, z)` / `matrices.translate(x, y, z)` | `matrices.scale(s)` / `matrices.translate(x, y)` | 2D 矩阵栈简化接口 |
+| `Rotations.java` | `input.movementForward` / `input.movementSideways` | `input.getMovementInput().y` / `.x` | 移动输入封装为方法 |
+| `KeyboardInputMixin.java` | 直接写 `movementForward` / `movementSideways` 字段 | 需同步 `this.movementVector = new Vec2f(sw, fw)` | protected 字段替换 |
+| `ItemSwitchHelper.java` | `inventory.selectedSlot`（公开字段） | `inventory.getSelectedSlot()`（方法） | 字段封装 |
+| `Printer.java` | `RenderSystem.disableDepthTest()` / `enableDepthTest()` + `event.renderer` | `event.depthRenderer`（无需手动切换深度测试） | 渲染事件 API 重构 |
+| `Modules.java` | 含 `PotionSpoof` | 无 `PotionSpoof`（1.21.8 上游已移除） | 模块被移除，仅注册 `Printer` |
 
 ---
 
@@ -76,14 +92,32 @@
 
 **具体改动**：
 
-#### `NametagUtils.java` — 坐标计算修正
+#### `NametagUtils.java` — 坐标计算修正 + 1.21.8 Matrix API 适配
 
 | 改动项 | 说明 |
 |-------|------|
 | `onRender()` 方法签名变更 | 新增 `Matrix4f projectionMatrix` 参数，直接接收渲染管线的投影矩阵，而非通过 `RenderSystem.getProjectionMatrix()` 获取（避免时序错位） |
 | `toScreen()` 坐标计算 | 将 `x / windowScale` 替换为直接使用 `x`，将 `y` 从 `framebufferHeight - y / windowScale` 改为 `framebufferHeight - y`，修正了 GUI 缩放带来的二次缩放问题 |
 | `begin()` 矩阵缩放 | 在 `matrices.translate()` 之前新增 `matrices.scale(1/scaleFactor, 1/scaleFactor, 1)`，确保名牌在不同 GUI 缩放下正确渲染 |
+| **1.21.8 适配**：矩阵类型 | `MatrixStack` → `Matrix3x2fStack`；`push()`→`pushMatrix()`；`pop()`→`popMatrix()` |
+| **1.21.8 适配**：矩阵操作 | `scale(x, y, z)`→`scale(s)`（无 z 轴）；`translate(x, y, z)`→`translate(x, y)` |
 | 调试日志 | 添加了条件调试日志（默认 **已禁用**，`DEBUG_ENABLED = false`），不会在正常运行时产生任何输出 |
+
+```java
+// 1.21.4 版本
+MatrixStack matrices = drawContext.getMatrices();
+matrices.push();
+matrices.scale((float)(1.0f / mc.getWindow().getScaleFactor()), (float)(1.0f / mc.getWindow().getScaleFactor()), 1);
+matrices.translate((float)pos.x, (float)pos.y, 0);
+matrices.scale((float)scale, (float)scale, 1);
+
+// 1.21.8 版本（本分支）
+Matrix3x2fStack matrices = drawContext.getMatrices();
+matrices.pushMatrix();
+matrices.scale(1.0f / mc.getWindow().getScaleFactor());
+matrices.translate((float)pos.x, (float)pos.y);
+matrices.scale((float)scale, (float)scale);
+```
 
 #### `GameRendererMixin.java` — 投影矩阵传递
 
@@ -93,8 +127,6 @@ NametagUtils.onRender(view);
 // 修改后
 NametagUtils.onRender(view, projection);
 ```
-
-仅修改了一行调用，将投影矩阵 `projection` 一并传递。
 
 ---
 
@@ -129,12 +161,34 @@ src/main/java/meteordevelopment/meteorclient/
 - 对半砖（Slab）、楼梯（Stairs）、活板门（Trapdoor）等特殊方块有专用放置逻辑
 - 仅发送标准 Minecraft 交互数据包（`interactBlock` + `HandSwingC2SPacket`）
 
-**构建依赖添加**（`build.gradle.kts`）：
+**1.21.8 API 适配 — 渲染深度测试**：
+
+```java
+// 1.21.4：手动管理深度状态
+RenderSystem.disableDepthTest();
+event.renderer.box(box, color30, color30, ShapeMode.Both, 0);
+RenderSystem.enableDepthTest();
+
+// 1.21.8：使用专用 depthRenderer（无需手动切换）
+event.depthRenderer.box(box, color30, color30, ShapeMode.Both, 0);
+```
+
+**1.21.8 API 适配 — ItemSwitchHelper**：
+
+```java
+// 1.21.4：直接读取公开字段
+int currentSlot = inventory.selectedSlot;
+
+// 1.21.8：字段已封装为方法
+int currentSlot = inventory.getSelectedSlot();
+```
+
+**构建依赖**（`build.gradle.kts`）：
 ```kotlin
 // Litematica
-modImplementation("maven.modrinth:litematica:0.21.6")
+modImplementation("maven.modrinth:litematica:${properties["litematica_version"]}")
 // MaLiLib（Litematica 的前置库）
-modImplementation("fi.dy.masa.malilib:malilib-fabric-1.21.4:0.23.5")
+modImplementation("fi.dy.masa.malilib:malilib-fabric-${properties["minecraft_version"]}:${properties["malilib_version"]}")
 ```
 
 ---
@@ -164,19 +218,12 @@ if (mc.player.getInventory().getStack(slot).get(DataComponentTypes.FOOD) == null
 ```
 
 ```java
-// 原始顺序：先吃再暂停
+// 修复后顺序：先暂停光环和 Baritone，再开始进食
 private void startEating() {
-    prevSlot = mc.player.getInventory().selectedSlot;
-    eat();           // ← 先吃
-    // Pause auras   // ← 后暂停
-}
-
-// 修复后顺序：先暂停再吃
-private void startEating() {
-    prevSlot = mc.player.getInventory().selectedSlot;
-    // Pause auras first  // ← 先暂停
+    prevSlot = mc.player.getInventory().getSelectedSlot(); // 1.21.8 用 getSelectedSlot()
+    // Pause auras first
     // Pause baritone first
-    eat();                // ← 后吃
+    eat(); // 最后执行
 }
 ```
 
@@ -220,43 +267,76 @@ if (shouldYieldToEating()) {
 
 ---
 
-### 5. 🔧 其他修改
+### 5. 🔧 Rotations 与 KeyboardInputMixin — MovementFix
 
-#### `Rotations.java` — 旋转优先级修正
+**修改文件**：`src/.../utils/player/Rotations.java`、`src/.../mixin/KeyboardInputMixin.java`
+
+**功能**：当 Rotations 模块控制旋转时，重映射 WASD 按键，使玩家在服务器强制旋转的情况下仍能按原视角方向移动。
+
+#### `Rotations.java` — 优先级修正 + 1.21.8 API 适配
 
 ```java
-// 原始代码（高优先级后插入）
-if (priority > rotations.get(i).priority) break;
-// 修改后（高优先级前插入）
+// 旋转优先级修正（原始：大于时中断；修复后：小于等于时中断）
 if (priority <= rotations.get(i).priority) break;
+
+// 1.21.4：直接读取字段
+float forward = input.movementForward;
+float sideways = input.movementSideways;
+// 1.21.8：通过方法获取封装后的移动向量
+float forward = input.getMovementInput().y;
+float sideways = input.getMovementInput().x;
 ```
 
-将旋转请求的插入排序方向从「大于时中断」改为「小于等于时中断」，影响多个模块同时请求旋转时的优先级排序。
+#### `KeyboardInputMixin.java` — movementVector 同步 + Freecam 集成
+
+在 1.21.8 中，`movementForward`/`movementSideways` 字段已被 protected 的 `movementVector` 替代，需在 `applyMoveFix` 后手动同步：
+
+```java
+if (Rotations.needsMoveFix()) {
+    Rotations.applyMoveFix(this);
+    // applyMoveFix 更新了 playerInput，需要同步 movementVector (protected)
+    float fw = playerInput.forward() == playerInput.backward() ? 0 : (playerInput.forward() ? 1.0f : -1.0f);
+    float sw = playerInput.left() == playerInput.right() ? 0 : (playerInput.left() ? 1.0f : -1.0f);
+    this.movementVector = new Vec2f(sw, fw);
+}
+```
+
+同时集成了 1.21.8 上游新增的 Freecam 潜行支持：
+
+```java
+// 1.21.8 上游新增
+if (Modules.get().get(Sneak.class).doVanilla() || Modules.get().get(Freecam.class).staySneaking()) {
+    playerInput = new PlayerInput(...);
+}
+```
+
+---
+
+### 6. 🔩 其他修改
 
 #### `Asm.java` — Mixin 兼容性补丁
 
 ```java
-// 新增方法
+// 新增方法，解决某些 Mixin 环境下的兼容性问题
 public boolean couldTransformClass(MixinEnvironment environment, String name) {
     return true;
 }
 ```
 
-添加了 `couldTransformClass` 方法的重写，返回 `true`，解决某些 Mixin 环境下的兼容性问题。
-
 #### 构建配置变更
 
-| 配置项 | 原始值 | 修改后 |
-|-------|-------|-------|
+| 配置项 | 1.21.4 分支 | 1.21.8 分支（当前） |
+|-------|------------|------------------|
+| Minecraft 版本 | `1.21.4` | `1.21.8` |
 | `fabric-loom` 版本 | `1.9-SNAPSHOT` | `1.14.10` |
 | Gradle 版本 | `8.12` | `9.2.0` |
 | JVM 内存 | `-Xmx2G` | `-Xmx4G` |
-| `sodium_version` | `mc1.21.4-0.6.6-fabric` | `mc1.21.4-0.6.13-fabric` |
-| `lithium_version` | `mc1.21.4-0.14.3-fabric` | `mc1.21.4-0.15.3-fabric` |
-| `iris_version` | `1.8.5+1.21.4-fabric` | `1.8.8+1.21.4-fabric` |
-| `modmenu_version` | `13.0.2` | `13.0.3` |
-
-> ⚠️ **注意**：`gradle.properties` 中包含了开发者本地配置（如 `org.gradle.java.home=F:\\include\\jdk-21.0.2` 和代理设置 `proxyHost=127.0.0.1:15236`），这些仅在开发者本地生效，不影响其他用户构建。
+| `sodium_version` | `mc1.21.4-0.6.6-fabric` | `mc1.21.6-0.6.13-fabric` |
+| `lithium_version` | `mc1.21.4-0.14.3-fabric` | `mc1.21.6-0.17.0-fabric` |
+| `iris_version` | `1.8.5+1.21.4-fabric` | `1.9.0+1.21.6-fabric` |
+| `modmenu_version` | `13.0.2` | `15.0.0-beta.3` |
+| `malilib_version` | `0.23.5` | `0.25.7` |
+| `litematica_version` | `0.21.6` | `0.21.6` |
 
 ---
 
@@ -307,7 +387,7 @@ public boolean couldTransformClass(MixinEnvironment environment, String name) {
 
 #### ✅ 5. 网络数据包分析
 
-**Printer.java** 中唯一的网络数据包发送位于第 608 行：
+**Printer.java** 中唯一的网络数据包发送：
 
 ```java
 mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(Hand.MAIN_HAND));
@@ -323,13 +403,13 @@ mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(Hand.MAIN_HAND));
 
 #### ✅ 6. `gradle.properties` 中的代理配置
 
-文件中存在本地代理配置：
+文件中原有 SMARK 本地代理配置已在 1.21.8 移植时**注释掉**：
 ```properties
-systemProp.http.proxyHost=127.0.0.1
-systemProp.http.proxyPort=15236
+# systemProp.http.proxyHost=127.0.0.1
+# systemProp.http.proxyPort=15236
 ```
 
-这是开发者本地的 **构建时** 代理设置（用于 Gradle 下载依赖），仅在 `./gradlew build` 时生效。**不会影响 Minecraft 游戏运行时**，也不会将任何游戏数据通过代理转发。
+即使未注释，该配置也是 **构建时** 代理设置（用于 Gradle 下载依赖），**不会影响 Minecraft 游戏运行时**的任何网络行为。
 
 ### 🟢 结论
 
@@ -344,33 +424,35 @@ systemProp.http.proxyPort=15236
 
 ### 前置要求
 
-- **Java 21** 或更高版本
-- **Minecraft 1.21.4**
-- **Fabric Loader**
-- [Litematica](https://www.curseforge.com/minecraft/mc-mods/litematica) 模组（Printer 功能需要）
-- [MaLiLib](https://www.curseforge.com/minecraft/mc-mods/malilib)（Litematica 前置库）
+- **Java 21**（需恰好为 21，不支持 25 等更高版本）
+- **Minecraft 1.21.8**
+- **Fabric Loader**（适配 1.21.8）
+- [Litematica](https://modrinth.com/mod/litematica) 模组（Printer 功能需要，版本 `0.21.6`）
+- [MaLiLib](https://www.curseforge.com/minecraft/mc-mods/malilib)（Litematica 前置库，版本 `0.25.7`）
 
 ### 构建步骤
 
 ```bash
-# 1. 克隆本仓库
-git clone https://github.com/SMARK2022/meteor-client.git
-cd meteor-client
+# 1. 切换到 1.21.8 修改分支
+git checkout 1.21.8-nametags-hotfix
 
 # 2. 构建（如果你在中国大陆，可能需要配置 Gradle 代理）
 ./gradlew build
 
 # 3. 构建产物位于
-#    build/libs/meteor-client-*.jar
+#    build/libs/meteor-client-1.21.8-local.jar
 ```
 
-> **注意**：首次构建可能需要较长时间（下载 Minecraft 反混淆映射等）。如果遇到内存不足，请调整 `gradle.properties` 中的 `org.gradle.jvmargs`。
+> **注意**：
+> - 首次构建需要较长时间（下载 Minecraft 反混淆映射等）。
+> - 必须使用 **JDK 21**，`gradle.properties` 中可通过 `org.gradle.java.home` 指定 JDK 路径。
+> - 如遇依赖下载失败，可临时设置 Gradle 代理：在 `gradle.properties` 中取消注释代理相关行。
 
 ### 安装步骤
 
-1. 安装 [Fabric Loader](https://fabricmc.net/use/installer/)（选择 Minecraft 1.21.4）
-2. 将构建产物 `meteor-client-*.jar` 放入 `.minecraft/mods/` 目录
-3. 同时安装 Litematica 和 MaLiLib 模组（如需使用 Printer 功能）
+1. 安装 [Fabric Loader](https://fabricmc.net/use/installer/)（选择 Minecraft 1.21.8）
+2. 将构建产物 `meteor-client-1.21.8-local.jar` 放入 `.minecraft/mods/` 目录
+3. 同时安装 Litematica `0.21.6` 和 MaLiLib `0.25.7`（如需使用 Printer 功能）
 4. 启动游戏
 
 ### Printer 使用方法
@@ -389,7 +471,6 @@ cd meteor-client
 | `src/` | Java 源代码 |
 | `build.gradle.kts` | Gradle 构建脚本 |
 | `gradle.properties` | 构建属性和依赖版本 |
-| `prompt` | 开发过程备忘文件（非代码，不影响构建和运行） |
 | `launch/` | 启动配置 |
 | `.github/` | GitHub Actions 配置 |
 
