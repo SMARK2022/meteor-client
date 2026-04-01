@@ -45,20 +45,20 @@
 | `src/.../mixin/GameRendererMixin.java` | ✏️ 修改 | 传递投影矩阵给 NametagUtils |
 | `src/.../mixin/KeyboardInputMixin.java` | ✏️ 修改 | 集成 Rotations MovementFix + movementVector 同步 |
 | `src/.../systems/modules/Modules.java` | ✏️ 修改 | 注册新的 Printer 模块 |
-| `src/.../systems/modules/player/Printer.java` | 🆕 新增 | Printer 打印机模块主体（921 行） |
+| `src/.../systems/modules/player/Printer.java` | 🆕 新增 | Printer 打印机模块主体（943 行） |
 | `src/.../systems/modules/player/AutoEat.java` | ✏️ 修改 | 修复食物检测逻辑，优化进食暂停顺序，新增 `isEating()` |
 | `src/.../systems/modules/world/InfinityMiner.java` | ✏️ 修改 | 新增进食让行机制，优化与 AutoEat 联动 |
-| `src/.../utils/player/ItemSwitchHelper.java` | 🆕 新增 | 物品切换辅助工具类（196 行） |
+| `src/.../utils/player/ItemSwitchHelper.java` | 🆕 新增 | 物品切换辅助工具类（211 行） |
 | `src/.../utils/player/Rotations.java` | ✏️ 修改 | 旋转优先级比较逻辑修正 + MovementFix |
-| `src/.../utils/printer/BlockUtilHelper.java` | 🆕 新增 | 方块工具辅助类（292 行） |
+| `src/.../utils/printer/BlockUtilHelper.java` | 🆕 新增 | 方块工具辅助类（406 行） |
 | `src/.../utils/printer/CandidateFilter.java` | 🆕 新增 | 候选方块过滤器（77 行） |
 | `src/.../utils/printer/CandidateSource.java` | 🆕 新增 | 候选方块来源（63 行） |
-| `src/.../utils/printer/HitVecCalculator.java` | 🆕 新增 | 点击位置计算器（156 行） |
+| `src/.../utils/printer/HitVecCalculator.java` | 🆕 新增 | 点击位置计算器（344 行） |
 | `src/.../utils/printer/PlacementContext.java` | 🆕 新增 | 放置上下文（117 行） |
 | `src/.../utils/printer/PlacementOption.java` | 🆕 新增 | 放置选项（75 行） |
-| `src/.../utils/printer/PlacementResolver.java` | 🆕 新增 | 放置解析器（270 行） |
-| `src/.../utils/printer/ResolverRegistry.java` | 🆕 新增 | 解析器注册表（724 行） |
-| `src/.../utils/printer/Rules.java` | 🆕 新增 | 方块放置规则（1040 行） |
+| `src/.../utils/printer/PlacementResolver.java` | 🆕 新增 | 放置解析器（299 行） |
+| `src/.../utils/printer/ResolverRegistry.java` | 🆕 新增 | 解析器注册表（726 行） |
+| `src/.../utils/printer/Rules.java` | 🆕 新增 | 方块放置规则（1062 行） |
 | `src/.../asm/Asm.java` | ✏️ 修改 | Mixin 兼容性补丁 |
 | `build.gradle.kts` | ✏️ 修改 | 添加 Litematica/MaLiLib 依赖，升级 Fabric Loom |
 | `gradle.properties` | ✏️ 修改 | 构建参数调整，适配 1.21.8 全量版本号 |
@@ -139,19 +139,19 @@ NametagUtils.onRender(view, projection);
 ```
 src/main/java/meteordevelopment/meteorclient/
 ├── systems/modules/player/
-│   └── Printer.java                    # 主模块（921行）— 包含 tick 逻辑、放置状态机、UI 设置
+│   └── Printer.java                    # 主模块（943行）— 包含 tick 逻辑、放置状态机、UI 设置
 ├── utils/player/
-│   └── ItemSwitchHelper.java           # 物品切换辅助（196行）— 管理快捷栏物品切换
+│   └── ItemSwitchHelper.java           # 物品切换辅助（211行）— 管理快捷栏物品切换
 └── utils/printer/
-    ├── BlockUtilHelper.java            # 方块工具（292行）— 方块状态检查、邻居方块查找
+    ├── BlockUtilHelper.java            # 方块工具（406行）— 方块状态检查、邻居方块查找
     ├── CandidateFilter.java            # 候选过滤器（77行）— 过滤不可放置的候选方块
     ├── CandidateSource.java            # 候选来源（63行）— 从 Litematica 蓝图提取待放置方块
-    ├── HitVecCalculator.java           # 点击计算器（156行）— 精确计算放置的交互射线
+    ├── HitVecCalculator.java           # 点击计算器（344行）— 精确计算放置的交互射线
     ├── PlacementContext.java           # 放置上下文（117行）— 封装单次放置的全部参数
     ├── PlacementOption.java            # 放置选项（75行）— 描述一个可行的放置方向
-    ├── PlacementResolver.java          # 放置解析器（270行）— 查找可行的放置方案
-    ├── ResolverRegistry.java           # 解析器注册表（724行）— 各类方块的专用解析器
-    └── Rules.java                      # 放置规则（1040行）— 半砖/楼梯/活板门等的放置规则
+    ├── PlacementResolver.java          # 放置解析器（299行）— 查找可行的放置方案
+    ├── ResolverRegistry.java           # 解析器注册表（726行）— 各类方块的专用解析器
+    └── Rules.java                      # 放置规则（1062行）— 半砖/楼梯/活板门等的放置规则
 ```
 
 **关键技术点**：
@@ -387,15 +387,19 @@ public boolean couldTransformClass(MixinEnvironment environment, String name) {
 
 #### ✅ 5. 网络数据包分析
 
-**Printer.java** 中唯一的网络数据包发送：
+**Printer.java** 中涉及网络的操作（第 622、628 行）：
 
 ```java
-mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(Hand.MAIN_HAND));
+// 第622行：通过原版 API 放置方块（与手动点击完全等效）
+ActionResult result = mc.interactionManager.interactBlock(mc.player, plan.hand(), hitResult);
+
+// 第628行：仅在 interactBlock 成功后才发送手臂挥动动画包
+mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(plan.hand()));
 ```
 
-这是标准的 **手臂挥动动画数据包**，是 Minecraft 客户端放置方块时的正常行为，仅包含 `Hand.MAIN_HAND` 枚举值，**不包含任何坐标信息**。
-
-方块放置本身通过 `mc.interactionManager.interactBlock()` 执行，这是 Minecraft 原版客户端 API，与正常手动放置方块的行为完全一致。
+- `interactBlock()` 是 Minecraft 原版客户端 API，与手动右键点击方块的行为完全一致，发送的是标准 `PlayerInteractBlockC2SPacket`，包含放置坐标（这是服务器处理放置请求所必须的）。
+- `HandSwingC2SPacket(plan.hand())` 是手臂挥动动画数据包，不含坐标信息，参数为 `Hand.MAIN_HAND` 或 `Hand.OFF_HAND`，与正常放置方块行为一致。
+- 两个数据包均为 Minecraft **标准放置流程的必要组成部分**，任何手动放置方块时客户端也会发送相同的包。
 
 **InfinityMiner.java** 中存在 `sendPacket(new DisconnectS2CPacket(...))` 调用，但此代码 **与上游原版完全一致**，用于在背包满时断开连接，属于该模块原有的断线功能，**并非本分支新增**。
 
