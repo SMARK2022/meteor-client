@@ -15,7 +15,6 @@ import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.utils.entity.EntityUtils;
 import meteordevelopment.meteorclient.utils.entity.SortPriority;
-import meteordevelopment.meteorclient.utils.entity.Target;
 import meteordevelopment.meteorclient.utils.entity.TargetUtils;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
@@ -37,6 +36,7 @@ import net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.GameMode;
 
 import java.util.ArrayList;
@@ -333,13 +333,28 @@ public class KillAura extends Module {
         }
 
         attacking = true;
-        if (rotation.get() == RotationMode.Always) Rotations.rotate(Rotations.getYaw(primary), Rotations.getPitch(primary, Target.Body));
         if (pauseOnCombat.get() && PathManagers.get().isPathing() && !wasPathing) {
             PathManagers.get().pause();
             wasPathing = true;
         }
 
-        if (delayCheck()) targets.forEach(this::attack);
+        if (delayCheck()) {
+            // Ready to attack: compute aim and submit one attack this tick
+            Vec3d aim = computeAimPoint(primary);
+            double yaw = Rotations.getYaw(aim);
+            double pitch = Rotations.getPitch(aim);
+
+            if (rotation.get() != RotationMode.None) {
+                // Attack in rotation callback — server sees correct angle before attack packet
+                Rotations.rotate(yaw, pitch, 100, () -> commitAttack(primary));
+            } else {
+                commitAttack(primary);
+            }
+        } else if (rotation.get() == RotationMode.Always) {
+            // Not attacking yet, softly track the target
+            Vec3d aim = computeAimPoint(primary);
+            Rotations.rotate(Rotations.getYaw(aim), Rotations.getPitch(aim), 50);
+        }
     }
 
     @EventHandler
@@ -379,17 +394,21 @@ public class KillAura extends Module {
         if (entity.equals(mc.player) || entity.equals(mc.cameraEntity)) return false;
         if ((entity instanceof LivingEntity livingEntity && livingEntity.isDead()) || !entity.isAlive()) return false;
 
+        // Eye-based distance to entity AABB — matches server-side reach semantics
+        Vec3d eyePos = mc.player.getEyePos();
         Box hitbox = entity.getBoundingBox();
-        if (!PlayerUtils.isWithin(
-            MathHelper.clamp(mc.player.getX(), hitbox.minX, hitbox.maxX),
-            MathHelper.clamp(mc.player.getY(), hitbox.minY, hitbox.maxY),
-            MathHelper.clamp(mc.player.getZ(), hitbox.minZ, hitbox.maxZ),
-            range.get()
-        )) return false;
+        double dx = MathHelper.clamp(eyePos.x, hitbox.minX, hitbox.maxX) - eyePos.x;
+        double dy = MathHelper.clamp(eyePos.y, hitbox.minY, hitbox.maxY) - eyePos.y;
+        double dz = MathHelper.clamp(eyePos.z, hitbox.minZ, hitbox.maxZ) - eyePos.z;
+        double distSq = dx * dx + dy * dy + dz * dz;
+
+        double effectiveRange = getEffectiveRange();
+        if (distSq > effectiveRange * effectiveRange) return false;
 
         if (!entities.get().contains(entity.getType())) return false;
         if (ignoreNamed.get() && entity.hasCustomName()) return false;
-        if (!PlayerUtils.canSeeEntity(entity) && !PlayerUtils.isWithin(entity, wallsRange.get())) return false;
+        double effectiveWallsRange = Math.min(wallsRange.get(), effectiveRange);
+        if (!PlayerUtils.canSeeEntity(entity) && distSq > effectiveWallsRange * effectiveWallsRange) return false;
         if (ignoreTamed.get()) {
             if (entity instanceof Tameable tameable
                 && tameable.getOwnerUuid() != null
@@ -433,13 +452,45 @@ public class KillAura extends Module {
         } else return mc.player.getAttackCooldownProgress(delay) >= 1;
     }
 
-    private void attack(Entity target) {
-        if (rotation.get() == RotationMode.OnHit) Rotations.rotate(Rotations.getYaw(target), Rotations.getPitch(target, Target.Body));
+    private void commitAttack(Entity target) {
+        if (!isActive() || !isStillValidTarget(target)) return;
 
         mc.interactionManager.attackEntity(mc.player, target);
         mc.player.swingHand(Hand.MAIN_HAND);
-
         hitTimer = 0;
+    }
+
+    private boolean isStillValidTarget(Entity target) {
+        if (target == null || target.isRemoved() || !target.isAlive()) return false;
+        if (target instanceof LivingEntity living && living.isDead()) return false;
+        Vec3d eyePos = mc.player.getEyePos();
+        Box hitbox = target.getBoundingBox();
+        double dx = MathHelper.clamp(eyePos.x, hitbox.minX, hitbox.maxX) - eyePos.x;
+        double dy = MathHelper.clamp(eyePos.y, hitbox.minY, hitbox.maxY) - eyePos.y;
+        double dz = MathHelper.clamp(eyePos.z, hitbox.minZ, hitbox.maxZ) - eyePos.z;
+        double effectiveRange = getEffectiveRange();
+        return dx * dx + dy * dy + dz * dz <= effectiveRange * effectiveRange;
+    }
+
+    private double getEffectiveRange() {
+        return Math.min(range.get(), mc.player.getEntityInteractionRange());
+    }
+
+    private Vec3d computeAimPoint(Entity entity) {
+        Vec3d eyePos = mc.player.getEyePos();
+        Box box = entity.getBoundingBox();
+        // Closest point on AABB to eye — minimal rotation cost
+        double aimX = MathHelper.clamp(eyePos.x, box.minX, box.maxX);
+        double aimY = MathHelper.clamp(eyePos.y, box.minY, box.maxY);
+        double aimZ = MathHelper.clamp(eyePos.z, box.minZ, box.maxZ);
+        // Blend 30% toward box center for robustness (avoid edge intercepts)
+        double cx = (box.minX + box.maxX) * 0.5;
+        double cy = (box.minY + box.maxY) * 0.5;
+        double cz = (box.minZ + box.maxZ) * 0.5;
+        aimX += (cx - aimX) * 0.3;
+        aimY += (cy - aimY) * 0.3;
+        aimZ += (cz - aimZ) * 0.3;
+        return new Vec3d(aimX, aimY, aimZ);
     }
 
     private boolean itemInHand() {
