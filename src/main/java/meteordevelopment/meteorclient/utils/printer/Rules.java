@@ -17,6 +17,8 @@ import net.minecraft.util.math.MathHelper;
 
 import meteordevelopment.meteorclient.utils.printer.BlockUtilHelper;
 import meteordevelopment.meteorclient.utils.printer.PlacementOption;
+import meteordevelopment.meteorclient.utils.printer.PlacementResolver.CandidateSource;
+import meteordevelopment.meteorclient.utils.printer.PlacementResolver.CandidateFilter;
 import meteordevelopment.meteorclient.utils.player.Rotations; // 确保这个也在
 
 /**

@@ -35,6 +35,7 @@ import meteordevelopment.meteorclient.utils.printer.BlockPlacementBehavior;
 import meteordevelopment.meteorclient.utils.printer.BlockUtilHelper;
 import meteordevelopment.meteorclient.utils.printer.PrinterBehavior;
 import meteordevelopment.meteorclient.utils.printer.PrinterTask;
+import meteordevelopment.meteorclient.utils.printer.RepeaterDelayBehavior;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.*;
 import net.minecraft.block.enums.SlabType;
@@ -116,6 +117,13 @@ public class Printer extends Module {
             .description("Only place blocks that are visible to the player (anti-cheat).")
             .defaultValue(true)
             .visible(() -> placeMode.get() == PlaceMode.STRICT)
+            .build());
+
+    // Behavior Toggles
+    private final Setting<Boolean> fixRepeaterDelay = sgGeneral.add(new BoolSetting.Builder()
+            .name("fix-repeater-delay")
+            .description("Automatically fix repeater delay mismatches by right-clicking.")
+            .defaultValue(false)
             .build());
 
     // Render Settings
@@ -227,6 +235,16 @@ public class Printer extends Module {
             }
             didPrinterForceSneak = false;
         }
+    }
+
+    /**
+     * 判断行为是否被用户启用
+     * BlockPlacementBehavior 始终启用，其他行为受开关控制。
+     */
+    private boolean isBehaviorEnabled(PrinterBehavior behavior) {
+        if (behavior instanceof BlockPlacementBehavior) return true;
+        if (behavior instanceof RepeaterDelayBehavior) return fixRepeaterDelay.get();
+        return false;
     }
 
     /**
@@ -365,6 +383,7 @@ public class Printer extends Module {
 
             PrinterBehavior behavior = PrinterBehavior.find(task);
             if (behavior == null) continue;
+            if (!isBehaviorEnabled(behavior)) continue;
 
             ActionPlan plan = behavior.plan(task, mc, strict, checkLos, maxReach);
             if (plan == null) continue;
@@ -685,6 +704,7 @@ public class Printer extends Module {
             // 查找匹配的行为
             PrinterBehavior behavior = PrinterBehavior.find(task);
             if (behavior == null) continue;
+            if (!isBehaviorEnabled(behavior)) continue;
 
             // 已经满足？
             if (behavior.isSatisfied(task)) continue;
