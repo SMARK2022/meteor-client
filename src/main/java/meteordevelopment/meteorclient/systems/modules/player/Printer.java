@@ -17,7 +17,7 @@ package meteordevelopment.meteorclient.systems.modules.player;
 import fi.dy.masa.litematica.data.DataManager;
 import fi.dy.masa.litematica.world.SchematicWorldHandler;
 import fi.dy.masa.litematica.world.WorldSchematic;
-import com.mojang.blaze3d.systems.RenderSystem;
+import meteordevelopment.meteorclient.renderer.GL;
 import meteordevelopment.meteorclient.events.entity.player.SendMovementPacketsEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
@@ -25,15 +25,16 @@ import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
-import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.ItemSwitchHelper;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
-import meteordevelopment.meteorclient.utils.world.BlockUtils;
+import meteordevelopment.meteorclient.utils.printer.ActionPlan;
+import meteordevelopment.meteorclient.utils.printer.ActionPlan.SneakPolicy;
+import meteordevelopment.meteorclient.utils.printer.ActionPlan.HandPolicy;
+import meteordevelopment.meteorclient.utils.printer.BlockPlacementBehavior;
 import meteordevelopment.meteorclient.utils.printer.BlockUtilHelper;
-import meteordevelopment.meteorclient.utils.printer.PlacementContext;
-import meteordevelopment.meteorclient.utils.printer.PlacementOption;
-import meteordevelopment.meteorclient.utils.printer.ResolverRegistry;
+import meteordevelopment.meteorclient.utils.printer.PrinterBehavior;
+import meteordevelopment.meteorclient.utils.printer.PrinterTask;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.*;
 import net.minecraft.block.enums.SlabType;
@@ -44,7 +45,6 @@ import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.decoration.EndCrystalEntity;
 import net.minecraft.entity.decoration.ItemFrameEntity;
 import net.minecraft.item.Item;
-import net.minecraft.item.Items;
 import net.minecraft.network.packet.c2s.play.HandSwingC2SPacket;
 import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
@@ -167,42 +167,33 @@ public class Printer extends Module {
             .defaultValue(new SettingColor(255, 100, 100, 255))
             .build());
 
-    // ==================== 方案B: 不可变放置计划 ====================
+    // ==================== 动作计划快照 ====================
 
     /**
-     * PlacementPlan - 一次放置操作的完整不可变快照
-     * 在 TickEvent.Pre 阶段创建后，整个 tick 内不再重新 resolve。
-     * 确保 movement 物理、movement packet、place packet 使用完全一致的参数。
+     * ArmedAction - 已就绪的动作（含计划和确认的手）
+     * 在 TickEvent.Pre 中创建，在 SendMovementPacketsEvent.Post 中消费。
      */
-    private record PlacementPlan(
-        BlockPos targetPos,
-        BlockPos interactPos,
-        Direction clickedFace,
-        Vec3d hitVec,
-        float yaw,
-        float pitch,
-        Item item,
-        Hand hand,
-        BlockState requiredState,
-        Vec3d plannedEyePos,
-        boolean needsSneak,
-        boolean selfPlacement
-    ) {}
+    private record ArmedAction(ActionPlan plan, Hand hand) {}
+
+    /**
+     * 潜行准备结果
+     */
+    private enum SneakReadiness { READY, PREPARING, BLOCKED }
 
     // ==================== 内部状态 ====================
 
-    private final List<BlockPos> placePositions = new ArrayList<>();
-    private final Map<BlockPos, Item> placeItems = new HashMap<>();
+    /** 当前 tick 需要处理的任务列表 */
+    private final List<PrinterTask> tasks = new ArrayList<>();
     private int tickDelay = 0;
 
-    // 方案B核心：当前 tick 的放置计划（逻辑态）
-    private PlacementPlan armedPlan = null;
+    /** 当前 tick 的动作计划（逻辑态） */
+    private ArmedAction armed = null;
 
-    // 标记变量：记录当前潜行状态是否由打印机强制触发
+    /** 记录当前潜行状态是否由打印机强制触发 */
     private boolean didPrinterForceSneak = false;
 
     // 渲染态（与逻辑态分离，确保 hit 点稳定显示 1~2 tick）
-    private PlacementPlan lastPlan = null;
+    private ActionPlan lastPlan = null;
     private Vec3d lastHitVec = null;
     private int lastHitVecTicks = 0;
 
@@ -213,17 +204,15 @@ public class Printer extends Module {
     @Override
     public void onActivate() {
         tickDelay = 0;
-        placePositions.clear();
-        placeItems.clear();
-        clearPlan();
+        tasks.clear();
+        clearArmed();
     }
 
     @Override
     public void onDeactivate() {
         tickDelay = 0;
-        placePositions.clear();
-        placeItems.clear();
-        clearPlan();
+        tasks.clear();
+        clearArmed();
         resetSneakState();
     }
 
@@ -241,10 +230,10 @@ public class Printer extends Module {
     }
 
     /**
-     * 清除当前放置计划和所有相关缓存
+     * 清除当前动作计划和所有相关缓存
      */
-    private void clearPlan() {
-        armedPlan = null;
+    private void clearArmed() {
+        armed = null;
         lastPlan = null;
         lastHitVec = null;
         lastHitVecTicks = 0;
@@ -252,11 +241,10 @@ public class Printer extends Module {
 
     /**
      * 发布渲染计划快照
-     * 将逻辑态的 plan 复制到渲染态，并设置显示倒计时。
      */
-    private void publishRenderPlan(PlacementPlan plan) {
+    private void publishRenderPlan(ActionPlan plan) {
         lastPlan = plan;
-        lastHitVec = plan != null ? plan.hitVec() : null;
+        lastHitVec = plan != null ? plan.interaction().hitVec() : null;
         lastHitVecTicks = plan != null ? 2 : 0;
     }
 
@@ -298,8 +286,8 @@ public class Printer extends Module {
         // 每 tick 衰减渲染态倒计时
         tickRenderState();
 
-        // 如果已有未执行的 plan，跳过（不应该发生，但防御性检查）
-        if (armedPlan != null) return;
+        // 如果已有未执行的 plan，跳过
+        if (armed != null) return;
 
         // 移动中暂停
         if (moveStop.get() && isPlayerMoving()) return;
@@ -321,77 +309,85 @@ public class Printer extends Module {
         }
         tickDelay = 0;
 
-        // 更新候选列表
-        updatePlacePositions(worldSchematic);
-        if (placePositions.isEmpty()) {
+        // 更新任务列表
+        updateTasks(worldSchematic);
+        if (tasks.isEmpty()) {
             resetSneakState();
             return;
         }
 
-        // 尝试为列表中最近的可行方块生成 plan
-        armedPlan = selectBestPlan(worldSchematic);
+        // 尝试为最佳任务生成动作计划
+        armed = selectBestAction(worldSchematic);
 
-        if (armedPlan != null) {
-            // 发布渲染快照（与逻辑态分离，确保 hit 点稳定显示）
-            publishRenderPlan(armedPlan);
+        if (armed != null) {
+            // 发布渲染快照
+            publishRenderPlan(armed.plan());
 
-            // 通过 Rotations 协调器提交旋转请求 (priority=50 for block placement)
-            // Rotations 会在 PlayerTickMovementEvent 中预应用角度,
-            // 并在 SendMovementPacketsEvent.Post 后自动恢复视角
+            // 通过 Rotations 协调器提交旋转请求
             if (rotate.get()) {
-                Rotations.requestPreMovement(armedPlan.yaw(), armedPlan.pitch(), 50, null);
+                ActionPlan.Interaction inter = armed.plan().interaction();
+                Rotations.requestPreMovement(inter.yaw(), inter.pitch(), 50, null);
             }
         }
     }
 
     /**
-     * 选择最佳放置计划（舒适度评分版）
+     * 选择最佳动作计划（两阶段优先级版）
      *
-     * 不再使用"第一个最近可用"策略，而是：
-     * 1. 对所有候选 resolve，计算 hitVec / yaw
-     * 2. 综合距离、yaw 差、sneak 成本、物品切换成本、reach 边界风险打分
-     * 3. 选分数最低的候选尝试执行
-     *
-     * 这样打印机会优先选择"放起来最舒服"的块，而不是"最近的块"。
+     * 改进点（相对旧版）：
+     * 1. 扫描阶段只生成 Task，不做 resolve（避免双重 resolve）
+     * 2. 由 Behavior 统一生成 ActionPlan（支持 PlaceBlock、UseBlock 等多种动作）
+     * 3. 两阶段选择：先找"已就绪"的，再找"需要准备"的（不再因 sneak 切换浪费整 tick）
+     * 4. SneakPolicy 三态：对 UseBlock 正确处理"必须不潜行"
      */
-    private PlacementPlan selectBestPlan(WorldSchematic worldSchematic) {
-        // 如果本 tick 刚做过背包→热栏转移，跳过（等待 1 tick 同步）
+    private ArmedAction selectBestAction(WorldSchematic worldSchematic) {
+        // 如果本 tick 刚做过背包→热栏转移，跳过
         if (ItemSwitchHelper.didInventoryTransferThisTick()) {
             ItemSwitchHelper.resetTransferFlag();
             return null;
         }
 
-        // Phase 1: 对所有候选做纯计算评分（无副作用）
-        record ScoredCandidate(BlockPos pos, Item item, BlockState requiredState,
-                               PlacementOption option, boolean needsSneak, double score) {}
-
-        List<ScoredCandidate> scored = new ArrayList<>();
+        boolean strict = placeMode.get() == PlaceMode.STRICT;
+        boolean checkLos = strict && checkLineOfSight.get();
+        double maxReach = placeRange.get();
         float renderYaw = mc.player.getYaw();
         Vec3d eyePos = mc.player.getEyePos();
-        double maxReach = placeRange.get();
 
-        for (BlockPos pos : placePositions) {
-            Item item = placeItems.get(pos);
-            BlockState requiredState = worldSchematic.getBlockState(pos);
-            if (item == null || requiredState == null) continue;
+        // Phase 1: 对任务调用 Behavior 生成计划并评分（无副作用）
+        record ScoredCandidate(ActionPlan plan, double score) {}
 
-            // 解析放置方向（只 resolve 一次）
-            PlacementOption option = resolvePlacement(pos, requiredState);
-            if (option == null || option.hitVec() == null) continue;
+        List<ScoredCandidate> scored = new ArrayList<>();
+        int maxCandidates = 30; // 限制计划数量，控制性能
+        int planned = 0;
 
-            Vec3d hitVec = option.hitVec();
+        for (PrinterTask task : tasks) {
+            if (planned >= maxCandidates) break;
+
+            PrinterBehavior behavior = PrinterBehavior.find(task);
+            if (behavior == null) continue;
+
+            ActionPlan plan = behavior.plan(task, mc, strict, checkLos, maxReach);
+            if (plan == null) continue;
+            planned++;
+
+            ActionPlan.Interaction inter = plan.interaction();
+            Vec3d hitVec = inter.hitVec();
             double dist2 = eyePos.squaredDistanceTo(hitVec);
 
             // 计算 yaw 差
-            float yaw = (float) Rotations.getYaw(hitVec);
-            float yawDelta = Math.abs(MathHelper.wrapDegrees(yaw - renderYaw));
+            float yawDelta = Math.abs(MathHelper.wrapDegrees(inter.yaw() - renderYaw));
 
             // sneak / 物品切换成本
-            BlockPos interactPos = option.getInteractPos(pos);
-            BlockState interactState = mc.world.getBlockState(interactPos);
-            boolean needsSneak = BlockUtilHelper.SNEAK_BLOCKS.contains(interactState.getBlock());
-            boolean needsItemSwitch = mc.player.getMainHandStack().getItem() != item
-                && mc.player.getOffHandStack().getItem() != item;
+            double sneakCost = switch (plan.sneakPolicy()) {
+                case KEEP_CURRENT -> 0.0;
+                case REQUIRE_SNEAK -> 1.5;
+                case REQUIRE_NOT_SNEAK -> 0.3;
+            };
+
+            boolean needsItemSwitch = plan.requiredItem() != null
+                && plan.handPolicy() != HandPolicy.KEEP_CURRENT
+                && mc.player.getMainHandStack().getItem() != plan.requiredItem()
+                && mc.player.getOffHandStack().getItem() != plan.requiredItem();
 
             // reach 边界风险
             double reachDist = eyePos.distanceTo(hitVec);
@@ -400,60 +396,72 @@ public class Printer extends Module {
             // 综合评分 (越低越好)
             double score = dist2 * 1.0
                 + yawDelta * 0.08
-                + (needsSneak ? 1.5 : 0.0)
+                + sneakCost
                 + (needsItemSwitch ? 1.0 : 0.0)
                 + (nearReachEdge ? 1.2 : 0.0);
 
-            scored.add(new ScoredCandidate(pos, item, requiredState, option, needsSneak, score));
+            scored.add(new ScoredCandidate(plan, score));
         }
 
-        // Phase 2: 按评分排序，依次尝试执行（物品/潜行有副作用）
         scored.sort(Comparator.comparingDouble(ScoredCandidate::score));
 
-        for (ScoredCandidate candidate : scored) {
-            // 尝试确保物品就绪
-            Hand hand = ensureItemReadyAndGetHand(candidate.item());
+        // Phase 2: 先找"已就绪"的候选（无副作用，本 tick 立即执行）
+        for (ScoredCandidate c : scored) {
+            Hand hand = getReadyHand(c.plan);
+            if (hand != null && isSneakStateOk(c.plan.sneakPolicy())) {
+                return new ArmedAction(c.plan, hand);
+            }
+        }
+
+        // Phase 3: 找"需要准备"的候选（有副作用：切物品/切潜行）
+        for (ScoredCandidate c : scored) {
+            Hand hand = ensureItemAndGetHand(c.plan);
             if (hand == null) continue;
 
-            // 尝试确保潜行状态就绪
-            if (!ensureSneakReady(candidate.needsSneak())) {
-                // 潜行状态刚切换，本 tick 不放（等服务端同步）
-                return null;
-            }
-
-            // 物品和潜行都就绪，生成不可变的 plan
-            Vec3d hitVec = candidate.option().hitVec();
-            float yaw = (float) Rotations.getYaw(hitVec);
-            float pitch = (float) Rotations.getPitch(hitVec);
-            BlockPos interactPos = candidate.option().getInteractPos(candidate.pos());
-            boolean selfPlacement = interactPos.equals(candidate.pos());
-
-            return new PlacementPlan(
-                candidate.pos(),
-                interactPos,
-                candidate.option().getClickedFace(),
-                hitVec,
-                yaw,
-                pitch,
-                candidate.item(),
-                hand,
-                candidate.requiredState(),
-                mc.player.getEyePos(),
-                candidate.needsSneak(),
-                selfPlacement
-            );
+            SneakReadiness sr = prepareSneakState(c.plan.sneakPolicy());
+            if (sr == SneakReadiness.READY) return new ArmedAction(c.plan, hand);
+            if (sr == SneakReadiness.PREPARING) return null; // 等下一 tick 同步
+            // BLOCKED: 用户手动潜行，跳过这个候选，尝试下一个
         }
+
         return null;
     }
 
+    // ==================== 手部与潜行就绪检查 ====================
+
     /**
-     * 确保目标物品在手中，并返回使用哪只手
-     * @return 可用的 Hand，如果无法就绪返回 null
+     * 检查当前手是否已经持有目标物品（纯检查，无副作用）
      */
-    private Hand ensureItemReadyAndGetHand(Item item) {
-        if (mc.player.getMainHandStack().getItem() == item) return Hand.MAIN_HAND;
-        if (mc.player.getOffHandStack().getItem() == item) return Hand.OFF_HAND;
-        // 尝试切换到主手
+    private Hand getReadyHand(ActionPlan plan) {
+        if (plan.handPolicy() == HandPolicy.KEEP_CURRENT) return Hand.MAIN_HAND;
+        Item item = plan.requiredItem();
+        if (item == null) return Hand.MAIN_HAND;
+        return switch (plan.handPolicy()) {
+            case KEEP_CURRENT -> Hand.MAIN_HAND;
+            case ANY_HAND_WITH_ITEM -> {
+                if (mc.player.getMainHandStack().getItem() == item) yield Hand.MAIN_HAND;
+                if (mc.player.getOffHandStack().getItem() == item) yield Hand.OFF_HAND;
+                yield null;
+            }
+            case REQUIRE_MAIN_HAND ->
+                mc.player.getMainHandStack().getItem() == item ? Hand.MAIN_HAND : null;
+            case REQUIRE_OFF_HAND ->
+                mc.player.getOffHandStack().getItem() == item ? Hand.OFF_HAND : null;
+        };
+    }
+
+    /**
+     * 尝试确保物品在手中（可能有切换副作用）
+     */
+    private Hand ensureItemAndGetHand(ActionPlan plan) {
+        Hand ready = getReadyHand(plan);
+        if (ready != null) return ready;
+
+        // 尝试切换
+        Item item = plan.requiredItem();
+        if (item == null) return null;
+        if (plan.handPolicy() == HandPolicy.REQUIRE_OFF_HAND) return null;
+
         if (ItemSwitchHelper.switchToItem(item, true, false)
             && ItemSwitchHelper.isItemInMainHand(item)) {
             return Hand.MAIN_HAND;
@@ -462,20 +470,41 @@ public class Printer extends Module {
     }
 
     /**
-     * 确保潜行状态满足要求
-     * @return true 如果潜行状态已经正确（无需等待同步）
+     * 纯检查当前潜行状态是否满足策略（无副作用）
      */
-    private boolean ensureSneakReady(boolean needsSneak) {
-        if (needsSneak && !mc.player.isSneaking()) {
-            mc.options.sneakKey.setPressed(true);
-            didPrinterForceSneak = true;
-            return false; // 刚按下，等下一 tick 同步
-        } else if (!needsSneak && didPrinterForceSneak && mc.player.isSneaking()) {
-            mc.options.sneakKey.setPressed(false);
-            didPrinterForceSneak = false;
-            return false; // 刚松开，等下一 tick 同步
-        }
-        return true; // 状态已满足
+    private boolean isSneakStateOk(SneakPolicy policy) {
+        return switch (policy) {
+            case KEEP_CURRENT -> true;
+            case REQUIRE_SNEAK -> mc.player.isSneaking();
+            case REQUIRE_NOT_SNEAK -> !mc.player.isSneaking();
+        };
+    }
+
+    /**
+     * 准备潜行状态（可能有副作用）
+     *
+     * @return READY=已满足, PREPARING=刚切换需等待同步, BLOCKED=用户手动潜行无法覆盖
+     */
+    private SneakReadiness prepareSneakState(SneakPolicy policy) {
+        return switch (policy) {
+            case KEEP_CURRENT -> SneakReadiness.READY;
+            case REQUIRE_SNEAK -> {
+                if (mc.player.isSneaking()) yield SneakReadiness.READY;
+                mc.options.sneakKey.setPressed(true);
+                didPrinterForceSneak = true;
+                yield SneakReadiness.PREPARING;
+            }
+            case REQUIRE_NOT_SNEAK -> {
+                if (!mc.player.isSneaking()) yield SneakReadiness.READY;
+                if (didPrinterForceSneak) {
+                    mc.options.sneakKey.setPressed(false);
+                    didPrinterForceSneak = false;
+                    yield SneakReadiness.PREPARING;
+                }
+                // 用户手动潜行，不擅自改玩家输入
+                yield SneakReadiness.BLOCKED;
+            }
+        };
     }
 
     // ==================== 阶段 2: SendMovementPacketsEvent.Post 执行放置 ====================
@@ -491,277 +520,185 @@ public class Printer extends Module {
      */
     @EventHandler
     private void onSendMovementPacketsPost(SendMovementPacketsEvent.Post event) {
-        if (armedPlan != null && mc.player != null) {
-            // 验证 plan 是否仍然有效
-            if (isPlanStillValid(armedPlan)) {
-                placeBlockInternal(armedPlan);
+        if (armed != null && mc.player != null) {
+            if (isPlanStillValid(armed)) {
+                executePlan(armed);
             }
-            armedPlan = null;
-            // 渲染态 (lastPlan/lastHitVec) 由 tickRenderState 管理，不在此清除
+            armed = null;
         }
     }
 
     /**
-     * 验证 PlacementPlan 在执行时是否仍然有效
+     * 验证动作计划在执行时是否仍然有效
      * 使用当前 eyePos 重新验证几何条件，防止 movement 后 plan 过期
      */
-    private boolean isPlanStillValid(PlacementPlan plan) {
+    private boolean isPlanStillValid(ArmedAction armed) {
         if (mc.player == null || mc.world == null) return false;
 
-        // 1. 目标仍然需要放置（未被满足/占用）
-        if (isTargetAlreadySatisfied(plan)) return false;
-
-        // 2. 交互块仍然可用
-        if (!isInteractStillValid(plan)) return false;
-
-        // 3. 手里确实还是这件物品
-        if (!isPlanHandStillHoldingItem(plan)) return false;
-
-        // 4. sneak 条件满足
-        if (plan.needsSneak() && !mc.player.isSneaking()) return false;
-
-        // 5. 使用当前 eyePos 重新验证几何合法性
+        ActionPlan plan = armed.plan();
+        Hand hand = armed.hand();
+        ActionPlan.Interaction inter = plan.interaction();
         Vec3d currentEye = mc.player.getEyePos();
 
-        // Reach 检查
-        if (currentEye.distanceTo(plan.hitVec()) > placeRange.get() + 0.1) return false;
+        // 1. 通用几何验证：Reach
+        if (currentEye.distanceTo(inter.hitVec()) > placeRange.get() + 0.1) return false;
 
+        // 2. 通用几何验证：NCP + LOS (STRICT mode)
         if (placeMode.get() == PlaceMode.STRICT) {
-            // NCP 方向检查
-            if (!BlockUtilHelper.getPlaceDirectionsNCP(currentEye, plan.hitVec())
-                    .contains(plan.clickedFace())) {
+            if (!BlockUtilHelper.getPlaceDirectionsNCP(currentEye, inter.hitVec())
+                    .contains(inter.clickedFace())) {
                 return false;
             }
-
-            // LOS 检查
+            // LOS: PlaceBlock 需要 targetPos 豁免，UseBlock 不需要
+            BlockPos losTarget = (plan instanceof ActionPlan.PlaceBlock) ? plan.targetPos() : null;
             if (checkLineOfSight.get()
                 && !BlockUtilHelper.canSeeFacePoint(
-                    plan.interactPos(),
-                    plan.clickedFace(),
-                    plan.hitVec(),
-                    mc.world,
-                    mc.player,
-                    plan.targetPos())) {
+                    inter.interactPos(), inter.clickedFace(), inter.hitVec(),
+                    mc.world, mc.player, losTarget)) {
                 return false;
             }
+        }
+
+        // 3. 通用：潜行条件
+        switch (plan.sneakPolicy()) {
+            case REQUIRE_SNEAK -> { if (!mc.player.isSneaking()) return false; }
+            case REQUIRE_NOT_SNEAK -> { if (mc.player.isSneaking()) return false; }
+            case KEEP_CURRENT -> {}
+        }
+
+        // 4. 类型特定验证
+        return switch (plan) {
+            case ActionPlan.PlaceBlock pb -> isPlaceBlockStillValid(pb, hand);
+            case ActionPlan.UseBlock ub -> isUseBlockStillValid(ub, hand);
+        };
+    }
+
+    private boolean isPlaceBlockStillValid(ActionPlan.PlaceBlock plan, Hand hand) {
+        ActionPlan.Interaction inter = plan.interaction();
+
+        // 目标不再需要放置
+        BlockState current = mc.world.getBlockState(plan.targetPos());
+        if (current.getBlock() == plan.desiredState().getBlock()) {
+            if (current.getBlock() instanceof SlabBlock
+                && current.contains(SlabBlock.TYPE)
+                && plan.desiredState().contains(SlabBlock.TYPE)) {
+                SlabType currentType = current.get(SlabBlock.TYPE);
+                SlabType requiredType = plan.desiredState().get(SlabBlock.TYPE);
+                if (!(requiredType == SlabType.DOUBLE && currentType != SlabType.DOUBLE)) {
+                    return false; // 已满足
+                }
+            } else {
+                return false; // 已满足
+            }
+        }
+
+        // 交互块仍然可用
+        if (!inter.selfInteraction()) {
+            if (!BlockUtilHelper.isClickable(mc.world.getBlockState(inter.interactPos()), mc.world, inter.interactPos()))
+                return false;
+        } else {
+            BlockState cs = mc.world.getBlockState(plan.targetPos());
+            if (!(cs.getBlock() instanceof SlabBlock)) return false;
+            if (!cs.contains(SlabBlock.TYPE)) return false;
+            if (cs.get(SlabBlock.TYPE) == SlabType.DOUBLE) return false;
+        }
+
+        // 手里还是目标物品
+        Item inHand = (hand == Hand.MAIN_HAND)
+            ? mc.player.getMainHandStack().getItem()
+            : mc.player.getOffHandStack().getItem();
+        return inHand == plan.requiredItem();
+    }
+
+    private boolean isUseBlockStillValid(ActionPlan.UseBlock plan, Hand hand) {
+        BlockState current = mc.world.getBlockState(plan.targetPos());
+
+        // 方块还在且类型对
+        if (current.getBlock() != plan.desiredState().getBlock()) return false;
+
+        // 方块仍然可点击
+        if (!BlockUtilHelper.isClickable(current, mc.world, plan.targetPos())) return false;
+
+        // 如果需要特定物品，检查手中
+        if (plan.requiredItem() != null) {
+            Item inHand = (hand == Hand.MAIN_HAND)
+                ? mc.player.getMainHandStack().getItem()
+                : mc.player.getOffHandStack().getItem();
+            if (inHand != plan.requiredItem()) return false;
         }
 
         return true;
     }
 
     /**
-     * 检查目标位置是否已经被满足（不再需要放置）
+     * 执行动作计划
+     * PlaceBlock 和 UseBlock 在 Minecraft 协议层面都走 interactBlock。
+     * 未来 UseItemPlan 会走 interactItem。
      */
-    private boolean isTargetAlreadySatisfied(PlacementPlan plan) {
-        BlockState current = mc.world.getBlockState(plan.targetPos());
-        BlockState required = plan.requiredState();
-
-        // 如果目标已经就是所需状态，说明已经放好了
-        if (current.getBlock() == required.getBlock()) {
-            // 半砖升级的特殊处理
-            if (current.getBlock() instanceof SlabBlock
-                && current.contains(SlabBlock.TYPE)
-                && required.contains(SlabBlock.TYPE)) {
-                SlabType currentType = current.get(SlabBlock.TYPE);
-                SlabType requiredType = required.get(SlabBlock.TYPE);
-                if (requiredType == SlabType.DOUBLE && currentType != SlabType.DOUBLE) {
-                    return false; // 仍然需要升级
-                }
-            }
-            return true; // 已满足
-        }
-        return false;
-    }
-
-    /**
-     * 检查交互方块是否仍然可用
-     */
-    private boolean isInteractStillValid(PlacementPlan plan) {
-        BlockState interactState = mc.world.getBlockState(plan.interactPos());
-
-        if (!plan.selfPlacement()) {
-            return BlockUtilHelper.isClickable(interactState, mc.world, plan.interactPos());
-        }
-
-        // selfPlacement: 当前 target 仍然必须是允许 self 的状态（单层半砖）
-        BlockState current = mc.world.getBlockState(plan.targetPos());
-        if (!(current.getBlock() instanceof SlabBlock)) return false;
-        if (!current.contains(SlabBlock.TYPE)) return false;
-        return current.get(SlabBlock.TYPE) != SlabType.DOUBLE;
-    }
-
-    /**
-     * 检查计划中的手是否仍然持有目标物品
-     */
-    private boolean isPlanHandStillHoldingItem(PlacementPlan plan) {
-        if (plan.hand() == Hand.MAIN_HAND) {
-            return mc.player.getMainHandStack().getItem() == plan.item();
-        } else {
-            return mc.player.getOffHandStack().getItem() == plan.item();
-        }
-    }
-
-    /**
-     * 使用规则引擎解析指定位置的放置选项
-     * 只 resolve 一次，生成包含 hitVec 的完整 PlacementOption。
-     */
-    private PlacementOption resolvePlacement(BlockPos pos, BlockState requiredState) {
-        boolean strict = placeMode.get() == PlaceMode.STRICT;
-        boolean checkLos = strict && checkLineOfSight.get();
-        PlacementContext ctx = PlacementContext.of(mc.world, pos, requiredState, mc.player, strict, checkLos, placeRange.get());
-        return ResolverRegistry.resolve(ctx);
-    }
-
-    /**
-     * 执行方块放置
-     * 直接使用 plan 中预计算好的参数，不再重新 resolve。
-     *
-     * @param plan 完整的放置计划（包含手、位置、面、hitVec）
-     */
-    private void placeBlockInternal(PlacementPlan plan) {
-        BlockHitResult hitResult = new BlockHitResult(plan.hitVec(), plan.clickedFace(), plan.interactPos(), false);
-        ActionResult result = mc.interactionManager.interactBlock(mc.player, plan.hand(), hitResult);
+    private void executePlan(ArmedAction armed) {
+        ActionPlan.Interaction inter = armed.plan().interaction();
+        BlockHitResult hitResult = new BlockHitResult(
+            inter.hitVec(), inter.clickedFace(), inter.interactPos(), false);
+        ActionResult result = mc.interactionManager.interactBlock(
+            mc.player, armed.hand(), hitResult);
 
         if (result.isAccepted()) {
             if (swingHand.get()) {
-                mc.player.swingHand(plan.hand());
+                mc.player.swingHand(armed.hand());
             } else {
-                mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(plan.hand()));
+                mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(armed.hand()));
             }
         }
     }
 
     /**
-     * 更新需要放置方块的位置列表
-     * 从Litematica原理图和世界进行对比，找出所有需要放置的方块
+     * 更新任务列表：扫描蓝图与世界差异
      *
-     * [改进] 现在使用浮点数范围 + 预选距离+1的逻辑 + Reach 过滤的两层过滤：
-     * 1. 初始球形范围：range + 1.0（预选阶段）
-     * 2. Reach 过滤：在 Rules 中对 hitVec 进行精确检查
+     * 改进点（相对旧版 updatePlacePositions）：
+     * 1. 不再维护 placePositions + placeItems 两个平行容器，改用 PrinterTask 列表
+     * 2. 不再在扫描阶段做 ResolverRegistry.canPlace（避免双重 resolve）
+     * 3. "已满足"的判断交给 PrinterBehavior.isSatisfied（支持状态修正类任务）
+     * 4. 同 block 但状态不对的情况不再被跳过（如 repeater delay 不一致）
      */
-    private void updatePlacePositions(WorldSchematic worldSchematic) {
-        placePositions.clear();
-        placeItems.clear();
+    private void updateTasks(WorldSchematic worldSchematic) {
+        tasks.clear();
 
-        if (mc.player == null || mc.world == null)
-            return;
+        if (mc.player == null || mc.world == null) return;
 
         Vec3d playerPos = mc.player.getEyePos();
         double range = placeRange.get();
-
-        // 【改进】预选范围 = 配置范围 + 1.0
-        // 这样可以提前把接近边界但 reach 不足的方块排除
         double preSelectionRange = range + 1.0;
 
-        // 获取玩家周围球形范围内的所有方块位置
         List<BlockPos> sphere = getSphere(preSelectionRange, playerPos);
 
         for (BlockPos pos : sphere) {
-            // 检查是否在渲染层范围内
-            if (!DataManager.getRenderLayerRange().isPositionWithinRange(pos)) {
-                continue;
-            }
+            if (!DataManager.getRenderLayerRange().isPositionWithinRange(pos)) continue;
 
-            // 从原理图获取目标方块状态
             BlockState requiredState = worldSchematic.getBlockState(pos);
-            // 从世界获取当前方块状态
             BlockState currentState = mc.world.getBlockState(pos);
 
-            // 原理图要求是空气，跳过
-            if (requiredState.isAir()) {
-                continue;
-            }
+            // 蓝图要求空气，跳过
+            if (requiredState.isAir()) continue;
 
-            // 定义一个标记，用于指示是否为半砖升级操作
-            // 如果是升级操作，我们需要绕过后面的 isReplaceable 检查
-            boolean isSlabUpgrade = false;
+            PrinterTask task = new PrinterTask(pos, requiredState, currentState);
 
-            // 方块已经正确放置（相同类型的方块），跳过
-            // [关键修复] 之前的 `getBlock()` 比较无法处理半砖升级 (e.g. BOTTOM -> DOUBLE)
-            // 现在，如果 Block 类型相同，我们额外检查半砖状态。
-            if (requiredState.getBlock() == currentState.getBlock()) {
-                // 如果是半砖，检查是否需要升级
-                if (requiredState.getBlock() instanceof SlabBlock &&
-                        requiredState.contains(SlabBlock.TYPE) &&
-                        currentState.contains(SlabBlock.TYPE)) {
+            // 查找匹配的行为
+            PrinterBehavior behavior = PrinterBehavior.find(task);
+            if (behavior == null) continue;
 
-                    SlabType requiredType = requiredState.get(SlabBlock.TYPE);
-                    SlabType currentType = currentState.get(SlabBlock.TYPE);
+            // 已经满足？
+            if (behavior.isSatisfied(task)) continue;
 
-                    // 如果需要双层，但当前不是双层，则允许放置（让 BlockUtil 去处理）
-                    if (requiredType == SlabType.DOUBLE && currentType != SlabType.DOUBLE) {
-                        isSlabUpgrade = true; // [标记] 这是一个合法的升级操作
-                    } else {
-                        // 否则，我们认为它已经放置好了
-                        continue;
-                    }
-                } else {
-                    // 对于非半砖方块，如果 Block 类型相同，就认为已经放置
-                    continue;
-                }
-            }
+            // 实体阻挡检查（仅对放置类行为有意义）
+            if (behavior instanceof BlockPlacementBehavior && hasBlockingEntity(pos)) continue;
 
-            // 只跳过纯水/岩浆，不跳过含水方块
-            if (requiredState.getBlock() instanceof FluidBlock) {
-                continue;
-            }
-
-            // 检查当前位置是否可以被替换
-            // 只有空气、流体和可替换方块才能被放置覆盖
-            // 如果不是半砖升级操作，则必须检查当前位置是否为空或可替换
-            if (!isSlabUpgrade) {
-                boolean isCurrentLiquid = currentState.getFluidState() != null
-                        && !currentState.getFluidState().isEmpty();
-                // 如果当前位置既不是空气，也不是流体，也不可替换（如石头），则跳过
-                if (!currentState.isAir() && !isCurrentLiquid && !currentState.isReplaceable()) {
-                    continue;
-                }
-            }
-
-            // 检查是否有实体阻挡
-            if (hasBlockingEntity(pos)) {
-                continue;
-            }
-
-            // 获取该方块对应的物品
-            Item item = requiredState.getBlock().asItem();
-            if (item == Items.AIR) {
-                continue;
-            }
-
-            // 检查物品栏中是否有该物品（包括背包）
-            // 关键修复：使用 find() 而不是 findInHotbar()，允许背包物品
-            if (!InvUtils.find(item).found()) {
-                continue;
-            }
-
-            // ==================== 模式特定的检查 ====================
-
-            if (placeMode.get() == PlaceMode.LEGIT) {
-                // LEGIT模式：使用标准的BlockUtils.canPlace检查
-                // 这个方法会检查邻接、碰撞、方块支撑等基础检查
-                if (!BlockUtils.canPlace(pos)) {
-                    continue;
-                }
-            } else {
-                // STRICT 模式：使用规则引擎检查是否存在合法的放置方向
-                // [改进] 规则引擎内部现在包含了 Reach 过滤器，会对 hitVec 进行精确检查
-                PlacementContext ctx = PlacementContext.of(mc.world, pos, requiredState, mc.player,
-                        true, checkLineOfSight.get(), placeRange.get());
-
-                if (!ResolverRegistry.canPlace(ctx)) {
-                    continue;
-                }
-            }
-
-            // 将该位置加入放置列表
-            placePositions.add(pos);
-            placeItems.put(pos, item);
+            tasks.add(task);
         }
 
         // 按距离排序（最近的优先）
-        placePositions.sort(Comparator.comparingDouble(
-                pos -> mc.player.getEyePos().squaredDistanceTo(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5)));
+        tasks.sort(Comparator.comparingDouble(
+            task -> mc.player.getEyePos().squaredDistanceTo(
+                task.pos().getX() + 0.5, task.pos().getY() + 0.5, task.pos().getZ() + 0.5)));
     }
 
     /**
@@ -854,9 +791,9 @@ public class Printer extends Module {
         if (!isActive() || !render.get()) return;
 
         // 候选方块（淡绿色，排除当前计划目标）
-        for (BlockPos pos : placePositions) {
-            if (lastPlan != null && pos.equals(lastPlan.targetPos())) continue;
-            event.renderer.box(pos, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
+        for (PrinterTask task : tasks) {
+            if (lastPlan != null && task.pos().equals(lastPlan.targetPos())) continue;
+            event.renderer.box(task.pos(), sideColor.get(), lineColor.get(), shapeMode.get(), 0);
         }
 
         // 当前计划目标（醒目青色高亮）
@@ -915,17 +852,17 @@ public class Printer extends Module {
         event.renderer.box(box, color70, color70, ShapeMode.Both, 0);
 
         // 第二层：禁用深度测试，绘制30%不透明度的立方体（始终可见）
-        RenderSystem.disableDepthTest();
+        GL.disableDepth();
         event.renderer.box(box, color30, color30, ShapeMode.Both, 0);
-        RenderSystem.enableDepthTest();
+        GL.enableDepth();
     }
 
     @Override
     public String getInfoString() {
-        if (armedPlan != null) {
-            return "ARMED (" + placePositions.size() + ")";
+        if (armed != null) {
+            return "ARMED (" + tasks.size() + ")";
         }
-        return String.valueOf(placePositions.size());
+        return String.valueOf(tasks.size());
     }
 
     /**
