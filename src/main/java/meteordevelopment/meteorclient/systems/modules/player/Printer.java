@@ -264,7 +264,8 @@ public class Printer extends Module {
             || behavior instanceof FenceGateBehavior
             || behavior instanceof DaylightDetectorBehavior) return fixInteractableState.get();
         // 流体放置
-        if (behavior instanceof WaterBehavior) return placeWater.get();
+        if (behavior instanceof WaterBehavior
+            || behavior instanceof WaterlogBehavior) return placeWater.get();
         return false;
     }
 

@@ -53,7 +53,8 @@ public interface PrinterBehavior {
      * 1-3. 红石状态修正（repeater delay / comparator mode / wire dot-cross）
      * 4-7. 可交互方块状态修正（trapdoor / door / fence gate / daylight detector）
      * 8.   流体放置（water/lava bucket）
-     * 9.   通用方块放置（fallback）
+     * 9.   方块含水（waterlog with bucket）
+     * 10.  通用方块放置（fallback）
      */
     List<PrinterBehavior> REGISTRY = List.of(
         // 红石组件状态修正
@@ -67,6 +68,8 @@ public interface PrinterBehavior {
         new DaylightDetectorBehavior(),
         // 流体放置
         new WaterBehavior(),
+        // 方块含水
+        new WaterlogBehavior(),
         // 通用放置（fallback）
         new BlockPlacementBehavior()
     );
