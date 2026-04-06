@@ -57,14 +57,27 @@ public class DoorBehavior implements PrinterBehavior {
 
     @Override
     public ActionPlan plan(PrinterTask task, MinecraftClient mc, boolean strict, boolean checkLos, double maxReach) {
+        // 门是两格高方块，点击上半或下半都会同时切换。
+        // task 已 canonical 到 lower half，但交互表面应包括上下两格。
+        // 先尝试下半（canonical 位置），失败再尝试上半。
+        net.minecraft.util.math.BlockPos lowerPos = task.pos();
+        net.minecraft.util.math.BlockPos upperPos = lowerPos.up();
+
         ActionPlan.Interaction interaction = InteractionPlanner.planSelfInteraction(
-            mc, task.pos(), strict, checkLos, maxReach);
+            mc, lowerPos, strict, checkLos, maxReach);
+        net.minecraft.util.math.BlockPos interactPos = lowerPos;
+
+        if (interaction == null) {
+            interaction = InteractionPlanner.planSelfInteraction(
+                mc, upperPos, strict, checkLos, maxReach);
+            interactPos = upperPos;
+        }
         if (interaction == null) return null;
 
         boolean desiredOpen = task.desiredState().get(Properties.OPEN);
 
         return new ActionPlan.UseBlock(
-            task.pos(),
+            interactPos,
             task.desiredState(),
             interaction,
             null,
