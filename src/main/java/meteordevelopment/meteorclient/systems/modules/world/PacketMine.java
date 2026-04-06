@@ -89,7 +89,7 @@ public class PacketMine extends Module {
     private final Setting<Boolean> autoSwitch = sgGeneral.add(new BoolSetting.Builder()
         .name("auto-switch")
         .description("Locally switch to the best tool before START and keep it until finished.")
-        .defaultValue(false)
+        .defaultValue(true)
         .build()
     );
 
@@ -121,7 +121,7 @@ public class PacketMine extends Module {
     private final Setting<Boolean> strictMargin = sgGeneral.add(new BoolSetting.Builder()
         .name("strict-margin")
         .description("Wait one additional tick before STOP for extra safety.")
-        .defaultValue(true)
+        .defaultValue(false)
         .build()
     );
 
@@ -510,7 +510,7 @@ public class PacketMine extends Module {
                     sendStopPacket(blockPos, direction);
                     mining = true;
                     progress = 1.0;
-                    globalCooldown = postBreakCooldown.get();
+                    // 瞬破方块不套 postBreakCooldown，避免软方块吞吐大幅下降
                     phase = Phase.FINISHED;
                     clearRotationState();
                 };
