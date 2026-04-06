@@ -959,6 +959,63 @@ public final class Rules {
         return true;
     };
 
+    // ==================== 多格方块扩展检查 ====================
+
+    /**
+     * 过滤器：门放置扩展检查 (DOOR_EXPANSION_CHECK)
+     *
+     * 门是两格高方块，放置时：
+     * - lower 锚点需要下方有实心支撑（已由 canPlaceAt 检查）
+     * - upper（锚点上方一格）必须可替换（空气/流体等）
+     *
+     * 原版 DoorBlock.getPlacementState() 中的检查：
+     *   blockPos.getY() < world.getTopYInclusive() &&
+     *   world.getBlockState(blockPos.up()).canReplace(ctx)
+     *
+     * 此 filter 模拟该检查，确保上方一格不被占用。
+     */
+    public static final CandidateFilter DOOR_EXPANSION_CHECK = (ctx, opt) -> {
+        BlockPos targetPos = ctx.targetPos();
+        BlockPos upperPos = targetPos.up();
+
+        // 检查高度上限
+        if (targetPos.getY() >= ctx.world().getTopYInclusive()) return false;
+
+        // 检查上方一格是否可替换（空气、流体等可被覆盖的方块）
+        BlockState upperState = ctx.world().getBlockState(upperPos);
+        return upperState.isReplaceable();
+    };
+
+    /**
+     * 过滤器：床放置扩展检查 (BED_EXPANSION_CHECK)
+     *
+     * 床是两格长方块，放置时：
+     * - foot 在选中位置（placementPos）
+     * - head 在玩家朝向（FACING 属性）前方一格
+     * - head 位置必须可替换
+     *
+     * 原版 BedBlock.getPlacementState() 中的检查：
+     *   world.getBlockState(blockPos2).canReplace(ctx) &&
+     *   world.getWorldBorder().contains(blockPos2)
+     * 其中 blockPos2 = blockPos.offset(playerFacing)
+     *
+     * 此 filter 模拟该检查，确保 head 位置不被占用。
+     * 注意：FACING 属性指向床头方向，即玩家放置时的朝向。
+     */
+    public static final CandidateFilter BED_EXPANSION_CHECK = (ctx, opt) -> {
+        if (!ctx.hasProperty(BedBlock.FACING)) return true;
+
+        Direction facing = ctx.getProperty(BedBlock.FACING);
+        BlockPos headPos = ctx.targetPos().offset(facing);
+
+        // 检查 head 位置是否可替换
+        BlockState headState = ctx.world().getBlockState(headPos);
+        if (!headState.isReplaceable()) return false;
+
+        // 检查世界边界（原版也做了这个检查）
+        return ctx.world().getWorldBorder().contains(headPos);
+    };
+
     // ==================== HitVecCalculators (点击位置计算器) ====================
 
     /**

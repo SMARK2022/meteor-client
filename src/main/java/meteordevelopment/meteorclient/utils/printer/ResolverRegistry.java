@@ -300,6 +300,48 @@ public final class ResolverRegistry {
             .hitVec(Rules.CENTER);
 
     /**
+     * 门放置策略（DoorBlock 专用）
+     *
+     * 门是两格高方块，放置时：
+     * - 朝向 = 玩家视线反方向（Opposite）
+     * - lower 位置下方需要实心支撑（由 canPlaceAt 保证）
+     * - upper 位置（锚点上方一格）必须可替换
+     *
+     * 相比通用 HORIZONTAL_OPPOSITE，增加了 DOOR_EXPANSION_CHECK。
+     */
+    public static final PlacementResolver DOOR_RESOLVER = PlacementResolver.create("door")
+            .addSource(Rules.ALL_DIRECTIONS)
+            .addFilter(Rules.CLICKABLE_NEIGHBOR)
+            .addFilter(Rules.ROTATION_CHECK_OPPOSITE) // 反向旋转
+            .addFilter(Rules.DOOR_EXPANSION_CHECK) // 检查上方一格可替换
+            .addFilter(Rules.PLACEABILITY_CHECK)
+            .addFilter(Rules.NCP_STRICT)
+            .addFilter(Rules.LINE_OF_SIGHT)
+            .addFilter(Rules.REACH_CHECK)
+            .hitVec(Rules.CENTER);
+
+    /**
+     * 床放置策略（BedBlock 专用）
+     *
+     * 床是两格长方块，放置时：
+     * - 朝向 = 玩家视线方向（Same），即 FACING 指向床头
+     * - foot 在 placementPos（选中的格子）
+     * - head 在 FACING 方向前方一格，该位置必须可替换
+     *
+     * 相比通用 HORIZONTAL_SAME，增加了 BED_EXPANSION_CHECK。
+     */
+    public static final PlacementResolver BED_RESOLVER = PlacementResolver.create("bed")
+            .addSource(Rules.ALL_DIRECTIONS)
+            .addFilter(Rules.CLICKABLE_NEIGHBOR)
+            .addFilter(Rules.ROTATION_CHECK_SAME) // 同向旋转
+            .addFilter(Rules.BED_EXPANSION_CHECK) // 检查 head 位置可替换
+            .addFilter(Rules.PLACEABILITY_CHECK)
+            .addFilter(Rules.NCP_STRICT)
+            .addFilter(Rules.LINE_OF_SIGHT)
+            .addFilter(Rules.REACH_CHECK)
+            .hitVec(Rules.CENTER);
+
+    /**
      * 默认方块放置策略
      *
      * 来源：
@@ -383,6 +425,15 @@ public final class ResolverRegistry {
             return WALL_DEGENERATE_RESOLVER;
         }
 
+        // ==================== 多格方块专用策略 ====================
+        // 门和床是多格方块，需要额外的扩展位置检查
+        if (block instanceof DoorBlock) {
+            return DOOR_RESOLVER;
+        }
+        if (block instanceof BedBlock) {
+            return BED_RESOLVER;
+        }
+
         // ==================== 1. 水平反向类 (Opposite) ====================
         // 特征：FACING 属性，且放置时背对玩家 (Face towards player)
         if (block instanceof AbstractChestBlock // 箱子, 陷阱箱, 末影箱
@@ -390,7 +441,6 @@ public final class ResolverRegistry {
                 || block instanceof ComparatorBlock // 红石比较器
                 || block instanceof AbstractFurnaceBlock // 熔炉, 高炉, 烟熏炉
                 || block instanceof FenceGateBlock // 栅栏门
-                || block instanceof DoorBlock // 门 (虽有多重属性，但水平逻辑一致)
                 || block instanceof CarvedPumpkinBlock // 雕刻南瓜, 南瓜灯 (Jack o Lantern)
                 || block instanceof BeehiveBlock // 蜂箱, 蜂巢
                 || block instanceof LoomBlock // 织布机
@@ -409,7 +459,7 @@ public final class ResolverRegistry {
         // ==================== 2. 水平同向类 (Same) ====================
         // 特征：FACING 属性，且放置时面向玩家视线 (Face with player)
         if (block instanceof AnvilBlock // 铁砧 (所有损坏程度)
-                || block instanceof BedBlock // 床
+                // BedBlock 已移至 BED_RESOLVER（需要床头位置扩展检查）
                 // GrindstoneBlock 已移至 FACE_ATTACHED（砂轮有 Wall/Floor/Ceiling 附着面状态）
                 // BellBlock 已移至 FACE_ATTACHED（钟有 Wall/Floor/Ceiling 附着面状态）
         ) {
@@ -517,6 +567,15 @@ public final class ResolverRegistry {
             return WALL_DEGENERATE_RESOLVER;
         }
 
+        // ==================== 多格方块专用策略 ====================
+        // 门和床是多格方块，需要额外的扩展位置检查
+        if (block instanceof DoorBlock) {
+            return DOOR_RESOLVER;
+        }
+        if (block instanceof BedBlock) {
+            return BED_RESOLVER;
+        }
+
         // ==================== 1. 水平反向类 (Opposite) ====================
         // 特征：FACING 属性，且放置时背对玩家 (Face towards player)
         if (block instanceof AbstractChestBlock // 箱子, 陷阱箱, 末影箱
@@ -524,7 +583,6 @@ public final class ResolverRegistry {
                 || block instanceof ComparatorBlock // 红石比较器
                 || block instanceof AbstractFurnaceBlock // 熔炉, 高炉, 烟熏炉
                 || block instanceof FenceGateBlock // 栅栏门
-                || block instanceof DoorBlock // 门 (虽有多重属性，但水平逻辑一致)
                 || block instanceof CarvedPumpkinBlock // 雕刻南瓜, 南瓜灯 (Jack o Lantern)
                 || block instanceof BeehiveBlock // 蜂箱, 蜂巢
                 || block instanceof LoomBlock // 织布机
@@ -543,7 +601,7 @@ public final class ResolverRegistry {
         // ==================== 2. 水平同向类 (Same) ====================
         // 特征：FACING 属性，且放置时面向玩家视线 (Face with player)
         if (block instanceof AnvilBlock // 铁砧 (所有损坏程度)
-                || block instanceof BedBlock // 床
+                // BedBlock 已移至 BED_RESOLVER（需要床头位置扩展检查）
                 // GrindstoneBlock 已移至 FACE_ATTACHED（砂轮有 Wall/Floor/Ceiling 附着面状态）
                 // BellBlock 已移至 FACE_ATTACHED（钟有 Wall/Floor/Ceiling 附着面状态）
         ) {
