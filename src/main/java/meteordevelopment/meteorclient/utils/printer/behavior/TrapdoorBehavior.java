@@ -41,17 +41,17 @@ public class TrapdoorBehavior implements PrinterBehavior {
         if (task.currentState().getBlock() == Blocks.IRON_TRAPDOOR) return false;
 
         // 朝向和半部必须一致
-        if (!propertiesMatch(task, Properties.HORIZONTAL_FACING)) return false;
-        if (!propertiesMatch(task, Properties.BLOCK_HALF)) return false;
+        if (!BlockUtilHelper.propertiesMatch(task, Properties.HORIZONTAL_FACING)) return false;
+        if (!BlockUtilHelper.propertiesMatch(task, Properties.BLOCK_HALF)) return false;
 
         // OPEN 必须不一致
-        return !propertiesMatch(task, Properties.OPEN);
+        return !BlockUtilHelper.propertiesMatch(task, Properties.OPEN);
     }
 
     @Override
     public boolean isSatisfied(PrinterTask task) {
         if (!(task.currentState().getBlock() instanceof TrapdoorBlock)) return false;
-        return propertiesMatch(task, Properties.OPEN);
+        return BlockUtilHelper.propertiesMatch(task, Properties.OPEN);
     }
 
     @Override
@@ -73,9 +73,4 @@ public class TrapdoorBehavior implements PrinterBehavior {
         );
     }
 
-    @SuppressWarnings("unchecked")
-    private static <T extends Comparable<T>> boolean propertiesMatch(PrinterTask task, net.minecraft.state.property.Property<T> prop) {
-        if (!task.desiredState().contains(prop) || !task.currentState().contains(prop)) return false;
-        return task.desiredState().get(prop).equals(task.currentState().get(prop));
-    }
 }

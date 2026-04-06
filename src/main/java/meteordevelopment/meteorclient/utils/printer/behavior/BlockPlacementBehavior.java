@@ -87,11 +87,9 @@ public class BlockPlacementBehavior implements PrinterBehavior {
         BlockPos interactPos = option.getInteractPos(task.pos());
         boolean selfPlacement = interactPos.equals(task.pos());
 
-        // 确定潜行策略
+        // 确定潜行策略（交互目标为 SNEAK_BLOCKS 方块时需要潜行绕过交互）
         var interactState = mc.world.getBlockState(interactPos);
-        ActionPlan.SneakPolicy sneakPolicy = BlockUtilHelper.SNEAK_BLOCKS.contains(interactState.getBlock())
-            ? ActionPlan.SneakPolicy.REQUIRE_SNEAK
-            : ActionPlan.SneakPolicy.KEEP_CURRENT;
+        ActionPlan.SneakPolicy sneakPolicy = BlockUtilHelper.determineSneakPolicy(interactState);
 
         return new ActionPlan.PlaceBlock(
             task.pos(),

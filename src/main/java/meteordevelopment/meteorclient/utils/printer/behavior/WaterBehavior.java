@@ -91,15 +91,12 @@ public class WaterBehavior implements PrinterBehavior {
         // 1. 邻居是交互类方块（箱子等）→ 潜行绕过交互
         // 2. 邻居是可含水方块（台阶/楼梯等）→ 潜行防止水被吸收进邻居
         var interactState = mc.world.getBlockState(interactPos);
-        ActionPlan.SneakPolicy sneakPolicy;
-        if (BlockUtilHelper.SNEAK_BLOCKS.contains(interactState.getBlock())) {
-            sneakPolicy = ActionPlan.SneakPolicy.REQUIRE_SNEAK;
-        } else if (!selfPlacement
+        ActionPlan.SneakPolicy sneakPolicy = BlockUtilHelper.determineSneakPolicy(interactState);
+        if (sneakPolicy == ActionPlan.SneakPolicy.KEEP_CURRENT
+            && !selfPlacement
             && interactState.contains(Properties.WATERLOGGED)
             && !interactState.get(Properties.WATERLOGGED)) {
             sneakPolicy = ActionPlan.SneakPolicy.REQUIRE_SNEAK;
-        } else {
-            sneakPolicy = ActionPlan.SneakPolicy.KEEP_CURRENT;
         }
 
         return new ActionPlan.UseItemOnBlock(

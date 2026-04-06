@@ -36,16 +36,16 @@ public class FenceGateBehavior implements PrinterBehavior {
         if (!(task.currentState().getBlock() instanceof FenceGateBlock)) return false;
 
         // 朝向必须一致
-        if (!propertiesMatch(task, Properties.HORIZONTAL_FACING)) return false;
+        if (!BlockUtilHelper.propertiesMatch(task, Properties.HORIZONTAL_FACING)) return false;
 
         // OPEN 必须不一致
-        return !propertiesMatch(task, Properties.OPEN);
+        return !BlockUtilHelper.propertiesMatch(task, Properties.OPEN);
     }
 
     @Override
     public boolean isSatisfied(PrinterTask task) {
         if (!(task.currentState().getBlock() instanceof FenceGateBlock)) return false;
-        return propertiesMatch(task, Properties.OPEN);
+        return BlockUtilHelper.propertiesMatch(task, Properties.OPEN);
     }
 
     @Override
@@ -67,9 +67,4 @@ public class FenceGateBehavior implements PrinterBehavior {
         );
     }
 
-    @SuppressWarnings("unchecked")
-    private static <T extends Comparable<T>> boolean propertiesMatch(PrinterTask task, net.minecraft.state.property.Property<T> prop) {
-        if (!task.desiredState().contains(prop) || !task.currentState().contains(prop)) return false;
-        return task.desiredState().get(prop).equals(task.currentState().get(prop));
-    }
 }

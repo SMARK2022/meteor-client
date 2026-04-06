@@ -9,7 +9,6 @@ import net.minecraft.world.World;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 
 import java.util.List;
-import java.util.Set;
 
 /**
  * InteractionPlanner - 通用交互几何规划器
@@ -88,26 +87,17 @@ public final class InteractionPlanner {
 
     /**
      * 验证点击点是否满足 reach / NCP / LOS 约束。
-     * 自身交互不需要 targetPos 豁免（与放置不同）。
+     * 自身交互不需要 targetPos 豁免（与放置不同），placementTargetPos 传 null。
      */
     private static boolean isPointValid(
         Vec3d hitVec, Direction face, BlockPos pos,
         Vec3d eyePos, World world, MinecraftClient mc,
         boolean strict, boolean checkLos, double maxReach
     ) {
-        if (eyePos.distanceTo(hitVec) > maxReach + 0.1) return false;
-
-        if (strict) {
-            Set<Direction> validDirs = BlockUtilHelper.getPlaceDirectionsNCP(eyePos, hitVec);
-            if (!validDirs.contains(face)) return false;
-        }
-
-        if (checkLos && !BlockUtilHelper.canSeeFacePoint(
-            pos, face, hitVec, world, mc.player, null)) {
-            return false;
-        }
-
-        return true;
+        return BlockUtilHelper.isPointValid(
+            hitVec, face, pos, eyePos, world, mc.player,
+            strict, checkLos, maxReach, null
+        );
     }
 
     /**

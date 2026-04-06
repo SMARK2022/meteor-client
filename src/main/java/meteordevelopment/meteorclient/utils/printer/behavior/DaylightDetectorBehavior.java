@@ -33,17 +33,13 @@ public class DaylightDetectorBehavior implements PrinterBehavior {
         if (!(task.currentState().getBlock() instanceof DaylightDetectorBlock)) return false;
 
         // INVERTED 必须不一致
-        if (!task.desiredState().contains(Properties.INVERTED)
-            || !task.currentState().contains(Properties.INVERTED)) return false;
-        return !task.desiredState().get(Properties.INVERTED).equals(task.currentState().get(Properties.INVERTED));
+        return !BlockUtilHelper.propertiesMatch(task, Properties.INVERTED);
     }
 
     @Override
     public boolean isSatisfied(PrinterTask task) {
         if (!(task.currentState().getBlock() instanceof DaylightDetectorBlock)) return false;
-        if (!task.desiredState().contains(Properties.INVERTED)
-            || !task.currentState().contains(Properties.INVERTED)) return false;
-        return task.desiredState().get(Properties.INVERTED).equals(task.currentState().get(Properties.INVERTED));
+        return BlockUtilHelper.propertiesMatch(task, Properties.INVERTED);
     }
 
     @Override

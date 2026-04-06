@@ -40,22 +40,17 @@ public class RepeaterDelayBehavior implements PrinterBehavior {
         if (!(task.desiredState().getBlock() instanceof RepeaterBlock)) return false;
         if (!(task.currentState().getBlock() instanceof RepeaterBlock)) return false;
 
-        if (!task.desiredState().contains(Properties.HORIZONTAL_FACING)
-            || !task.currentState().contains(Properties.HORIZONTAL_FACING)) return false;
-        if (task.desiredState().get(Properties.HORIZONTAL_FACING)
-            != task.currentState().get(Properties.HORIZONTAL_FACING)) return false;
+        // 朝向必须一致
+        if (!BlockUtilHelper.propertiesMatch(task, Properties.HORIZONTAL_FACING)) return false;
 
-        if (!task.desiredState().contains(Properties.DELAY)
-            || !task.currentState().contains(Properties.DELAY)) return false;
-        return !task.desiredState().get(Properties.DELAY).equals(task.currentState().get(Properties.DELAY));
+        // DELAY 必须不一致
+        return !BlockUtilHelper.propertiesMatch(task, Properties.DELAY);
     }
 
     @Override
     public boolean isSatisfied(PrinterTask task) {
         if (!(task.currentState().getBlock() instanceof RepeaterBlock)) return false;
-        if (!task.desiredState().contains(Properties.DELAY)
-            || !task.currentState().contains(Properties.DELAY)) return false;
-        return task.desiredState().get(Properties.DELAY).equals(task.currentState().get(Properties.DELAY));
+        return BlockUtilHelper.propertiesMatch(task, Properties.DELAY);
     }
 
     @Override

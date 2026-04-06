@@ -387,6 +387,89 @@ public class BlockUtilHelper {
         return state.isReplaceable();
     }
 
+    // ==================== 点击点可行性验证 ====================
+
+    /**
+     * 验证点击点是否满足 reach / NCP / LOS 约束。
+     *
+     * 此方法统一了 InteractionPlanner（自身交互）和 HitVecCalculator（放置交互）
+     * 中相同的三重检查逻辑：
+     * 1. 距离检查：眼睛到点击点的距离不超过最大交互距离
+     * 2. NCP 方向检查（strict 模式）：反作弊方向验证
+     * 3. LOS 视线检查：射线检测目标面上的目标点是否可见
+     *
+     * @param hitVec           点击坐标
+     * @param face             点击面
+     * @param interactPos      要交互的方块位置
+     * @param eyePos           玩家眼睛位置
+     * @param world            游戏世界
+     * @param player           玩家实体
+     * @param strict           是否启用 NCP 方向检查
+     * @param checkLos         是否检查视线
+     * @param maxReach         最大交互距离
+     * @param placementTargetPos 放置目标位置（LOS 豁免 replaceable 方块），自身交互传 null
+     * @return 是否所有约束都满足
+     */
+    public static boolean isPointValid(
+        Vec3d hitVec, Direction face, BlockPos interactPos,
+        Vec3d eyePos, World world, PlayerEntity player,
+        boolean strict, boolean checkLos, double maxReach,
+        BlockPos placementTargetPos
+    ) {
+        // 距离检查
+        if (eyePos.distanceTo(hitVec) > maxReach + 0.1) return false;
+
+        // NCP 方向检查
+        if (strict) {
+            Set<Direction> validDirs = getPlaceDirectionsNCP(eyePos, hitVec);
+            if (!validDirs.contains(face)) return false;
+        }
+
+        // 视线检查
+        if (checkLos && !canSeeFacePoint(interactPos, face, hitVec, world, player, placementTargetPos)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    // ==================== 属性比较工具 ====================
+
+    /**
+     * 比较 PrinterTask 中 desiredState 和 currentState 的指定属性值是否一致。
+     *
+     * 如果任一状态不包含该属性，返回 false。
+     * 此方法被多个行为使用（如 Trapdoor、Door、FenceGate 等），统一在此定义以避免重复。
+     *
+     * @param task 打印任务
+     * @param prop 要比较的方块属性
+     * @param <T>  属性值类型
+     * @return 两个状态中该属性值是否相等
+     */
+    @SuppressWarnings("unchecked")
+    public static <T extends Comparable<T>> boolean propertiesMatch(PrinterTask task, net.minecraft.state.property.Property<T> prop) {
+        if (!task.desiredState().contains(prop) || !task.currentState().contains(prop)) return false;
+        return task.desiredState().get(prop).equals(task.currentState().get(prop));
+    }
+
+    // ==================== 潜行策略判定 ====================
+
+    /**
+     * 根据交互方块确定潜行策略。
+     *
+     * 如果交互目标是 SNEAK_BLOCKS 中的方块（容器、按钮、门等），
+     * 则需要潜行来绕过方块自身的交互行为。
+     * 此逻辑被 BlockPlacementBehavior 和 WaterBehavior 共用。
+     *
+     * @param interactState 要交互的方块状态
+     * @return REQUIRE_SNEAK 或 KEEP_CURRENT
+     */
+    public static ActionPlan.SneakPolicy determineSneakPolicy(net.minecraft.block.BlockState interactState) {
+        return SNEAK_BLOCKS.contains(interactState.getBlock())
+            ? ActionPlan.SneakPolicy.REQUIRE_SNEAK
+            : ActionPlan.SneakPolicy.KEEP_CURRENT;
+    }
+
     /**
      * 获取球形范围内的所有方块位置
      */

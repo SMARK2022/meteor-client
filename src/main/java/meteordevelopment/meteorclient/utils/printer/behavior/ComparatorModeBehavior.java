@@ -36,25 +36,16 @@ public class ComparatorModeBehavior implements PrinterBehavior {
         if (!(task.currentState().getBlock() instanceof ComparatorBlock)) return false;
 
         // 朝向必须一致
-        if (!task.desiredState().contains(Properties.HORIZONTAL_FACING)
-            || !task.currentState().contains(Properties.HORIZONTAL_FACING)) return false;
-        if (task.desiredState().get(Properties.HORIZONTAL_FACING)
-            != task.currentState().get(Properties.HORIZONTAL_FACING)) return false;
+        if (!BlockUtilHelper.propertiesMatch(task, Properties.HORIZONTAL_FACING)) return false;
 
         // 模式必须不一致
-        if (!task.desiredState().contains(Properties.COMPARATOR_MODE)
-            || !task.currentState().contains(Properties.COMPARATOR_MODE)) return false;
-        return task.desiredState().get(Properties.COMPARATOR_MODE)
-            != task.currentState().get(Properties.COMPARATOR_MODE);
+        return !BlockUtilHelper.propertiesMatch(task, Properties.COMPARATOR_MODE);
     }
 
     @Override
     public boolean isSatisfied(PrinterTask task) {
         if (!(task.currentState().getBlock() instanceof ComparatorBlock)) return false;
-        if (!task.desiredState().contains(Properties.COMPARATOR_MODE)
-            || !task.currentState().contains(Properties.COMPARATOR_MODE)) return false;
-        return task.desiredState().get(Properties.COMPARATOR_MODE)
-            == task.currentState().get(Properties.COMPARATOR_MODE);
+        return BlockUtilHelper.propertiesMatch(task, Properties.COMPARATOR_MODE);
     }
 
     @Override

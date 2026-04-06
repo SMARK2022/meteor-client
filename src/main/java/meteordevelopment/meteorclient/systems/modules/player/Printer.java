@@ -46,7 +46,6 @@ import net.minecraft.entity.decoration.EndCrystalEntity;
 import net.minecraft.entity.decoration.ItemFrameEntity;
 import net.minecraft.item.Item;
 import net.minecraft.network.packet.c2s.play.HandSwingC2SPacket;
-import net.minecraft.util.ActionResult;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.*;
@@ -421,26 +420,18 @@ public class Printer extends Module {
         lastHitVecTicks = 0;
     }
 
-    /**
-     * 发布渲染计划快照
-     */
+    /** 发布渲染计划快照 */
     private void publishRenderPlan(ActionPlan plan) {
         lastPlan = plan;
         lastHitVec = plan != null ? plan.interaction().hitVec() : null;
         lastHitVecTicks = plan != null ? 2 : 0;
     }
 
-    /**
-     * 每 tick 衰减渲染态倒计时
-     * 归零后清空渲染快照，避免残影。
-     */
+    /** 每 tick 衰减渲染态倒计时，归零后清空，避免残影 */
     private void tickRenderState() {
-        if (lastHitVecTicks > 0) {
-            lastHitVecTicks--;
-            if (lastHitVecTicks <= 0) {
-                lastPlan = null;
-                lastHitVec = null;
-            }
+        if (lastHitVecTicks > 0 && --lastHitVecTicks <= 0) {
+            lastPlan = null;
+            lastHitVec = null;
         }
     }
 
@@ -794,58 +785,29 @@ public class Printer extends Module {
 
     private boolean isUseBlockStillValid(ActionPlan.UseBlock plan, Hand hand) {
         BlockState current = mc.world.getBlockState(plan.targetPos());
-
-        // stale-plan 检查：行为自定义的"仍需执行"谓词
         if (!plan.stillNeedsAction().test(current)) return false;
-
-        // 方块还在且类型对
         if (current.getBlock() != plan.desiredState().getBlock()) return false;
-
-        // 方块仍然可点击
         if (!BlockUtilHelper.isClickable(current, mc.world, plan.targetPos())) return false;
-
-        // 如果需要特定物品，检查手中
-        if (plan.requiredItem() != null) {
-            Item inHand = (hand == Hand.MAIN_HAND)
-                ? mc.player.getMainHandStack().getItem()
-                : mc.player.getOffHandStack().getItem();
-            if (inHand != plan.requiredItem()) return false;
-        }
-
-        return true;
+        return isHeldItem(hand, plan.requiredItem());
     }
 
     private boolean isUseItemOnBlockStillValid(ActionPlan.UseItemOnBlock plan, Hand hand) {
-        BlockState current = mc.world.getBlockState(plan.targetPos());
-
-        // stale-plan 检查
-        if (!plan.stillNeedsAction().test(current)) return false;
-
-        // 交互块仍可用
-        ActionPlan.Interaction inter = plan.interaction();
-        if (!inter.selfInteraction()) {
-            if (!BlockUtilHelper.isClickable(mc.world.getBlockState(inter.interactPos()), mc.world, inter.interactPos()))
-                return false;
-        }
-
-        // 手里还是目标物品
-        Item inHand = (hand == Hand.MAIN_HAND)
-            ? mc.player.getMainHandStack().getItem()
-            : mc.player.getOffHandStack().getItem();
-        return inHand == plan.requiredItem();
+        if (!plan.stillNeedsAction().test(mc.world.getBlockState(plan.targetPos()))) return false;
+        if (!plan.interaction().selfInteraction()
+            && !BlockUtilHelper.isClickable(mc.world.getBlockState(plan.interaction().interactPos()), mc.world, plan.interaction().interactPos()))
+            return false;
+        return isHeldItem(hand, plan.requiredItem());
     }
 
     private boolean isUseItemInAirStillValid(ActionPlan.UseItemInAir plan, Hand hand) {
-        BlockState current = mc.world.getBlockState(plan.targetPos());
+        if (!plan.stillNeedsAction().test(mc.world.getBlockState(plan.targetPos()))) return false;
+        return isHeldItem(hand, plan.requiredItem());
+    }
 
-        // stale-plan 检查
-        if (!plan.stillNeedsAction().test(current)) return false;
-
-        // 手里还是目标物品
-        Item inHand = (hand == Hand.MAIN_HAND)
-            ? mc.player.getMainHandStack().getItem()
-            : mc.player.getOffHandStack().getItem();
-        return inHand == plan.requiredItem();
+    /** 检查指定手是否持有必需物品（null 表示不限） */
+    private boolean isHeldItem(Hand hand, Item required) {
+        if (required == null) return true;
+        return (hand == Hand.MAIN_HAND ? mc.player.getMainHandStack() : mc.player.getOffHandStack()).getItem() == required;
     }
 
     /**
@@ -857,32 +819,25 @@ public class Printer extends Module {
         ActionPlan plan = armed.plan();
 
         if (plan instanceof ActionPlan.UseItemInAir) {
-            // 纯物品使用：走 interactItem 路径
-            ActionResult result = mc.interactionManager.interactItem(mc.player, armed.hand());
-            if (result.isAccepted()) {
-                if (swingHand.get()) {
-                    mc.player.swingHand(armed.hand());
-                } else {
-                    mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(armed.hand()));
-                }
+            if (mc.interactionManager.interactItem(mc.player, armed.hand()).isAccepted()) {
+                swingOrPacket(armed.hand());
             }
             return;
         }
 
-        // 方块交互类：走 interactBlock 路径
         ActionPlan.Interaction inter = plan.interaction();
         BlockHitResult hitResult = new BlockHitResult(
             inter.hitVec(), inter.clickedFace(), inter.interactPos(), false);
-        ActionResult result = mc.interactionManager.interactBlock(
-            mc.player, armed.hand(), hitResult);
 
-        if (result.isAccepted()) {
-            if (swingHand.get()) {
-                mc.player.swingHand(armed.hand());
-            } else {
-                mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(armed.hand()));
-            }
+        if (mc.interactionManager.interactBlock(mc.player, armed.hand(), hitResult).isAccepted()) {
+            swingOrPacket(armed.hand());
         }
+    }
+
+    /** 挥手或发包（统一放置/交互后的手臂动画） */
+    private void swingOrPacket(Hand hand) {
+        if (swingHand.get()) mc.player.swingHand(hand);
+        else mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(hand));
     }
 
     /**
@@ -1066,52 +1021,23 @@ public class Printer extends Module {
     }
 
     /**
-     * 渲染交互点立方体
-     * 使用两层立方体：
-     * - 第一层：70%不透明度的立方体（正常深度测试，可被遮挡）
-     * - 第二层：30%不透明度的立方体（禁用深度测试，始终可见）
+     * 渲染交互点：双层立方体（正常深度 70% + 穿透 30%）
      */
     private void renderHitVecCube(Render3DEvent event) {
-        if (lastHitVec == null)
-            return;
+        if (lastHitVec == null) return;
 
-        // 立方体的半边长（总边长为0.1，所以每边0.05）
-        double halfSize = 0.05;
-
-        // 立方体的中心坐标
-        double x = lastHitVec.x;
-        double y = lastHitVec.y;
-        double z = lastHitVec.z;
-
-        // 获取颜色
-        SettingColor color = hitVecColor.get();
-
-        // 获取基础RGBA值
-        int r = color.r;
-        int g = color.g;
-        int b = color.b;
-
-        // 创建两种透明度的颜色
-        // 70%不透明度 = 30%透明 ≈ Alpha值 179 (255 * 0.7)
-        int alpha70 = Math.round(255 * 0.7f);
-        SettingColor color70 = new SettingColor(r, g, b, alpha70);
-
-        // 30%不透明度 = 70%透明 ≈ Alpha值 76 (255 * 0.3)
-        int alpha30 = Math.round(255 * 0.3f);
-        SettingColor color30 = new SettingColor(r, g, b, alpha30);
-
-        // 创建立方体的碰撞箱
+        double s = 0.05;
         net.minecraft.util.math.Box box = new net.minecraft.util.math.Box(
-                x - halfSize, y - halfSize, z - halfSize,
-                x + halfSize, y + halfSize, z + halfSize
-        );
+            lastHitVec.x - s, lastHitVec.y - s, lastHitVec.z - s,
+            lastHitVec.x + s, lastHitVec.y + s, lastHitVec.z + s);
 
-        // 第一层：70%不透明度的立方体（正常绘制，会被遮挡）
-        event.renderer.box(box, color70, color70, ShapeMode.Both, 0);
+        SettingColor c = hitVecColor.get();
+        SettingColor solid = new SettingColor(c.r, c.g, c.b, 179);
+        SettingColor ghost = new SettingColor(c.r, c.g, c.b, 76);
 
-        // 第二层：禁用深度测试，绘制30%不透明度的立方体（始终可见）
+        event.renderer.box(box, solid, solid, ShapeMode.Both, 0);
         GL.disableDepth();
-        event.renderer.box(box, color30, color30, ShapeMode.Both, 0);
+        event.renderer.box(box, ghost, ghost, ShapeMode.Both, 0);
         GL.enableDepth();
     }
 

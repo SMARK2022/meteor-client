@@ -15,7 +15,6 @@ import net.minecraft.world.BlockView;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 
 /**
  * HitVecCalculator - 点击位置计算器接口
@@ -290,20 +289,11 @@ public interface HitVecCalculator {
                 double u = uv[0], v = uv[1];
                 Vec3d point = patch.toWorld(interactPos, u, v);
 
-                // Reach
-                if (eyePos.distanceTo(point) > maxReach + 0.1) continue;
-
-                // NCP
-                if (strict) {
-                    Set<Direction> validDirs = BlockUtilHelper.getPlaceDirectionsNCP(eyePos, point);
-                    if (!validDirs.contains(face)) continue;
-                }
-
-                // LOS
-                if (checkLos) {
-                    if (!BlockUtilHelper.canSeeFacePoint(
-                            interactPos, face, point,
-                            ctx.world(), ctx.player(), targetPos)) continue;
+                // 统一的 Reach / NCP / LOS 三重检查
+                if (!BlockUtilHelper.isPointValid(
+                    point, face, interactPos, eyePos, ctx.world(), ctx.player(),
+                    strict, checkLos, maxReach, targetPos)) {
+                    continue;
                 }
 
                 // 打分：居中越好 (+)，偏离偏好越差 (-)
