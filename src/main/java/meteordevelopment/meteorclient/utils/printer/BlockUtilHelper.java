@@ -1,11 +1,8 @@
 package meteordevelopment.meteorclient.utils.printer;
 
 import net.minecraft.block.*;
-import net.minecraft.block.enums.BlockHalf;
-import net.minecraft.block.enums.SlabType;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.registry.Registries;
-import net.minecraft.state.property.Properties;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.hit.BlockHitResult;
@@ -446,7 +443,6 @@ public class BlockUtilHelper {
      * @param <T>  属性值类型
      * @return 两个状态中该属性值是否相等
      */
-    @SuppressWarnings("unchecked")
     public static <T extends Comparable<T>> boolean propertiesMatch(PrinterTask task, net.minecraft.state.property.Property<T> prop) {
         if (!task.desiredState().contains(prop) || !task.currentState().contains(prop)) return false;
         return task.desiredState().get(prop).equals(task.currentState().get(prop));
