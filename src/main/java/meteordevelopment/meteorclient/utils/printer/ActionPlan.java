@@ -8,8 +8,6 @@ import net.minecraft.util.math.Vec3d;
 
 import java.util.function.Predicate;
 
-import org.jetbrains.annotations.Nullable;
-
 /**
  * ActionPlan - 动作计划密封接口
  *
@@ -115,11 +113,6 @@ public sealed interface ActionPlan
      *
      * 语义：拿着物品，对邻居/自身执行 interactBlock，目标是在 targetPos 放下新方块。
      * 由 {@link BlockPlacementBehavior} 创建。
-     *
-     * desiredState 是蓝图的最终目标状态。
-     * expectedStateAfterAction 是这一步实际期望产出的即时状态（可能与 desiredState 不同）。
-     * 例如：蓝图要双层半砖(DOUBLE)，但这一步只放 BOTTOM 单层，后续再补。
-     * 如果为 null，表示 desiredState 即为即时预期。
      */
     record PlaceBlock(
         BlockPos targetPos,
@@ -127,16 +120,8 @@ public sealed interface ActionPlan
         Interaction interaction,
         Item requiredItem,
         SneakPolicy sneakPolicy,
-        HandPolicy handPolicy,
-        @Nullable BlockState expectedStateAfterAction
-    ) implements ActionPlan {
-        /** 便捷构造：expectedStateAfterAction 默认为 null（等同于 desiredState） */
-        public PlaceBlock(BlockPos targetPos, BlockState desiredState,
-                          Interaction interaction, Item requiredItem,
-                          SneakPolicy sneakPolicy, HandPolicy handPolicy) {
-            this(targetPos, desiredState, interaction, requiredItem, sneakPolicy, handPolicy, null);
-        }
-    }
+        HandPolicy handPolicy
+    ) implements ActionPlan {}
 
     /**
      * UseBlock - 右键方块交互动作

@@ -101,13 +101,13 @@ public class Printer extends Module {
 
     private final Setting<Boolean> rotate = sgGeneral.add(new BoolSetting.Builder()
             .name("rotate")
-            .description("Rotates towards the block being placed.")
+            .description("Rotates towards the target block.")
             .defaultValue(true)
             .build());
 
     private final Setting<Boolean> swingHand = sgGeneral.add(new BoolSetting.Builder()
             .name("swing-hand")
-            .description("Swing hand when placing blocks.")
+            .description("Swing hand when interacting.")
             .defaultValue(true)
             .build());
 
@@ -116,6 +116,14 @@ public class Printer extends Module {
             .description("Only place blocks that are visible to the player (anti-cheat).")
             .defaultValue(true)
             .visible(() -> placeMode.get() == PlaceMode.STRICT)
+            .build());
+
+    private final Setting<Integer> maxCandidates = sgGeneral.add(new IntSetting.Builder()
+            .name("max-candidates")
+            .description("Maximum number of tasks to evaluate per tick. Higher = more accurate but slower. 0 = no limit.")
+            .defaultValue(0)
+            .min(0)
+            .sliderRange(0, 100)
             .build());
 
     // Behavior Group Toggles
@@ -211,7 +219,7 @@ public class Printer extends Module {
     // Render Settings
     private final Setting<Boolean> render = sgRender.add(new BoolSetting.Builder()
             .name("render")
-            .description("Renders blocks that are about to be placed.")
+            .description("Renders blocks that are about to be placed or interacted with.")
             .defaultValue(true)
             .build());
 
@@ -530,11 +538,11 @@ public class Printer extends Module {
         record ScoredCandidate(ActionPlan plan, double score) {}
 
         List<ScoredCandidate> scored = new ArrayList<>();
-        int maxCandidates = 30; // 限制计划数量，控制性能
+        int candidateLimit = maxCandidates.get(); // 0 = 不限制
         int planned = 0;
 
         for (PlannedTask pt : tasks) {
-            if (planned >= maxCandidates) break;
+            if (candidateLimit > 0 && planned >= candidateLimit) break;
 
             ActionPlan plan = pt.behavior().plan(pt.task(), mc, strict, checkLos, maxReach);
             if (plan == null) continue;
@@ -777,10 +785,7 @@ public class Printer extends Module {
         }
 
         // 手里还是目标物品
-        Item inHand = (hand == Hand.MAIN_HAND)
-            ? mc.player.getMainHandStack().getItem()
-            : mc.player.getOffHandStack().getItem();
-        return inHand == plan.requiredItem();
+        return isHeldItem(hand, plan.requiredItem());
     }
 
     private boolean isUseBlockStillValid(ActionPlan.UseBlock plan, Hand hand) {
@@ -874,6 +879,20 @@ public class Printer extends Module {
             if (requiredState == currentState) continue;
 
             PrinterTask task = new PrinterTask(pos, requiredState, currentState);
+
+            // 多格对象锚点规范化：
+            // 床/门等双格对象，只从主格（放置锚点）规划，另一半由 onPlaced 联动。
+            // 这避免了两个 task 争抢同一个放置动作。
+            if (requiredState.getBlock() instanceof BedBlock
+                && requiredState.contains(BedBlock.PART)
+                && requiredState.get(BedBlock.PART) != net.minecraft.block.enums.BedPart.FOOT) {
+                continue; // 只从 foot 半规划
+            }
+            if (requiredState.getBlock() instanceof DoorBlock
+                && requiredState.contains(DoorBlock.HALF)
+                && requiredState.get(DoorBlock.HALF) != net.minecraft.block.enums.DoubleBlockHalf.LOWER) {
+                continue; // 只从 lower 半规划
+            }
 
             // 查找匹配的已启用行为
             PrinterBehavior behavior = findEnabledBehavior(task);

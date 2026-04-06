@@ -38,11 +38,10 @@ public class BlockPlacementBehavior implements PrinterBehavior {
         // 情况 1：半砖升级（同种方块但需要从单层变双层）
         if (isSlabUpgrade(task)) return true;
 
-        // 情况 2：标准放置（当前位置可替换）
+        // 情况 2：标准放置（当前位置是空气、流体或可替换方块）
         var current = task.currentState();
         if (current.isAir()) return true;
         if (current.getBlock() instanceof FluidBlock) return true;
-        if (current.getFluidState() != null && !current.getFluidState().isEmpty()) return true;
         return current.isReplaceable();
     }
 
