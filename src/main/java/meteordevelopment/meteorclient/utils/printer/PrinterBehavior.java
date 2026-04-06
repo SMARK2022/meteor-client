@@ -49,16 +49,24 @@ public interface PrinterBehavior {
      * 特化行为在前，通用放置在后。
      *
      * 顺序决定优先级：
-     * 1. RepeaterDelayBehavior - 同种方块但 delay 不一致 → 右键修状态
-     * 2. BlockPlacementBehavior - 缺块/可替换 → 放置新方块
+     * 1. RepeaterDelayBehavior    - 中继器 delay 不一致 → 右键循环
+     * 2. ComparatorModeBehavior   - 比较器模式不一致 → 右键切换
+     * 3. RedstoneDotCrossBehavior - 红石线点状/十字不一致 → 右键切换
+     * 4. WaterBehavior            - 流体源方块缺失 → 桶放置
+     * 5. BlockPlacementBehavior   - 缺块/可替换 → 放置新方块
      */
     List<PrinterBehavior> REGISTRY = List.of(
         new RepeaterDelayBehavior(),
+        new ComparatorModeBehavior(),
+        new RedstoneDotCrossBehavior(),
+        new WaterBehavior(),
         new BlockPlacementBehavior()
     );
 
     /**
-     * 为任务查找第一个匹配的行为
+     * 为任务查找第一个匹配的行为（不考虑启用状态）。
+     * 注意：在 Printer 中应使用 findEnabledBehavior() 代替，
+     * 以确保行为匹配与用户开关保持一致。
      *
      * @return 匹配的行为，如果没有行为能处理则返回 null
      */

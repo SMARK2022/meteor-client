@@ -33,9 +33,12 @@ import meteordevelopment.meteorclient.utils.printer.ActionPlan.SneakPolicy;
 import meteordevelopment.meteorclient.utils.printer.ActionPlan.HandPolicy;
 import meteordevelopment.meteorclient.utils.printer.BlockPlacementBehavior;
 import meteordevelopment.meteorclient.utils.printer.BlockUtilHelper;
+import meteordevelopment.meteorclient.utils.printer.ComparatorModeBehavior;
 import meteordevelopment.meteorclient.utils.printer.PrinterBehavior;
 import meteordevelopment.meteorclient.utils.printer.PrinterTask;
+import meteordevelopment.meteorclient.utils.printer.RedstoneDotCrossBehavior;
 import meteordevelopment.meteorclient.utils.printer.RepeaterDelayBehavior;
+import meteordevelopment.meteorclient.utils.printer.WaterBehavior;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.*;
 import net.minecraft.block.enums.SlabType;
@@ -120,9 +123,15 @@ public class Printer extends Module {
             .build());
 
     // Behavior Toggles
-    private final Setting<Boolean> fixRepeaterDelay = sgGeneral.add(new BoolSetting.Builder()
-            .name("fix-repeater-delay")
-            .description("Automatically fix repeater delay mismatches by right-clicking.")
+    private final Setting<Boolean> fixRedstoneState = sgGeneral.add(new BoolSetting.Builder()
+            .name("fix-redstone-state")
+            .description("Fix redstone component states: repeater delay, comparator mode, wire dot/cross.")
+            .defaultValue(false)
+            .build());
+
+    private final Setting<Boolean> placeWater = sgGeneral.add(new BoolSetting.Builder()
+            .name("place-water")
+            .description("Place water/lava source blocks from buckets.")
             .defaultValue(false)
             .build());
 
@@ -239,12 +248,28 @@ public class Printer extends Module {
 
     /**
      * 判断行为是否被用户启用
-     * BlockPlacementBehavior 始终启用，其他行为受开关控制。
+     * BlockPlacementBehavior 始终启用，红石类行为受 fixRedstoneState 开关控制，
+     * 流体行为受 placeWater 开关控制。
      */
     private boolean isBehaviorEnabled(PrinterBehavior behavior) {
         if (behavior instanceof BlockPlacementBehavior) return true;
-        if (behavior instanceof RepeaterDelayBehavior) return fixRepeaterDelay.get();
+        if (behavior instanceof RepeaterDelayBehavior) return fixRedstoneState.get();
+        if (behavior instanceof ComparatorModeBehavior) return fixRedstoneState.get();
+        if (behavior instanceof RedstoneDotCrossBehavior) return fixRedstoneState.get();
+        if (behavior instanceof WaterBehavior) return placeWater.get();
         return false;
+    }
+
+    /**
+     * 为任务查找第一个已启用且匹配的行为
+     * 将行为匹配与启用判断合并，避免被禁用的特化行为挡住通用 fallback。
+     */
+    private PrinterBehavior findEnabledBehavior(PrinterTask task) {
+        for (PrinterBehavior behavior : PrinterBehavior.REGISTRY) {
+            if (!isBehaviorEnabled(behavior)) continue;
+            if (behavior.supports(task)) return behavior;
+        }
+        return null;
     }
 
     /**
@@ -381,9 +406,8 @@ public class Printer extends Module {
         for (PrinterTask task : tasks) {
             if (planned >= maxCandidates) break;
 
-            PrinterBehavior behavior = PrinterBehavior.find(task);
+            PrinterBehavior behavior = findEnabledBehavior(task);
             if (behavior == null) continue;
-            if (!isBehaviorEnabled(behavior)) continue;
 
             ActionPlan plan = behavior.plan(task, mc, strict, checkLos, maxReach);
             if (plan == null) continue;
@@ -404,7 +428,7 @@ public class Printer extends Module {
             };
 
             boolean needsItemSwitch = plan.requiredItem() != null
-                && plan.handPolicy() != HandPolicy.KEEP_CURRENT
+                && plan.handPolicy() != HandPolicy.PREFER_MAIN_NO_SWITCH
                 && mc.player.getMainHandStack().getItem() != plan.requiredItem()
                 && mc.player.getOffHandStack().getItem() != plan.requiredItem();
 
@@ -452,11 +476,11 @@ public class Printer extends Module {
      * 检查当前手是否已经持有目标物品（纯检查，无副作用）
      */
     private Hand getReadyHand(ActionPlan plan) {
-        if (plan.handPolicy() == HandPolicy.KEEP_CURRENT) return Hand.MAIN_HAND;
+        if (plan.handPolicy() == HandPolicy.PREFER_MAIN_NO_SWITCH) return Hand.MAIN_HAND;
         Item item = plan.requiredItem();
         if (item == null) return Hand.MAIN_HAND;
         return switch (plan.handPolicy()) {
-            case KEEP_CURRENT -> Hand.MAIN_HAND;
+            case PREFER_MAIN_NO_SWITCH -> Hand.MAIN_HAND;
             case ANY_HAND_WITH_ITEM -> {
                 if (mc.player.getMainHandStack().getItem() == item) yield Hand.MAIN_HAND;
                 if (mc.player.getOffHandStack().getItem() == item) yield Hand.OFF_HAND;
@@ -568,8 +592,9 @@ public class Printer extends Module {
                     .contains(inter.clickedFace())) {
                 return false;
             }
-            // LOS: PlaceBlock 需要 targetPos 豁免，UseBlock 不需要
-            BlockPos losTarget = (plan instanceof ActionPlan.PlaceBlock) ? plan.targetPos() : null;
+            // LOS: PlaceBlock 和 UseItemOnBlock 需要 targetPos 豁免，UseBlock 不需要
+            BlockPos losTarget = (plan instanceof ActionPlan.PlaceBlock || plan instanceof ActionPlan.UseItemOnBlock)
+                ? plan.targetPos() : null;
             if (checkLineOfSight.get()
                 && !BlockUtilHelper.canSeeFacePoint(
                     inter.interactPos(), inter.clickedFace(), inter.hitVec(),
@@ -589,6 +614,7 @@ public class Printer extends Module {
         return switch (plan) {
             case ActionPlan.PlaceBlock pb -> isPlaceBlockStillValid(pb, hand);
             case ActionPlan.UseBlock ub -> isUseBlockStillValid(ub, hand);
+            case ActionPlan.UseItemOnBlock ui -> isUseItemOnBlockStillValid(ui, hand);
         };
     }
 
@@ -632,6 +658,9 @@ public class Printer extends Module {
     private boolean isUseBlockStillValid(ActionPlan.UseBlock plan, Hand hand) {
         BlockState current = mc.world.getBlockState(plan.targetPos());
 
+        // stale-plan 检查：行为自定义的"仍需执行"谓词
+        if (!plan.stillNeedsAction().test(current)) return false;
+
         // 方块还在且类型对
         if (current.getBlock() != plan.desiredState().getBlock()) return false;
 
@@ -649,10 +678,29 @@ public class Printer extends Module {
         return true;
     }
 
+    private boolean isUseItemOnBlockStillValid(ActionPlan.UseItemOnBlock plan, Hand hand) {
+        BlockState current = mc.world.getBlockState(plan.targetPos());
+
+        // stale-plan 检查
+        if (!plan.stillNeedsAction().test(current)) return false;
+
+        // 交互块仍可用
+        ActionPlan.Interaction inter = plan.interaction();
+        if (!inter.selfInteraction()) {
+            if (!BlockUtilHelper.isClickable(mc.world.getBlockState(inter.interactPos()), mc.world, inter.interactPos()))
+                return false;
+        }
+
+        // 手里还是目标物品
+        Item inHand = (hand == Hand.MAIN_HAND)
+            ? mc.player.getMainHandStack().getItem()
+            : mc.player.getOffHandStack().getItem();
+        return inHand == plan.requiredItem();
+    }
+
     /**
      * 执行动作计划
-     * PlaceBlock 和 UseBlock 在 Minecraft 协议层面都走 interactBlock。
-     * 未来 UseItemPlan 会走 interactItem。
+     * PlaceBlock、UseBlock、UseItemOnBlock 在 Minecraft 协议层面都走 interactBlock。
      */
     private void executePlan(ArmedAction armed) {
         ActionPlan.Interaction inter = armed.plan().interaction();
@@ -701,10 +749,9 @@ public class Printer extends Module {
 
             PrinterTask task = new PrinterTask(pos, requiredState, currentState);
 
-            // 查找匹配的行为
-            PrinterBehavior behavior = PrinterBehavior.find(task);
+            // 查找匹配的已启用行为
+            PrinterBehavior behavior = findEnabledBehavior(task);
             if (behavior == null) continue;
-            if (!isBehaviorEnabled(behavior)) continue;
 
             // 已经满足？
             if (behavior.isSatisfied(task)) continue;

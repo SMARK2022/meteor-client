@@ -6,12 +6,14 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 
+import java.util.function.Predicate;
+
 /**
  * ActionPlan - 动作计划密封接口
  *
  * 将顶层语义从"放块计划"提升为"动作计划"。
- * 支持放块（PlaceBlock）、右键交互修状态（UseBlock）等多种动作类型。
- * 未来可扩展 UseItem 用于流体/物品使用。
+ * 支持放块（PlaceBlock）、右键交互修状态（UseBlock）、
+ * 使用物品对方块（UseItemOnBlock，如水桶放水）等多种动作类型。
  *
  * 两阶段架构中的角色：
  * - Pre tick: 由 {@link PrinterBehavior} 创建
@@ -20,9 +22,9 @@ import net.minecraft.util.math.Vec3d;
  * 内含三组紧密关联的类型：
  * - 策略枚举：{@link SneakPolicy}、{@link HandPolicy}
  * - 几何信息：{@link Interaction}
- * - 具体动作：{@link PlaceBlock}、{@link UseBlock}
+ * - 具体动作：{@link PlaceBlock}、{@link UseBlock}、{@link UseItemOnBlock}
  */
-public sealed interface ActionPlan permits ActionPlan.PlaceBlock, ActionPlan.UseBlock {
+public sealed interface ActionPlan permits ActionPlan.PlaceBlock, ActionPlan.UseBlock, ActionPlan.UseItemOnBlock {
 
     /** 目标方块位置 */
     BlockPos targetPos();
@@ -60,13 +62,13 @@ public sealed interface ActionPlan permits ActionPlan.PlaceBlock, ActionPlan.Use
     /**
      * 手部策略 - 替代原来硬编码的 item switch 逻辑
      *
-     * KEEP_CURRENT:       不切换物品，使用当前手
-     * ANY_HAND_WITH_ITEM: 主手或副手有目标物品即可
-     * REQUIRE_MAIN_HAND:  必须在主手
-     * REQUIRE_OFF_HAND:   必须在副手
+     * PREFER_MAIN_NO_SWITCH: 不切换物品，优先主手（UseBlock 默认策略）
+     * ANY_HAND_WITH_ITEM:    主手或副手有目标物品即可
+     * REQUIRE_MAIN_HAND:     必须在主手
+     * REQUIRE_OFF_HAND:      必须在副手
      */
     enum HandPolicy {
-        KEEP_CURRENT,
+        PREFER_MAIN_NO_SWITCH,
         ANY_HAND_WITH_ITEM,
         REQUIRE_MAIN_HAND,
         REQUIRE_OFF_HAND
@@ -121,11 +123,11 @@ public sealed interface ActionPlan permits ActionPlan.PlaceBlock, ActionPlan.Use
      * UseBlock - 右键方块交互动作
      *
      * 语义：对已存在的方块执行 interactBlock，目标是修改其状态属性。
-     * 例如：repeater delay 修正、comparator mode 切换。
-     * 由特定 Behavior（如 {@link RepeaterDelayBehavior}）创建。
+     * 例如：repeater delay 修正、comparator mode 切换、redstone wire dot/cross 切换。
      *
      * requiredItem 通常为 null（不需要特定物品）。
      * sneakPolicy 通常为 REQUIRE_NOT_SNEAK（必须非潜行才能与方块交互）。
+     * stillNeedsAction 由 Behavior 提供，在执行前判断目标是否仍需修正（防止 stale-plan）。
      */
     record UseBlock(
         BlockPos targetPos,
@@ -133,6 +135,27 @@ public sealed interface ActionPlan permits ActionPlan.PlaceBlock, ActionPlan.Use
         Interaction interaction,
         Item requiredItem,
         SneakPolicy sneakPolicy,
-        HandPolicy handPolicy
+        HandPolicy handPolicy,
+        Predicate<BlockState> stillNeedsAction
+    ) implements ActionPlan {}
+
+    /**
+     * UseItemOnBlock - 对方块使用物品动作
+     *
+     * 语义：手持特定物品，对邻居表面执行 interactBlock，目标是在 targetPos 产生效果。
+     * 例如：水桶放水、岩浆桶放岩浆。
+     *
+     * 与 PlaceBlock 的区别：物品不是方块物品，走物品的 useOnBlock 路径。
+     * 协议层面仍然是 interactBlock，但验证逻辑不同。
+     * stillNeedsAction 判断目标位置是否仍需要该流体/效果。
+     */
+    record UseItemOnBlock(
+        BlockPos targetPos,
+        BlockState desiredState,
+        Interaction interaction,
+        Item requiredItem,
+        SneakPolicy sneakPolicy,
+        HandPolicy handPolicy,
+        Predicate<BlockState> stillNeedsAction
     ) implements ActionPlan {}
 }
