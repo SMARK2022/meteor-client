@@ -394,11 +394,7 @@ public final class ResolverRegistry {
                 || block instanceof CarvedPumpkinBlock // 雕刻南瓜, 南瓜灯 (Jack o Lantern)
                 || block instanceof BeehiveBlock // 蜂箱, 蜂巢
                 || block instanceof LoomBlock // 织布机
-                || block instanceof BarrelBlock // 木桶 (注：木桶其实是6面的，但很多人当箱子用。如果你的木桶是6面逻辑，移到
-                                                // FACE_EXTEND_RESOLVER；如果是强制水平，放这里。原版木桶是6面的，建议移走，或者这里只处理水平情况)
-                // *修正*：原版 Barrel 是 6 面朝向 (Look-based)，不属于
-                // HorizontalFacingBlock。它应该归类到"活塞/发射器"类(Look Based)，或者 FACE_EXTEND。
-                // 这里我们先不放 Barrel。
+                // BarrelBlock 已移至 LOOK_6_SAME（原版木桶是 6 面朝向）
 
                 || block instanceof LecternBlock // 讲台
                 || block instanceof StonecutterBlock // 切石机
@@ -414,8 +410,8 @@ public final class ResolverRegistry {
         // 特征：FACING 属性，且放置时面向玩家视线 (Face with player)
         if (block instanceof AnvilBlock // 铁砧 (所有损坏程度)
                 || block instanceof BedBlock // 床
-                || block instanceof GrindstoneBlock // 砂轮 (注：砂轮有 Wall/Floor/Ceiling 状态，但水平逻辑是 Same)
-                || block instanceof BellBlock // 钟 (同上)
+                // GrindstoneBlock 已移至 FACE_ATTACHED（砂轮有 Wall/Floor/Ceiling 附着面状态）
+                // BellBlock 已移至 FACE_ATTACHED（钟有 Wall/Floor/Ceiling 附着面状态）
         ) {
             return HORIZONTAL_SAME_RESOLVER;
         }
@@ -424,7 +420,7 @@ public final class ResolverRegistry {
         // 特征：6面 FACING，朝向 = 玩家视线
         if (block instanceof ObserverBlock // 侦测器 (输出端朝向玩家视线)
                 || block instanceof CommandBlock // 命令方块
-                || block instanceof BarrelBlock // 木桶 (通常是6轴 Look-based，虽然很多人以为是箱子)
+                || block instanceof BarrelBlock // 木桶（原版是 6 面朝向）
         ) {
             return LOOK_6_SAME_RESOLVER;
         }
@@ -444,8 +440,8 @@ public final class ResolverRegistry {
         // 特征：有 FACE (Wall/Floor/Ceiling) 和 HORIZONTAL_FACING 属性
         if (block instanceof ButtonBlock // 所有按钮 (木/石/黑石/铜)
                 || block instanceof LeverBlock // 拉杆
-                || block instanceof GrindstoneBlock // 砂轮
-                || block instanceof BellBlock // 钟 (注：钟的放置逻辑与此类似)
+                || block instanceof GrindstoneBlock // 砂轮（Wall/Floor/Ceiling 附着面状态）
+                || block instanceof BellBlock // 钟（Wall/Floor/Ceiling 附着面状态）
         // || block instanceof SwitchBlock // (如果模组有类似 Switch 的类)
         ) {
             return FACE_ATTACHED_RESOLVER;
@@ -532,11 +528,7 @@ public final class ResolverRegistry {
                 || block instanceof CarvedPumpkinBlock // 雕刻南瓜, 南瓜灯 (Jack o Lantern)
                 || block instanceof BeehiveBlock // 蜂箱, 蜂巢
                 || block instanceof LoomBlock // 织布机
-                || block instanceof BarrelBlock // 木桶 (注：木桶其实是6面的，但很多人当箱子用。如果你的木桶是6面逻辑，移到
-                                                // FACE_EXTEND_RESOLVER；如果是强制水平，放这里。原版木桶是6面的，建议移走，或者这里只处理水平情况)
-                // *修正*：原版 Barrel 是 6 面朝向 (Look-based)，不属于
-                // HorizontalFacingBlock。它应该归类到"活塞/发射器"类(Look Based)，或者 FACE_EXTEND。
-                // 这里我们先不放 Barrel。
+                // BarrelBlock 已移至 LOOK_6_SAME（原版木桶是 6 面朝向）
 
                 || block instanceof LecternBlock // 讲台
                 || block instanceof StonecutterBlock // 切石机
@@ -552,8 +544,8 @@ public final class ResolverRegistry {
         // 特征：FACING 属性，且放置时面向玩家视线 (Face with player)
         if (block instanceof AnvilBlock // 铁砧 (所有损坏程度)
                 || block instanceof BedBlock // 床
-                || block instanceof GrindstoneBlock // 砂轮 (注：砂轮有 Wall/Floor/Ceiling 状态，但水平逻辑是 Same)
-                || block instanceof BellBlock // 钟 (同上)
+                // GrindstoneBlock 已移至 FACE_ATTACHED（砂轮有 Wall/Floor/Ceiling 附着面状态）
+                // BellBlock 已移至 FACE_ATTACHED（钟有 Wall/Floor/Ceiling 附着面状态）
         ) {
             return HORIZONTAL_SAME_RESOLVER;
         }
@@ -562,7 +554,7 @@ public final class ResolverRegistry {
         // 特征：6面 FACING，朝向 = 玩家视线
         if (block instanceof ObserverBlock // 侦测器 (输出端朝向玩家视线)
                 || block instanceof CommandBlock // 命令方块
-                || block instanceof BarrelBlock // 木桶 (通常是6轴 Look-based，虽然很多人以为是箱子)
+                || block instanceof BarrelBlock // 木桶（原版是 6 面朝向）
         ) {
             return LOOK_6_SAME_RESOLVER;
         }
@@ -582,8 +574,8 @@ public final class ResolverRegistry {
         // 特征：有 FACE (Wall/Floor/Ceiling) 和 HORIZONTAL_FACING 属性
         if (block instanceof ButtonBlock // 所有按钮 (木/石/黑石/铜)
                 || block instanceof LeverBlock // 拉杆
-                || block instanceof GrindstoneBlock // 砂轮
-                || block instanceof BellBlock // 钟 (注：钟的放置逻辑与此类似)
+                || block instanceof GrindstoneBlock // 砂轮（Wall/Floor/Ceiling 附着面状态）
+                || block instanceof BellBlock // 钟（Wall/Floor/Ceiling 附着面状态）
         // || block instanceof SwitchBlock // (如果模组有类似 Switch 的类)
         ) {
             return FACE_ATTACHED_RESOLVER;
