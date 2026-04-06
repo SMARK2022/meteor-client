@@ -8,12 +8,17 @@ import net.minecraft.util.math.Vec3d;
 
 import java.util.function.Predicate;
 
+import org.jetbrains.annotations.Nullable;
+
 /**
  * ActionPlan - 动作计划密封接口
  *
  * 将顶层语义从"放块计划"提升为"动作计划"。
- * 支持放块（PlaceBlock）、右键交互修状态（UseBlock）、
- * 使用物品对方块（UseItemOnBlock，如水桶放水）等多种动作类型。
+ * 完整的四种动作谱系：
+ * - {@link PlaceBlock}:     放置方块
+ * - {@link UseBlock}:       右键交互修状态
+ * - {@link UseItemOnBlock}: 手持物品对方块交互
+ * - {@link UseItemInAir}:   纯物品使用（不依赖方块表面 hit）
  *
  * 两阶段架构中的角色：
  * - Pre tick: 由 {@link PrinterBehavior} 创建
@@ -22,9 +27,10 @@ import java.util.function.Predicate;
  * 内含三组紧密关联的类型：
  * - 策略枚举：{@link SneakPolicy}、{@link HandPolicy}
  * - 几何信息：{@link Interaction}
- * - 具体动作：{@link PlaceBlock}、{@link UseBlock}、{@link UseItemOnBlock}
+ * - 具体动作：PlaceBlock / UseBlock / UseItemOnBlock / UseItemInAir
  */
-public sealed interface ActionPlan permits ActionPlan.PlaceBlock, ActionPlan.UseBlock, ActionPlan.UseItemOnBlock {
+public sealed interface ActionPlan
+    permits ActionPlan.PlaceBlock, ActionPlan.UseBlock, ActionPlan.UseItemOnBlock, ActionPlan.UseItemInAir {
 
     /** 目标方块位置 */
     BlockPos targetPos();
@@ -109,6 +115,11 @@ public sealed interface ActionPlan permits ActionPlan.PlaceBlock, ActionPlan.Use
      *
      * 语义：拿着物品，对邻居/自身执行 interactBlock，目标是在 targetPos 放下新方块。
      * 由 {@link BlockPlacementBehavior} 创建。
+     *
+     * desiredState 是蓝图的最终目标状态。
+     * expectedStateAfterAction 是这一步实际期望产出的即时状态（可能与 desiredState 不同）。
+     * 例如：蓝图要双层半砖(DOUBLE)，但这一步只放 BOTTOM 单层，后续再补。
+     * 如果为 null，表示 desiredState 即为即时预期。
      */
     record PlaceBlock(
         BlockPos targetPos,
@@ -116,8 +127,16 @@ public sealed interface ActionPlan permits ActionPlan.PlaceBlock, ActionPlan.Use
         Interaction interaction,
         Item requiredItem,
         SneakPolicy sneakPolicy,
-        HandPolicy handPolicy
-    ) implements ActionPlan {}
+        HandPolicy handPolicy,
+        @Nullable BlockState expectedStateAfterAction
+    ) implements ActionPlan {
+        /** 便捷构造：expectedStateAfterAction 默认为 null（等同于 desiredState） */
+        public PlaceBlock(BlockPos targetPos, BlockState desiredState,
+                          Interaction interaction, Item requiredItem,
+                          SneakPolicy sneakPolicy, HandPolicy handPolicy) {
+            this(targetPos, desiredState, interaction, requiredItem, sneakPolicy, handPolicy, null);
+        }
+    }
 
     /**
      * UseBlock - 右键方块交互动作
@@ -150,6 +169,27 @@ public sealed interface ActionPlan permits ActionPlan.PlaceBlock, ActionPlan.Use
      * stillNeedsAction 判断目标位置是否仍需要该流体/效果。
      */
     record UseItemOnBlock(
+        BlockPos targetPos,
+        BlockState desiredState,
+        Interaction interaction,
+        Item requiredItem,
+        SneakPolicy sneakPolicy,
+        HandPolicy handPolicy,
+        Predicate<BlockState> stillNeedsAction
+    ) implements ActionPlan {}
+
+    /**
+     * UseItemInAir - 纯物品使用动作
+     *
+     * 语义：手持物品执行 interactItem，不依赖方块表面 hit。
+     * 例如：未来可能支持的 ender pearl、fire charge 等。
+     *
+     * 注意：
+     * - interaction 和 targetPos 仍然存在（用于旋转和任务定位），但交互不走 interactBlock。
+     * - 协议层走 ClientPlayerInteractionManager.interactItem(...)，与 interactBlock 是不同入口。
+     * - 当前无 behavior 使用此动作类型，预留以补齐动作谱系。
+     */
+    record UseItemInAir(
         BlockPos targetPos,
         BlockState desiredState,
         Interaction interaction,

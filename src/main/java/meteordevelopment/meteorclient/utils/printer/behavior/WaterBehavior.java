@@ -41,9 +41,9 @@ public class WaterBehavior implements PrinterBehavior {
             && current.contains(FluidBlock.LEVEL)
             && current.get(FluidBlock.LEVEL) == 0) return false;
 
-        // 检查有对应的桶
-        Item bucket = getBucket(desired);
-        return bucket != null && InvUtils.find(bucket).found();
+        // 桶类型必须可确定（inventory 就绪性留给 plan() 检查，
+        // 避免缺桶时任务从列表消失导致不可见）
+        return getBucket(desired) != null;
     }
 
     @Override

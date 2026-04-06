@@ -4,6 +4,7 @@ import meteordevelopment.meteorclient.utils.printer.*;
 
 import net.minecraft.block.Blocks;
 import net.minecraft.block.DoorBlock;
+import net.minecraft.block.enums.DoubleBlockHalf;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.state.property.Properties;
 
@@ -14,7 +15,7 @@ import net.minecraft.state.property.Properties;
  * 仅处理可手动切换的门（排除铁门）。
  *
  * 门是两格高方块，点击任一半都会同时切换。
- * 任务系统可能为上下两半分别创建任务，但一次点击会同时满足两者。
+ * 只为下半创建任务（canonical），避免上下两半重复规划和渲染。
  *
  * 属性处理：
  * - OPEN:        可通过右键修正（目标属性）
@@ -33,10 +34,13 @@ public class DoorBehavior implements PrinterBehavior {
         // 铁门不可手动切换
         if (task.currentState().getBlock() == Blocks.IRON_DOOR) return false;
 
+        // Canonical：只为下半创建任务，一次点击会同时切换上下两半
+        if (task.desiredState().contains(Properties.DOUBLE_BLOCK_HALF)
+            && task.desiredState().get(Properties.DOUBLE_BLOCK_HALF) != DoubleBlockHalf.LOWER) return false;
+
         // 不变量必须一致
         if (!propertiesMatch(task, Properties.HORIZONTAL_FACING)) return false;
         if (!propertiesMatch(task, Properties.DOOR_HINGE)) return false;
-        if (!propertiesMatch(task, Properties.DOUBLE_BLOCK_HALF)) return false;
 
         // OPEN 必须不一致
         return !propertiesMatch(task, Properties.OPEN);

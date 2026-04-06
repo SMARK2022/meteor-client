@@ -186,6 +186,26 @@ public class Printer extends Module {
             .defaultValue(new SettingColor(255, 100, 100, 255))
             .build());
 
+    private final Setting<Boolean> renderUnsupported = sgRender.add(new BoolSetting.Builder()
+            .name("render-unsupported")
+            .description("Renders blocks that differ from schematic but have no matching behavior.")
+            .defaultValue(false)
+            .build());
+
+    private final Setting<SettingColor> unsupportedSideColor = sgRender.add(new ColorSetting.Builder()
+            .name("unsupported-side-color")
+            .description("The side color of unsupported mismatch blocks.")
+            .defaultValue(new SettingColor(255, 160, 0, 30))
+            .visible(renderUnsupported::get)
+            .build());
+
+    private final Setting<SettingColor> unsupportedLineColor = sgRender.add(new ColorSetting.Builder()
+            .name("unsupported-line-color")
+            .description("The line color of unsupported mismatch blocks.")
+            .defaultValue(new SettingColor(255, 160, 0, 180))
+            .visible(renderUnsupported::get)
+            .build());
+
     // ==================== 动作计划快照 ====================
 
     /**
@@ -201,8 +221,18 @@ public class Printer extends Module {
 
     // ==================== 内部状态 ====================
 
-    /** 当前 tick 需要处理的任务列表 */
-    private final List<PrinterTask> tasks = new ArrayList<>();
+    /**
+     * PlannedTask - 携带匹配行为的任务
+     * 扫描阶段即绑定行为，避免 selectBestAction 二次查找。
+     */
+    private record PlannedTask(PrinterTask task, PrinterBehavior behavior) {}
+
+    /** 当前 tick 可修复的任务列表（已绑定行为） */
+    private final List<PlannedTask> tasks = new ArrayList<>();
+
+    /** 当前 tick 无行为匹配的不一致位置（unsupported / disabled） */
+    private final List<PrinterTask> unsupportedTasks = new ArrayList<>();
+
     private int tickDelay = 0;
 
     /** 当前 tick 的动作计划（逻辑态） */
@@ -224,6 +254,7 @@ public class Printer extends Module {
     public void onActivate() {
         tickDelay = 0;
         tasks.clear();
+        unsupportedTasks.clear();
         clearArmed();
     }
 
@@ -231,6 +262,7 @@ public class Printer extends Module {
     public void onDeactivate() {
         tickDelay = 0;
         tasks.clear();
+        unsupportedTasks.clear();
         clearArmed();
         resetSneakState();
     }
@@ -369,7 +401,7 @@ public class Printer extends Module {
         }
 
         // 尝试为最佳任务生成动作计划
-        armed = selectBestAction(worldSchematic);
+        armed = selectBestAction();
 
         if (armed != null) {
             // 发布渲染快照
@@ -387,12 +419,12 @@ public class Printer extends Module {
      * 选择最佳动作计划（两阶段优先级版）
      *
      * 改进点（相对旧版）：
-     * 1. 扫描阶段只生成 Task，不做 resolve（避免双重 resolve）
+     * 1. 扫描阶段已绑定 Behavior（PlannedTask），不再重复查找
      * 2. 由 Behavior 统一生成 ActionPlan（支持 PlaceBlock、UseBlock 等多种动作）
      * 3. 两阶段选择：先找"已就绪"的，再找"需要准备"的（不再因 sneak 切换浪费整 tick）
      * 4. SneakPolicy 三态：对 UseBlock 正确处理"必须不潜行"
      */
-    private ArmedAction selectBestAction(WorldSchematic worldSchematic) {
+    private ArmedAction selectBestAction() {
         // 如果本 tick 刚做过背包→热栏转移，跳过
         if (ItemSwitchHelper.didInventoryTransferThisTick()) {
             ItemSwitchHelper.resetTransferFlag();
@@ -412,13 +444,10 @@ public class Printer extends Module {
         int maxCandidates = 30; // 限制计划数量，控制性能
         int planned = 0;
 
-        for (PrinterTask task : tasks) {
+        for (PlannedTask pt : tasks) {
             if (planned >= maxCandidates) break;
 
-            PrinterBehavior behavior = findEnabledBehavior(task);
-            if (behavior == null) continue;
-
-            ActionPlan plan = behavior.plan(task, mc, strict, checkLos, maxReach);
+            ActionPlan plan = pt.behavior().plan(pt.task(), mc, strict, checkLos, maxReach);
             if (plan == null) continue;
             planned++;
 
@@ -624,6 +653,7 @@ public class Printer extends Module {
             case ActionPlan.PlaceBlock pb -> isPlaceBlockStillValid(pb, hand);
             case ActionPlan.UseBlock ub -> isUseBlockStillValid(ub, hand);
             case ActionPlan.UseItemOnBlock ui -> isUseItemOnBlockStillValid(ui, hand);
+            case ActionPlan.UseItemInAir ua -> isUseItemInAirStillValid(ua, hand);
         };
     }
 
@@ -707,12 +737,42 @@ public class Printer extends Module {
         return inHand == plan.requiredItem();
     }
 
+    private boolean isUseItemInAirStillValid(ActionPlan.UseItemInAir plan, Hand hand) {
+        BlockState current = mc.world.getBlockState(plan.targetPos());
+
+        // stale-plan 检查
+        if (!plan.stillNeedsAction().test(current)) return false;
+
+        // 手里还是目标物品
+        Item inHand = (hand == Hand.MAIN_HAND)
+            ? mc.player.getMainHandStack().getItem()
+            : mc.player.getOffHandStack().getItem();
+        return inHand == plan.requiredItem();
+    }
+
     /**
      * 执行动作计划
-     * PlaceBlock、UseBlock、UseItemOnBlock 在 Minecraft 协议层面都走 interactBlock。
+     * PlaceBlock / UseBlock / UseItemOnBlock 走 interactBlock。
+     * UseItemInAir 走 interactItem（不同协议入口）。
      */
     private void executePlan(ArmedAction armed) {
-        ActionPlan.Interaction inter = armed.plan().interaction();
+        ActionPlan plan = armed.plan();
+
+        if (plan instanceof ActionPlan.UseItemInAir) {
+            // 纯物品使用：走 interactItem 路径
+            ActionResult result = mc.interactionManager.interactItem(mc.player, armed.hand());
+            if (result.isAccepted()) {
+                if (swingHand.get()) {
+                    mc.player.swingHand(armed.hand());
+                } else {
+                    mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(armed.hand()));
+                }
+            }
+            return;
+        }
+
+        // 方块交互类：走 interactBlock 路径
+        ActionPlan.Interaction inter = plan.interaction();
         BlockHitResult hitResult = new BlockHitResult(
             inter.hitVec(), inter.clickedFace(), inter.interactPos(), false);
         ActionResult result = mc.interactionManager.interactBlock(
@@ -730,14 +790,14 @@ public class Printer extends Module {
     /**
      * 更新任务列表：扫描蓝图与世界差异
      *
-     * 改进点（相对旧版 updatePlacePositions）：
-     * 1. 不再维护 placePositions + placeItems 两个平行容器，改用 PrinterTask 列表
-     * 2. 不再在扫描阶段做 ResolverRegistry.canPlace（避免双重 resolve）
-     * 3. "已满足"的判断交给 PrinterBehavior.isSatisfied（支持状态修正类任务）
-     * 4. 同 block 但状态不对的情况不再被跳过（如 repeater delay 不一致）
+     * 改进点：
+     * 1. 使用 PlannedTask 绑定行为，selectBestAction 不再重复查找
+     * 2. 无行为匹配的不一致收集到 unsupportedTasks，不再静默丢弃
+     * 3. 不在扫描阶段做 resolve，"已满足"判断交给 Behavior.isSatisfied
      */
     private void updateTasks(WorldSchematic worldSchematic) {
         tasks.clear();
+        unsupportedTasks.clear();
 
         if (mc.player == null || mc.world == null) return;
 
@@ -756,11 +816,18 @@ public class Printer extends Module {
             // 蓝图要求空气，跳过
             if (requiredState.isAir()) continue;
 
+            // 完全一致，跳过
+            if (requiredState == currentState) continue;
+
             PrinterTask task = new PrinterTask(pos, requiredState, currentState);
 
             // 查找匹配的已启用行为
             PrinterBehavior behavior = findEnabledBehavior(task);
-            if (behavior == null) continue;
+            if (behavior == null) {
+                // 无行为匹配 → unsupported（而非静默丢弃）
+                unsupportedTasks.add(task);
+                continue;
+            }
 
             // 已经满足？
             if (behavior.isSatisfied(task)) continue;
@@ -768,13 +835,14 @@ public class Printer extends Module {
             // 实体阻挡检查（仅对放置类行为有意义）
             if (behavior instanceof BlockPlacementBehavior && hasBlockingEntity(pos)) continue;
 
-            tasks.add(task);
+            tasks.add(new PlannedTask(task, behavior));
         }
 
         // 按距离排序（最近的优先）
+        Vec3d eyePos = mc.player.getEyePos();
         tasks.sort(Comparator.comparingDouble(
-            task -> mc.player.getEyePos().squaredDistanceTo(
-                task.pos().getX() + 0.5, task.pos().getY() + 0.5, task.pos().getZ() + 0.5)));
+            pt -> eyePos.squaredDistanceTo(
+                pt.task().pos().getX() + 0.5, pt.task().pos().getY() + 0.5, pt.task().pos().getZ() + 0.5)));
     }
 
     /**
@@ -867,14 +935,21 @@ public class Printer extends Module {
         if (!isActive() || !render.get()) return;
 
         // 候选方块（淡绿色，排除当前计划目标）
-        for (PrinterTask task : tasks) {
-            if (lastPlan != null && task.pos().equals(lastPlan.targetPos())) continue;
-            event.renderer.box(task.pos(), sideColor.get(), lineColor.get(), shapeMode.get(), 0);
+        for (PlannedTask pt : tasks) {
+            if (lastPlan != null && pt.task().pos().equals(lastPlan.targetPos())) continue;
+            event.renderer.box(pt.task().pos(), sideColor.get(), lineColor.get(), shapeMode.get(), 0);
         }
 
         // 当前计划目标（醒目青色高亮）
         if (lastPlan != null) {
             event.renderer.box(lastPlan.targetPos(), plannedSideColor.get(), plannedLineColor.get(), shapeMode.get(), 0);
+        }
+
+        // 无行为匹配的不一致方块（橙色）
+        if (renderUnsupported.get()) {
+            for (PrinterTask task : unsupportedTasks) {
+                event.renderer.box(task.pos(), unsupportedSideColor.get(), unsupportedLineColor.get(), shapeMode.get(), 0);
+            }
         }
 
         // 交互点（红橙色小立方体）
@@ -935,10 +1010,16 @@ public class Printer extends Module {
 
     @Override
     public String getInfoString() {
+        int supported = tasks.size();
+        int unsupported = unsupportedTasks.size();
         if (armed != null) {
-            return "ARMED (" + tasks.size() + ")";
+            return unsupported > 0
+                ? "ARMED (" + supported + " / !" + unsupported + ")"
+                : "ARMED (" + supported + ")";
         }
-        return String.valueOf(tasks.size());
+        return unsupported > 0
+            ? supported + " / !" + unsupported
+            : String.valueOf(supported);
     }
 
     /**

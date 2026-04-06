@@ -32,10 +32,8 @@ public class WaterlogBehavior implements PrinterBehavior {
         if (task.currentState().get(Properties.WATERLOGGED)) return false;
 
         // 方块类型必须一致（否则应由 BlockPlacementBehavior 处理）
-        if (task.desiredState().getBlock() != task.currentState().getBlock()) return false;
-
-        // 需要水桶
-        return InvUtils.find(Items.WATER_BUCKET).found();
+        // inventory 就绪性留给 plan() 检查，避免缺桶时任务消失
+        return task.desiredState().getBlock() == task.currentState().getBlock();
     }
 
     @Override
