@@ -1,6 +1,5 @@
 package meteordevelopment.meteorclient.utils.printer;
 
-import meteordevelopment.meteorclient.utils.printer.PlacementOption;
 import net.minecraft.block.*;
 import net.minecraft.block.enums.SlabType;
 import net.minecraft.state.property.Properties;

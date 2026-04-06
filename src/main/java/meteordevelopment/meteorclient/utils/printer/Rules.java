@@ -3,7 +3,6 @@ package meteordevelopment.meteorclient.utils.printer;
 import net.minecraft.block.*;
 import net.minecraft.block.enums.BlockHalf;
 import net.minecraft.block.enums.SlabType;
-import net.minecraft.block.enums.BlockFace; // 必须导入这个枚举
 import net.minecraft.block.enums.Orientation; // 必须导入
 
 import net.minecraft.state.property.Properties;
@@ -15,8 +14,6 @@ import java.util.Set;
 import java.util.stream.Stream;
 import net.minecraft.util.math.MathHelper;
 
-import meteordevelopment.meteorclient.utils.printer.BlockUtilHelper;
-import meteordevelopment.meteorclient.utils.printer.PlacementOption;
 import meteordevelopment.meteorclient.utils.printer.PlacementResolver.CandidateSource;
 import meteordevelopment.meteorclient.utils.printer.PlacementResolver.CandidateFilter;
 import meteordevelopment.meteorclient.utils.player.Rotations; // 确保这个也在
@@ -371,7 +368,12 @@ public final class Rules {
         // 回退方案（理论上不应该走到这里，因为 Resolver 已经注入了 hitVec）
         BlockPos clickPos = opt.getInteractPos(ctx.targetPos());
         Direction face = opt.getClickedFace();
-        return BlockUtilHelper.canSeeBlock(clickPos, face, ctx.world(), ctx.player());
+        Vec3d faceCenter = Vec3d.ofCenter(clickPos).add(
+            face.getOffsetX() * 0.5,
+            face.getOffsetY() * 0.5,
+            face.getOffsetZ() * 0.5
+        );
+        return BlockUtilHelper.canSeePoint(faceCenter, ctx.world(), ctx.player());
     };
 
     /**
