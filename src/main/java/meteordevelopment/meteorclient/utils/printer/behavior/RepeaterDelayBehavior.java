@@ -1,4 +1,6 @@
-package meteordevelopment.meteorclient.utils.printer;
+package meteordevelopment.meteorclient.utils.printer.behavior;
+
+import meteordevelopment.meteorclient.utils.printer.*;
 
 import net.minecraft.block.RepeaterBlock;
 import net.minecraft.client.MinecraftClient;

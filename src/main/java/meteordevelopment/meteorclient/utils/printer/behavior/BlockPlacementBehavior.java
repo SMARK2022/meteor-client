@@ -1,4 +1,6 @@
-package meteordevelopment.meteorclient.utils.printer;
+package meteordevelopment.meteorclient.utils.printer.behavior;
+
+import meteordevelopment.meteorclient.utils.printer.*;
 
 import net.minecraft.block.FluidBlock;
 import net.minecraft.block.SlabBlock;

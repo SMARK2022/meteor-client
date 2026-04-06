@@ -1,5 +1,6 @@
 package meteordevelopment.meteorclient.utils.printer;
 
+import meteordevelopment.meteorclient.utils.printer.behavior.*;
 import net.minecraft.client.MinecraftClient;
 
 import java.util.List;
@@ -49,17 +50,24 @@ public interface PrinterBehavior {
      * 特化行为在前，通用放置在后。
      *
      * 顺序决定优先级：
-     * 1. RepeaterDelayBehavior    - 中继器 delay 不一致 → 右键循环
-     * 2. ComparatorModeBehavior   - 比较器模式不一致 → 右键切换
-     * 3. RedstoneDotCrossBehavior - 红石线点状/十字不一致 → 右键切换
-     * 4. WaterBehavior            - 流体源方块缺失 → 桶放置
-     * 5. BlockPlacementBehavior   - 缺块/可替换 → 放置新方块
+     * 1-3. 红石状态修正（repeater delay / comparator mode / wire dot-cross）
+     * 4-7. 可交互方块状态修正（trapdoor / door / fence gate / daylight detector）
+     * 8.   流体放置（water/lava bucket）
+     * 9.   通用方块放置（fallback）
      */
     List<PrinterBehavior> REGISTRY = List.of(
+        // 红石组件状态修正
         new RepeaterDelayBehavior(),
         new ComparatorModeBehavior(),
         new RedstoneDotCrossBehavior(),
+        // 可交互方块状态修正
+        new TrapdoorBehavior(),
+        new DoorBehavior(),
+        new FenceGateBehavior(),
+        new DaylightDetectorBehavior(),
+        // 流体放置
         new WaterBehavior(),
+        // 通用放置（fallback）
         new BlockPlacementBehavior()
     );
 

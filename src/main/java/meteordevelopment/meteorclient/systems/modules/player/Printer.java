@@ -31,14 +31,10 @@ import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.meteorclient.utils.printer.ActionPlan;
 import meteordevelopment.meteorclient.utils.printer.ActionPlan.SneakPolicy;
 import meteordevelopment.meteorclient.utils.printer.ActionPlan.HandPolicy;
-import meteordevelopment.meteorclient.utils.printer.BlockPlacementBehavior;
 import meteordevelopment.meteorclient.utils.printer.BlockUtilHelper;
-import meteordevelopment.meteorclient.utils.printer.ComparatorModeBehavior;
 import meteordevelopment.meteorclient.utils.printer.PrinterBehavior;
 import meteordevelopment.meteorclient.utils.printer.PrinterTask;
-import meteordevelopment.meteorclient.utils.printer.RedstoneDotCrossBehavior;
-import meteordevelopment.meteorclient.utils.printer.RepeaterDelayBehavior;
-import meteordevelopment.meteorclient.utils.printer.WaterBehavior;
+import meteordevelopment.meteorclient.utils.printer.behavior.*;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.*;
 import net.minecraft.block.enums.SlabType;
@@ -126,6 +122,12 @@ public class Printer extends Module {
     private final Setting<Boolean> fixRedstoneState = sgGeneral.add(new BoolSetting.Builder()
             .name("fix-redstone-state")
             .description("Fix redstone component states: repeater delay, comparator mode, wire dot/cross.")
+            .defaultValue(false)
+            .build());
+
+    private final Setting<Boolean> fixInteractableState = sgGeneral.add(new BoolSetting.Builder()
+            .name("fix-interactable-state")
+            .description("Fix interactable block states: trapdoor/door open, fence gate, daylight detector inverted.")
             .defaultValue(false)
             .build());
 
@@ -248,14 +250,20 @@ public class Printer extends Module {
 
     /**
      * 判断行为是否被用户启用
-     * BlockPlacementBehavior 始终启用，红石类行为受 fixRedstoneState 开关控制，
-     * 流体行为受 placeWater 开关控制。
+     * BlockPlacementBehavior 始终启用，其他行为按开关分组控制。
      */
     private boolean isBehaviorEnabled(PrinterBehavior behavior) {
         if (behavior instanceof BlockPlacementBehavior) return true;
-        if (behavior instanceof RepeaterDelayBehavior) return fixRedstoneState.get();
-        if (behavior instanceof ComparatorModeBehavior) return fixRedstoneState.get();
-        if (behavior instanceof RedstoneDotCrossBehavior) return fixRedstoneState.get();
+        // 红石状态修正组
+        if (behavior instanceof RepeaterDelayBehavior
+            || behavior instanceof ComparatorModeBehavior
+            || behavior instanceof RedstoneDotCrossBehavior) return fixRedstoneState.get();
+        // 可交互方块状态修正组
+        if (behavior instanceof TrapdoorBehavior
+            || behavior instanceof DoorBehavior
+            || behavior instanceof FenceGateBehavior
+            || behavior instanceof DaylightDetectorBehavior) return fixInteractableState.get();
+        // 流体放置
         if (behavior instanceof WaterBehavior) return placeWater.get();
         return false;
     }
