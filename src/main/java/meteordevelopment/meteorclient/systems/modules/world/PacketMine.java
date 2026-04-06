@@ -325,17 +325,26 @@ public class PacketMine extends Module {
     }
 
     /**
-     * 如果 autoSwitch 需要，本地切到指定槽位并同步服务端。
-     * 事先记住原始槽位以便任务结束后恢复。
+     * 统一的槽位维护方法：确保当前任务所需的工具槽位处于选中状态。
+     *
+     * <p>如果 auto-switch 未启用或任务没有锁定工具，则不做任何事。
+     * 否则，幂等地保证本地和服务端的选中槽位都是任务工具。
+     * 首次切槽时记录 {@code savedSlot}，以便任务结束后恢复。
      */
-    private void switchSlotForTask(int slot) {
-        if (slot == -1 || slot == mc.player.getInventory().selectedSlot) return;
+    private void ensureTaskToolSelected(MyBlock block) {
+        if (!autoSwitch.get()) return;
+        if (block.lockedToolSlot == -1) return;
+
+        int selected = mc.player.getInventory().selectedSlot;
 
         if (savedSlot == -1) {
-            savedSlot = mc.player.getInventory().selectedSlot;
+            savedSlot = selected;
         }
-        mc.player.getInventory().selectedSlot = slot;
-        mc.player.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(slot));
+
+        if (selected != block.lockedToolSlot) {
+            mc.player.getInventory().selectedSlot = block.lockedToolSlot;
+            mc.player.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(block.lockedToolSlot));
+        }
     }
 
     /** 恢复到 autoSwitch 之前的原始槽位 */
@@ -422,6 +431,9 @@ public class PacketMine extends Module {
         /** 提交 rotation callback 时的阶段快照，callback 执行时需校验 */
         Phase rotationPhaseToken;
 
+        /** 首次 progress >= 1.0 的 tick（-1 = 尚未到达），用于 strictMargin 判断 */
+        int readyTick;
+
         public MyBlock set(StartBreakingBlockEvent event) {
             this.blockPos = event.blockPos;
             this.direction = event.direction;
@@ -436,12 +448,19 @@ public class PacketMine extends Module {
             this.heartbeatTimer = 0;
             this.rotationQueued = false;
             this.rotationPhaseToken = null;
+            this.readyTick = -1;
             return this;
         }
 
         /** 外部契约：是否可以立刻破坏（用于渲染颜色判断） */
         public boolean isReady() {
             return progress >= 1;
+        }
+
+        /** 清除 rotation 排队状态，防止陈旧 callback 卡死后续 phase */
+        private void clearRotationState() {
+            rotationQueued = false;
+            rotationPhaseToken = null;
         }
 
         // -------------------- Main tick --------------------
@@ -474,6 +493,8 @@ public class PacketMine extends Module {
 
             // 在 START 前确定并锁定工具
             lockedToolSlot = findBestToolSlot(blockState);
+            ensureTaskToolSelected(MyBlock.this);
+
             int effectiveSlot = lockedToolSlot != -1
                 ? lockedToolSlot
                 : mc.player.getInventory().selectedSlot;
@@ -482,8 +503,8 @@ public class PacketMine extends Module {
             double delta = BlockUtils.getBreakDelta(effectiveSlot, blockState);
             if (delta >= 1.0) {
                 Runnable send = () -> {
-                    if (phase != Phase.PENDING_START) return; // token 校验
-                    switchSlotForTask(lockedToolSlot);
+                    if (phase != Phase.PENDING_START) { clearRotationState(); return; }
+                    ensureTaskToolSelected(MyBlock.this);
                     sendSwing();
                     sendStartPacket(blockPos, direction);
                     sendStopPacket(blockPos, direction);
@@ -491,7 +512,7 @@ public class PacketMine extends Module {
                     progress = 1.0;
                     globalCooldown = postBreakCooldown.get();
                     phase = Phase.FINISHED;
-                    rotationQueued = false;
+                    clearRotationState();
                 };
 
                 if (rotateOnStart.get()) {
@@ -508,16 +529,17 @@ public class PacketMine extends Module {
 
             // 正常路径：只发 START
             Runnable send = () -> {
-                if (phase != Phase.PENDING_START) return; // token 校验
-                switchSlotForTask(lockedToolSlot);
+                if (phase != Phase.PENDING_START) { clearRotationState(); return; }
+                ensureTaskToolSelected(MyBlock.this);
                 sendSwing();
                 sendStartPacket(blockPos, direction);
                 mining = true;
                 progress = 0;
                 elapsedTicks = 0;
                 heartbeatTimer = 0;
+                readyTick = -1;
                 phase = Phase.MINING;
-                rotationQueued = false;
+                clearRotationState();
             };
 
             if (rotateOnStart.get()) {
@@ -534,18 +556,24 @@ public class PacketMine extends Module {
         // -------------------- MINING --------------------
 
         private void tickMining() {
-            // autoSwitch 模式下：检查玩家是否手动切了槽
+            // autoSwitch 模式下：如果玩家手动切了槽（如切武器打怪），abort 本次挖掘
             if (lockedToolSlot != -1 && mc.player.getInventory().selectedSlot != lockedToolSlot) {
-                // 玩家手动切了别的東西，abort
                 phase = Phase.ABORTING;
                 return;
             }
 
             // 按当前手持槽位计算本 tick 的 block damage
-            int effectiveSlot = mc.player.getInventory().selectedSlot;
+            int effectiveSlot = lockedToolSlot != -1
+                ? lockedToolSlot
+                : mc.player.getInventory().selectedSlot;
             double delta = BlockUtils.getBreakDelta(effectiveSlot, blockState);
             progress += delta;
             elapsedTicks++;
+
+            // 记录首次达到 progress >= 1.0 的 tick
+            if (readyTick == -1 && progress >= 1.0) {
+                readyTick = elapsedTicks;
+            }
 
             // 心跳挥手（仅安静 tick 时发，避免和 use/interact 冲突）
             if (heartbeatSwing.get() && isQuietTick()) {
@@ -564,14 +592,15 @@ public class PacketMine extends Module {
             // 判断是否可以发 STOP
             if (isReadyToStop()) {
                 phase = Phase.PENDING_STOP;
-                rotationQueued = false;
+                clearRotationState();
                 tickPendingStop();
             }
         }
 
         private boolean isReadyToStop() {
             if (progress < 1.0) return false;
-            if (strictMargin.get()) return elapsedTicks > 1 + (int) Math.ceil(1.0 / Math.max(progress / elapsedTicks, 1e-9));
+            // strictMargin: 首次达到 ready 后多等 1 tick
+            if (strictMargin.get()) return elapsedTicks > readyTick;
             return true;
         }
 
@@ -580,16 +609,18 @@ public class PacketMine extends Module {
         private void tickPendingStop() {
             if (!isQuietTick()) return;
 
-            // 发 STOP 前再次校准 face
+            // 发 STOP 前再次校准 face 和工具
             refreshCurrentFace();
+            ensureTaskToolSelected(MyBlock.this);
 
             Runnable send = () -> {
-                if (phase != Phase.PENDING_STOP) return; // token 校验
+                if (phase != Phase.PENDING_STOP) { clearRotationState(); return; }
+                ensureTaskToolSelected(MyBlock.this);
                 sendSwing();
                 sendStopPacket(blockPos, currentFace);
                 globalCooldown = postBreakCooldown.get();
                 phase = Phase.FINISHED;
-                rotationQueued = false;
+                clearRotationState();
             };
 
             if (rotateOnStop.get()) {
@@ -614,14 +645,16 @@ public class PacketMine extends Module {
 
             if (!isQuietTick()) return;
 
-            // 中止前校准 face
+            // 中止前校准 face 和工具
             refreshCurrentFace();
+            ensureTaskToolSelected(MyBlock.this);
 
             Runnable send = () -> {
-                if (phase != Phase.ABORTING) return; // token 校验
+                if (phase != Phase.ABORTING) { clearRotationState(); return; }
+                ensureTaskToolSelected(MyBlock.this);
                 sendAbortPacket(blockPos, currentFace);
                 phase = Phase.FINISHED;
-                rotationQueued = false;
+                clearRotationState();
             };
 
             if (rotateOnAbort.get()) {
