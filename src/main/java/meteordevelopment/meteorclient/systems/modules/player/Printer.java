@@ -67,6 +67,7 @@ import java.util.*;
  */
 public class Printer extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
+    private final SettingGroup sgBehavior = settings.createGroup("Behavior Toggles");
     private final SettingGroup sgRender = settings.createGroup("Render");
 
     // General Settings
@@ -118,18 +119,95 @@ public class Printer extends Module {
             .visible(() -> placeMode.get() == PlaceMode.STRICT)
             .build());
 
-    // Behavior Toggles
-    private final Setting<Boolean> fixRedstone = sgGeneral.add(new BoolSetting.Builder()
+    // Behavior Group Toggles
+    private final Setting<Boolean> fixRedstone = sgBehavior.add(new BoolSetting.Builder()
             .name("fix-redstone")
-            .description("Fix redstone & interactable states: repeater delay, comparator mode, wire dot/cross, trapdoor/door/fence gate open, daylight detector.")
+            .description("Enable redstone component state fixes (repeater / comparator / wire).")
             .defaultValue(false)
             .build());
 
-    private final Setting<Boolean> placeWater = sgGeneral.add(new BoolSetting.Builder()
-            .name("place-water")
-            .description("Place water/lava source blocks from buckets.")
+    // Redstone sub-toggles
+    private final Setting<Boolean> fixRepeaterDelay = sgBehavior.add(new BoolSetting.Builder()
+            .name("fix-repeater-delay")
+            .description("Fix repeater delay mismatch.")
+            .defaultValue(true)
+            .visible(fixRedstone::get)
+            .build());
+
+    private final Setting<Boolean> fixComparatorMode = sgBehavior.add(new BoolSetting.Builder()
+            .name("fix-comparator-mode")
+            .description("Fix comparator mode mismatch.")
+            .defaultValue(true)
+            .visible(fixRedstone::get)
+            .build());
+
+    private final Setting<Boolean> fixRedstoneWire = sgBehavior.add(new BoolSetting.Builder()
+            .name("fix-redstone-wire")
+            .description("Fix redstone wire dot/cross mismatch.")
+            .defaultValue(true)
+            .visible(fixRedstone::get)
+            .build());
+
+    // Interactable group toggle
+    private final Setting<Boolean> fixInteractable = sgBehavior.add(new BoolSetting.Builder()
+            .name("fix-interactable")
+            .description("Enable interactable block state fixes (trapdoor / door / fence gate / daylight detector).")
             .defaultValue(false)
             .build());
+
+    // Interactable sub-toggles
+    private final Setting<Boolean> fixTrapdoor = sgBehavior.add(new BoolSetting.Builder()
+            .name("fix-trapdoor")
+            .description("Fix trapdoor open state.")
+            .defaultValue(true)
+            .visible(fixInteractable::get)
+            .build());
+
+    private final Setting<Boolean> fixDoor = sgBehavior.add(new BoolSetting.Builder()
+            .name("fix-door")
+            .description("Fix door open state.")
+            .defaultValue(true)
+            .visible(fixInteractable::get)
+            .build());
+
+    private final Setting<Boolean> fixFenceGate = sgBehavior.add(new BoolSetting.Builder()
+            .name("fix-fence-gate")
+            .description("Fix fence gate open state.")
+            .defaultValue(true)
+            .visible(fixInteractable::get)
+            .build());
+
+    private final Setting<Boolean> fixDaylightDetector = sgBehavior.add(new BoolSetting.Builder()
+            .name("fix-daylight-detector")
+            .description("Fix daylight detector inverted state.")
+            .defaultValue(true)
+            .visible(fixInteractable::get)
+            .build());
+
+    // Fluid group toggle
+    private final Setting<Boolean> placeFluid = sgBehavior.add(new BoolSetting.Builder()
+            .name("place-fluid")
+            .description("Enable fluid placement & waterlogging.")
+            .defaultValue(false)
+            .build());
+
+    // Fluid sub-toggles
+    private final Setting<Boolean> placeFluidSource = sgBehavior.add(new BoolSetting.Builder()
+            .name("place-fluid-source")
+            .description("Place water/lava source blocks from buckets.")
+            .defaultValue(true)
+            .visible(placeFluid::get)
+            .build());
+
+    private final Setting<Boolean> fixWaterlog = sgBehavior.add(new BoolSetting.Builder()
+            .name("fix-waterlog")
+            .description("Add water to waterloggable blocks.")
+            .defaultValue(true)
+            .visible(placeFluid::get)
+            .build());
+
+    // Key → sub-toggle mapping (populated in constructor)
+    private final Map<PrinterBehavior.Key, Setting<Boolean>> subToggles = new EnumMap<>(PrinterBehavior.Key.class);
 
     // Render Settings
     private final Setting<Boolean> render = sgRender.add(new BoolSetting.Builder()
@@ -257,6 +335,17 @@ public class Printer extends Module {
 
     public Printer() {
         super(Categories.Player, "printer", "Automatically places blocks based on Litematica schematic.");
+
+        // 填充 Key → sub-toggle 映射
+        subToggles.put(PrinterBehavior.Key.REPEATER_DELAY, fixRepeaterDelay);
+        subToggles.put(PrinterBehavior.Key.COMPARATOR_MODE, fixComparatorMode);
+        subToggles.put(PrinterBehavior.Key.REDSTONE_DOT_CROSS, fixRedstoneWire);
+        subToggles.put(PrinterBehavior.Key.TRAPDOOR_OPEN, fixTrapdoor);
+        subToggles.put(PrinterBehavior.Key.DOOR_OPEN, fixDoor);
+        subToggles.put(PrinterBehavior.Key.FENCE_GATE_OPEN, fixFenceGate);
+        subToggles.put(PrinterBehavior.Key.DAYLIGHT_DETECTOR, fixDaylightDetector);
+        subToggles.put(PrinterBehavior.Key.FLUID_SOURCE, placeFluidSource);
+        subToggles.put(PrinterBehavior.Key.WATERLOG, fixWaterlog);
     }
 
     @Override
@@ -293,14 +382,21 @@ public class Printer extends Module {
 
     /**
      * 判断行为是否被用户启用
-     * PLACEMENT 组始终启用，其他组由对应开关控制。
+     * PLACEMENT 组始终启用；其他组需组开关 + 细项开关同时启用。
      */
     private boolean isBehaviorEnabled(PrinterBehavior behavior) {
-        return switch (behavior.group()) {
-            case PLACEMENT -> true;
-            case REDSTONE  -> fixRedstone.get();
-            case FLUID     -> placeWater.get();
+        // 组级开关
+        boolean groupEnabled = switch (behavior.group()) {
+            case PLACEMENT    -> true;
+            case REDSTONE     -> fixRedstone.get();
+            case INTERACTABLE -> fixInteractable.get();
+            case FLUID        -> placeFluid.get();
         };
+        if (!groupEnabled) return false;
+
+        // 细项开关（组内按 key 查找）
+        Setting<Boolean> sub = subToggles.get(behavior.key());
+        return sub == null || sub.get();
     }
 
     /**

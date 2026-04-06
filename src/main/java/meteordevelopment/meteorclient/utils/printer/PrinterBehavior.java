@@ -26,12 +26,39 @@ public interface PrinterBehavior {
      * 不再需要 instanceof 匹配。
      */
     enum Group {
-        /** 红石及可交互组件状态修正（repeater / comparator / wire / trapdoor / door / fence gate / daylight detector） */
+        /** 红石组件状态修正（repeater delay / comparator mode / wire dot-cross） */
         REDSTONE,
+        /** 可交互方块状态修正（trapdoor / door / fence gate / daylight detector） */
+        INTERACTABLE,
         /** 流体与含水（water/lava bucket, waterlog） */
         FLUID,
         /** 通用方块放置（fallback，始终启用） */
         PLACEMENT
+    }
+
+    /**
+     * 行为唯一标识，用于细粒度开关和设置映射。
+     * 每个行为声明自己的 Key，Printer 据此创建独立开关。
+     */
+    enum Key {
+        REPEATER_DELAY("fix-repeater-delay", "Fix repeater delay mismatch."),
+        COMPARATOR_MODE("fix-comparator-mode", "Fix comparator mode mismatch."),
+        REDSTONE_DOT_CROSS("fix-redstone-wire", "Fix redstone wire dot/cross mismatch."),
+        TRAPDOOR_OPEN("fix-trapdoor", "Fix trapdoor open state."),
+        DOOR_OPEN("fix-door", "Fix door open state."),
+        FENCE_GATE_OPEN("fix-fence-gate", "Fix fence gate open state."),
+        DAYLIGHT_DETECTOR("fix-daylight-detector", "Fix daylight detector inverted state."),
+        FLUID_SOURCE("place-fluid-source", "Place water/lava source blocks from buckets."),
+        WATERLOG("fix-waterlog", "Add water to waterloggable blocks."),
+        BLOCK_PLACEMENT("place-blocks", "Standard block placement.");
+
+        public final String settingName;
+        public final String description;
+
+        Key(String settingName, String description) {
+            this.settingName = settingName;
+            this.description = description;
+        }
     }
 
     /**
@@ -40,6 +67,14 @@ public interface PrinterBehavior {
      */
     default Group group() {
         return Group.PLACEMENT;
+    }
+
+    /**
+     * 此行为的唯一标识。
+     * 默认返回 BLOCK_PLACEMENT。
+     */
+    default Key key() {
+        return Key.BLOCK_PLACEMENT;
     }
 
     /**

@@ -19,7 +19,12 @@ public class DaylightDetectorBehavior implements PrinterBehavior {
 
     @Override
     public Group group() {
-        return Group.REDSTONE;
+        return Group.INTERACTABLE;
+    }
+
+    @Override
+    public Key key() {
+        return Key.DAYLIGHT_DETECTOR;
     }
 
     @Override

@@ -27,6 +27,11 @@ public class RedstoneDotCrossBehavior implements PrinterBehavior {
     }
 
     @Override
+    public Key key() {
+        return Key.REDSTONE_DOT_CROSS;
+    }
+
+    @Override
     public boolean supports(PrinterTask task) {
         if (!(task.desiredState().getBlock() instanceof RedstoneWireBlock)) return false;
         if (!(task.currentState().getBlock() instanceof RedstoneWireBlock)) return false;

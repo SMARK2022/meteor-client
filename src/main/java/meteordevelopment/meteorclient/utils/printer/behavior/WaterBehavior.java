@@ -9,6 +9,7 @@ import net.minecraft.block.FluidBlock;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
+import net.minecraft.state.property.Properties;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
@@ -29,6 +30,11 @@ public class WaterBehavior implements PrinterBehavior {
     @Override
     public Group group() {
         return Group.FLUID;
+    }
+
+    @Override
+    public Key key() {
+        return Key.FLUID_SOURCE;
     }
 
     @Override
@@ -81,11 +87,20 @@ public class WaterBehavior implements PrinterBehavior {
         BlockPos interactPos = option.getInteractPos(task.pos());
         boolean selfPlacement = interactPos.equals(task.pos());
 
-        // 潜行策略：如果邻居是交互类方块（箱子等），需要潜行来绕过
+        // 潜行策略：
+        // 1. 邻居是交互类方块（箱子等）→ 潜行绕过交互
+        // 2. 邻居是可含水方块（台阶/楼梯等）→ 潜行防止水被吸收进邻居
         var interactState = mc.world.getBlockState(interactPos);
-        ActionPlan.SneakPolicy sneakPolicy = BlockUtilHelper.SNEAK_BLOCKS.contains(interactState.getBlock())
-            ? ActionPlan.SneakPolicy.REQUIRE_SNEAK
-            : ActionPlan.SneakPolicy.KEEP_CURRENT;
+        ActionPlan.SneakPolicy sneakPolicy;
+        if (BlockUtilHelper.SNEAK_BLOCKS.contains(interactState.getBlock())) {
+            sneakPolicy = ActionPlan.SneakPolicy.REQUIRE_SNEAK;
+        } else if (!selfPlacement
+            && interactState.contains(Properties.WATERLOGGED)
+            && !interactState.get(Properties.WATERLOGGED)) {
+            sneakPolicy = ActionPlan.SneakPolicy.REQUIRE_SNEAK;
+        } else {
+            sneakPolicy = ActionPlan.SneakPolicy.KEEP_CURRENT;
+        }
 
         return new ActionPlan.UseItemOnBlock(
             task.pos(),

@@ -26,6 +26,11 @@ public class ComparatorModeBehavior implements PrinterBehavior {
     }
 
     @Override
+    public Key key() {
+        return Key.COMPARATOR_MODE;
+    }
+
+    @Override
     public boolean supports(PrinterTask task) {
         if (!(task.desiredState().getBlock() instanceof ComparatorBlock)) return false;
         if (!(task.currentState().getBlock() instanceof ComparatorBlock)) return false;

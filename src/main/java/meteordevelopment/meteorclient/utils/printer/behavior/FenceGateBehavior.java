@@ -22,7 +22,12 @@ public class FenceGateBehavior implements PrinterBehavior {
 
     @Override
     public Group group() {
-        return Group.REDSTONE;
+        return Group.INTERACTABLE;
+    }
+
+    @Override
+    public Key key() {
+        return Key.FENCE_GATE_OPEN;
     }
 
     @Override

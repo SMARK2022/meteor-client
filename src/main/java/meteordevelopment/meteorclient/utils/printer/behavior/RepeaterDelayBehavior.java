@@ -31,6 +31,11 @@ public class RepeaterDelayBehavior implements PrinterBehavior {
     }
 
     @Override
+    public Key key() {
+        return Key.REPEATER_DELAY;
+    }
+
+    @Override
     public boolean supports(PrinterTask task) {
         if (!(task.desiredState().getBlock() instanceof RepeaterBlock)) return false;
         if (!(task.currentState().getBlock() instanceof RepeaterBlock)) return false;

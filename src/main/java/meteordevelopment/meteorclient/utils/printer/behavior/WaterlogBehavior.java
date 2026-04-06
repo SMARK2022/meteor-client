@@ -27,6 +27,11 @@ public class WaterlogBehavior implements PrinterBehavior {
     }
 
     @Override
+    public Key key() {
+        return Key.WATERLOG;
+    }
+
+    @Override
     public boolean supports(PrinterTask task) {
         // 两者必须都含有 WATERLOGGED 属性
         if (!task.desiredState().contains(Properties.WATERLOGGED)) return false;

@@ -25,7 +25,12 @@ public class DoorBehavior implements PrinterBehavior {
 
     @Override
     public Group group() {
-        return Group.REDSTONE;
+        return Group.INTERACTABLE;
+    }
+
+    @Override
+    public Key key() {
+        return Key.DOOR_OPEN;
     }
 
     @Override

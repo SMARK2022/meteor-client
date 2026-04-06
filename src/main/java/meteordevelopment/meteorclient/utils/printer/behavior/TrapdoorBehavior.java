@@ -24,7 +24,12 @@ public class TrapdoorBehavior implements PrinterBehavior {
 
     @Override
     public Group group() {
-        return Group.REDSTONE;
+        return Group.INTERACTABLE;
+    }
+
+    @Override
+    public Key key() {
+        return Key.TRAPDOOR_OPEN;
     }
 
     @Override
