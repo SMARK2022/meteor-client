@@ -22,6 +22,11 @@ import meteordevelopment.meteorclient.utils.player.InvUtils;
 public class WaterlogBehavior implements PrinterBehavior {
 
     @Override
+    public Group group() {
+        return Group.FLUID;
+    }
+
+    @Override
     public boolean supports(PrinterTask task) {
         // 两者必须都含有 WATERLOGGED 属性
         if (!task.desiredState().contains(Properties.WATERLOGGED)) return false;

@@ -27,6 +27,11 @@ import meteordevelopment.meteorclient.utils.player.Rotations;
 public class WaterBehavior implements PrinterBehavior {
 
     @Override
+    public Group group() {
+        return Group.FLUID;
+    }
+
+    @Override
     public boolean supports(PrinterTask task) {
         Block desired = task.desiredState().getBlock();
 

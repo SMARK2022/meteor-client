@@ -18,6 +18,11 @@ import net.minecraft.state.property.Properties;
 public class DaylightDetectorBehavior implements PrinterBehavior {
 
     @Override
+    public Group group() {
+        return Group.REDSTONE;
+    }
+
+    @Override
     public boolean supports(PrinterTask task) {
         if (!(task.desiredState().getBlock() instanceof DaylightDetectorBlock)) return false;
         if (!(task.currentState().getBlock() instanceof DaylightDetectorBlock)) return false;

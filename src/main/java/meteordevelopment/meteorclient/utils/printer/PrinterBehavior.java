@@ -18,6 +18,30 @@ import java.util.List;
  */
 public interface PrinterBehavior {
 
+    // ==================== 行为组枚举 ====================
+
+    /**
+     * 行为所属分组，用于开关控制和设置分类。
+     * Printer 为每个分组创建一个开关，行为各自声明归属，
+     * 不再需要 instanceof 匹配。
+     */
+    enum Group {
+        /** 红石及可交互组件状态修正（repeater / comparator / wire / trapdoor / door / fence gate / daylight detector） */
+        REDSTONE,
+        /** 流体与含水（water/lava bucket, waterlog） */
+        FLUID,
+        /** 通用方块放置（fallback，始终启用） */
+        PLACEMENT
+    }
+
+    /**
+     * 此行为所属的分组。
+     * 默认返回 PLACEMENT，通用放置行为无需覆写。
+     */
+    default Group group() {
+        return Group.PLACEMENT;
+    }
+
     /**
      * 此行为是否能处理该任务
      * 应为轻量判断，不做 resolve 或世界交互。
@@ -50,18 +74,16 @@ public interface PrinterBehavior {
      * 特化行为在前，通用放置在后。
      *
      * 顺序决定优先级：
-     * 1-3. 红石状态修正（repeater delay / comparator mode / wire dot-cross）
-     * 4-7. 可交互方块状态修正（trapdoor / door / fence gate / daylight detector）
+     * 1-7. 红石及可交互组件状态修正（repeater / comparator / wire / trapdoor / door / fence gate / daylight detector）
      * 8.   流体放置（water/lava bucket）
      * 9.   方块含水（waterlog with bucket）
      * 10.  通用方块放置（fallback）
      */
     List<PrinterBehavior> REGISTRY = List.of(
-        // 红石组件状态修正
+        // 红石及可交互组件状态修正
         new RepeaterDelayBehavior(),
         new ComparatorModeBehavior(),
         new RedstoneDotCrossBehavior(),
-        // 可交互方块状态修正
         new TrapdoorBehavior(),
         new DoorBehavior(),
         new FenceGateBehavior(),

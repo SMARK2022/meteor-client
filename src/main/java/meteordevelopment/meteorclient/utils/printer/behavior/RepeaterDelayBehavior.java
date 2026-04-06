@@ -26,6 +26,11 @@ import net.minecraft.state.property.Properties;
 public class RepeaterDelayBehavior implements PrinterBehavior {
 
     @Override
+    public Group group() {
+        return Group.REDSTONE;
+    }
+
+    @Override
     public boolean supports(PrinterTask task) {
         if (!(task.desiredState().getBlock() instanceof RepeaterBlock)) return false;
         if (!(task.currentState().getBlock() instanceof RepeaterBlock)) return false;

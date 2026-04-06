@@ -119,15 +119,9 @@ public class Printer extends Module {
             .build());
 
     // Behavior Toggles
-    private final Setting<Boolean> fixRedstoneState = sgGeneral.add(new BoolSetting.Builder()
-            .name("fix-redstone-state")
-            .description("Fix redstone component states: repeater delay, comparator mode, wire dot/cross.")
-            .defaultValue(false)
-            .build());
-
-    private final Setting<Boolean> fixInteractableState = sgGeneral.add(new BoolSetting.Builder()
-            .name("fix-interactable-state")
-            .description("Fix interactable block states: trapdoor/door open, fence gate, daylight detector inverted.")
+    private final Setting<Boolean> fixRedstone = sgGeneral.add(new BoolSetting.Builder()
+            .name("fix-redstone")
+            .description("Fix redstone & interactable states: repeater delay, comparator mode, wire dot/cross, trapdoor/door/fence gate open, daylight detector.")
             .defaultValue(false)
             .build());
 
@@ -160,6 +154,18 @@ public class Printer extends Module {
             .name("line-color")
             .description("The line color of the rendering.")
             .defaultValue(new SettingColor(20, 200, 20, 255))
+            .build());
+
+    private final Setting<SettingColor> behaviorSideColor = sgRender.add(new ColorSetting.Builder()
+            .name("behavior-side-color")
+            .description("The side color for enabled behavior tasks (redstone fix, fluid, etc.).")
+            .defaultValue(new SettingColor(200, 160, 20, 50))
+            .build());
+
+    private final Setting<SettingColor> behaviorLineColor = sgRender.add(new ColorSetting.Builder()
+            .name("behavior-line-color")
+            .description("The line color for enabled behavior tasks (redstone fix, fluid, etc.).")
+            .defaultValue(new SettingColor(200, 160, 20, 255))
             .build());
 
     private final Setting<SettingColor> plannedSideColor = sgRender.add(new ColorSetting.Builder()
@@ -230,8 +236,11 @@ public class Printer extends Module {
     /** 当前 tick 可修复的任务列表（已绑定行为） */
     private final List<PlannedTask> tasks = new ArrayList<>();
 
-    /** 当前 tick 无行为匹配的不一致位置（unsupported / disabled） */
+    /** 当前 tick 无任何行为能处理的不一致位置 */
     private final List<PrinterTask> unsupportedTasks = new ArrayList<>();
+
+    /** 当前 tick 有行为能处理但被用户关闭的不一致位置 */
+    private final List<PrinterTask> disabledTasks = new ArrayList<>();
 
     private int tickDelay = 0;
 
@@ -255,6 +264,7 @@ public class Printer extends Module {
         tickDelay = 0;
         tasks.clear();
         unsupportedTasks.clear();
+        disabledTasks.clear();
         clearArmed();
     }
 
@@ -263,6 +273,7 @@ public class Printer extends Module {
         tickDelay = 0;
         tasks.clear();
         unsupportedTasks.clear();
+        disabledTasks.clear();
         clearArmed();
         resetSneakState();
     }
@@ -282,23 +293,14 @@ public class Printer extends Module {
 
     /**
      * 判断行为是否被用户启用
-     * BlockPlacementBehavior 始终启用，其他行为按开关分组控制。
+     * PLACEMENT 组始终启用，其他组由对应开关控制。
      */
     private boolean isBehaviorEnabled(PrinterBehavior behavior) {
-        if (behavior instanceof BlockPlacementBehavior) return true;
-        // 红石状态修正组
-        if (behavior instanceof RepeaterDelayBehavior
-            || behavior instanceof ComparatorModeBehavior
-            || behavior instanceof RedstoneDotCrossBehavior) return fixRedstoneState.get();
-        // 可交互方块状态修正组
-        if (behavior instanceof TrapdoorBehavior
-            || behavior instanceof DoorBehavior
-            || behavior instanceof FenceGateBehavior
-            || behavior instanceof DaylightDetectorBehavior) return fixInteractableState.get();
-        // 流体放置
-        if (behavior instanceof WaterBehavior
-            || behavior instanceof WaterlogBehavior) return placeWater.get();
-        return false;
+        return switch (behavior.group()) {
+            case PLACEMENT -> true;
+            case REDSTONE  -> fixRedstone.get();
+            case FLUID     -> placeWater.get();
+        };
     }
 
     /**
@@ -792,12 +794,13 @@ public class Printer extends Module {
      *
      * 改进点：
      * 1. 使用 PlannedTask 绑定行为，selectBestAction 不再重复查找
-     * 2. 无行为匹配的不一致收集到 unsupportedTasks，不再静默丢弃
+     * 2. 无行为匹配的不一致收集到 unsupportedTasks；有行为但被关闭的收集到 disabledTasks
      * 3. 不在扫描阶段做 resolve，"已满足"判断交给 Behavior.isSatisfied
      */
     private void updateTasks(WorldSchematic worldSchematic) {
         tasks.clear();
         unsupportedTasks.clear();
+        disabledTasks.clear();
 
         if (mc.player == null || mc.world == null) return;
 
@@ -824,8 +827,12 @@ public class Printer extends Module {
             // 查找匹配的已启用行为
             PrinterBehavior behavior = findEnabledBehavior(task);
             if (behavior == null) {
-                // 无行为匹配 → unsupported（而非静默丢弃）
-                unsupportedTasks.add(task);
+                // 区分"真不支持"和"有行为但被关闭"
+                if (PrinterBehavior.find(task) != null) {
+                    disabledTasks.add(task);
+                } else {
+                    unsupportedTasks.add(task);
+                }
                 continue;
             }
 
@@ -934,10 +941,14 @@ public class Printer extends Module {
     private void onRender(Render3DEvent event) {
         if (!isActive() || !render.get()) return;
 
-        // 候选方块（淡绿色，排除当前计划目标）
+        // 候选方块（按行为分组着色，排除当前计划目标）
         for (PlannedTask pt : tasks) {
             if (lastPlan != null && pt.task().pos().equals(lastPlan.targetPos())) continue;
-            event.renderer.box(pt.task().pos(), sideColor.get(), lineColor.get(), shapeMode.get(), 0);
+            if (pt.behavior().group() == PrinterBehavior.Group.PLACEMENT) {
+                event.renderer.box(pt.task().pos(), sideColor.get(), lineColor.get(), shapeMode.get(), 0);
+            } else {
+                event.renderer.box(pt.task().pos(), behaviorSideColor.get(), behaviorLineColor.get(), shapeMode.get(), 0);
+            }
         }
 
         // 当前计划目标（醒目青色高亮）
@@ -1012,14 +1023,14 @@ public class Printer extends Module {
     public String getInfoString() {
         int supported = tasks.size();
         int unsupported = unsupportedTasks.size();
-        if (armed != null) {
-            return unsupported > 0
-                ? "ARMED (" + supported + " / !" + unsupported + ")"
-                : "ARMED (" + supported + ")";
-        }
-        return unsupported > 0
-            ? supported + " / !" + unsupported
-            : String.valueOf(supported);
+        int disabled = disabledTasks.size();
+        StringBuilder sb = new StringBuilder();
+        if (armed != null) sb.append("ARMED (");
+        sb.append(supported);
+        if (disabled > 0) sb.append(" / ~").append(disabled);
+        if (unsupported > 0) sb.append(" / !").append(unsupported);
+        if (armed != null) sb.append(")");
+        return sb.toString();
     }
 
     /**

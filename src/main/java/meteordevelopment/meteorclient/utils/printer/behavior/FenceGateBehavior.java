@@ -21,6 +21,11 @@ import net.minecraft.state.property.Properties;
 public class FenceGateBehavior implements PrinterBehavior {
 
     @Override
+    public Group group() {
+        return Group.REDSTONE;
+    }
+
+    @Override
     public boolean supports(PrinterTask task) {
         if (!(task.desiredState().getBlock() instanceof FenceGateBlock)) return false;
         if (!(task.currentState().getBlock() instanceof FenceGateBlock)) return false;

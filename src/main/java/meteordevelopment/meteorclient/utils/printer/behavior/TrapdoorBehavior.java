@@ -23,6 +23,11 @@ import net.minecraft.state.property.Properties;
 public class TrapdoorBehavior implements PrinterBehavior {
 
     @Override
+    public Group group() {
+        return Group.REDSTONE;
+    }
+
+    @Override
     public boolean supports(PrinterTask task) {
         if (!(task.desiredState().getBlock() instanceof TrapdoorBlock)) return false;
         if (!(task.currentState().getBlock() instanceof TrapdoorBlock)) return false;
