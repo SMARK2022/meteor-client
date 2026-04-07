@@ -47,7 +47,9 @@ public interface PrinterBehavior {
         TRAPDOOR_OPEN("fix-trapdoor", "Fix trapdoor open state."),
         DOOR_OPEN("fix-door", "Fix door open state."),
         FENCE_GATE_OPEN("fix-fence-gate", "Fix fence gate open state."),
+        LEVER_POWERED("fix-lever", "Fix lever powered state."),
         DAYLIGHT_DETECTOR("fix-daylight-detector", "Fix daylight detector inverted state."),
+        NOTE_BLOCK_NOTE("fix-note-block", "Fix note block note value."),
         FLUID_SOURCE("place-fluid-source", "Place water/lava source blocks from buckets."),
         WATERLOG("fix-waterlog", "Add water to waterloggable blocks."),
         BLOCK_PLACEMENT("place-blocks", "Standard block placement.");
@@ -109,19 +111,23 @@ public interface PrinterBehavior {
      * 特化行为在前，通用放置在后。
      *
      * 顺序决定优先级：
-     * 1-7. 红石及可交互组件状态修正（repeater / comparator / wire / trapdoor / door / fence gate / daylight detector）
-     * 8.   流体放置（water/lava bucket）
-     * 9.   方块含水（waterlog with bucket）
-     * 10.  通用方块放置（fallback）
+     * 1-7. 红石组件状态修正（repeater / comparator / wire / note block）
+     * 8-11. 可交互组件状态修正（trapdoor / door / fence gate / lever / daylight detector）
+     * 12.  流体放置（water/lava bucket）
+     * 13.  方块含水（waterlog with bucket）
+     * 14.  通用方块放置（fallback）
      */
     List<PrinterBehavior> REGISTRY = List.of(
-        // 红石及可交互组件状态修正
+        // 红石组件状态修正
         new RepeaterDelayBehavior(),
         new ComparatorModeBehavior(),
         new RedstoneDotCrossBehavior(),
+        new NoteBlockBehavior(),
+        // 可交互组件状态修正
         new TrapdoorBehavior(),
         new DoorBehavior(),
         new FenceGateBehavior(),
+        new LeverBehavior(),
         new DaylightDetectorBehavior(),
         // 流体放置
         new WaterBehavior(),
