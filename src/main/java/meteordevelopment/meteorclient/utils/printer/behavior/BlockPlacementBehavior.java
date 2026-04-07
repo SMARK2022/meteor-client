@@ -112,13 +112,18 @@ public class BlockPlacementBehavior implements PrinterBehavior {
         var interactState = mc.world.getBlockState(interactPos);
         ActionPlan.SneakPolicy sneakPolicy = BlockUtilHelper.determineSneakPolicy(interactState);
 
-        // 双箱子潜行修正：根据阶段和交互目标精确调整
-        // - Plan A merge（点击箱子侧面）：determineSneakPolicy 已处理 → REQUIRE_SNEAK
-        // - Plan B merge（点击非箱子面）：需要 NOT_SNEAK 让规则3自动合并生效
-        // - Single-safe + 附近有同向 SINGLE：需要 SNEAK 抑制规则3意外合并
-        // - Single-safe + 附近无 SINGLE：无风险 → KEEP_CURRENT
+        // 双箱子潜行修正：与 base 策略合并，冲突时放弃候选
         if (isDoubleChestTarget(task) && !(interactState.getBlock() instanceof AbstractChestBlock)) {
-            sneakPolicy = computeChestSneakPolicy(mc, effectivePos, task);
+            ActionPlan.SneakPolicy chestPolicy = computeChestSneakPolicy(mc, effectivePos, task);
+            if (chestPolicy != ActionPlan.SneakPolicy.KEEP_CURRENT) {
+                // 冲突检测：base 要求潜行但箱子逻辑要求不潜行（或反之）→ 无法兼顾
+                if (sneakPolicy == ActionPlan.SneakPolicy.REQUIRE_SNEAK
+                    && chestPolicy == ActionPlan.SneakPolicy.REQUIRE_NOT_SNEAK) return null;
+                if (sneakPolicy == ActionPlan.SneakPolicy.REQUIRE_NOT_SNEAK
+                    && chestPolicy == ActionPlan.SneakPolicy.REQUIRE_SNEAK) return null;
+                sneakPolicy = chestPolicy;
+            }
+            // chestPolicy == KEEP_CURRENT → 保留 base 策略（如对漏斗 REQUIRE_SNEAK）
         }
 
         return new ActionPlan.PlaceBlock(
