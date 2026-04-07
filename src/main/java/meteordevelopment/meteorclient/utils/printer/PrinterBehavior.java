@@ -115,7 +115,8 @@ public interface PrinterBehavior {
      * 8-11. 可交互组件状态修正（trapdoor / door / fence gate / lever / daylight detector）
      * 12.  流体放置（water/lava bucket）
      * 13.  方块含水（waterlog with bucket）
-     * 14.  通用方块放置（fallback）
+     * 14.  双箱子放置（two-phase merge）
+     * 15.  通用方块放置（fallback）
      */
     List<PrinterBehavior> REGISTRY = List.of(
         // 红石组件状态修正
@@ -133,7 +134,7 @@ public interface PrinterBehavior {
         new WaterBehavior(),
         // 方块含水
         new WaterlogBehavior(),
-        // 通用放置（fallback）
+        // 通用放置（fallback，同时处理双箱子两阶段放置，ChestType 由 ResolverRegistry 安全解析）
         new BlockPlacementBehavior()
     );
 
