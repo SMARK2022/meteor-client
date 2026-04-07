@@ -590,23 +590,14 @@ public class Printer extends Module {
         int candidateLimit = maxCandidates.get(); // 0 = 不限制
         int planned = 0;
 
-        Set<BlockPos> chestPlanTargets = new HashSet<>();
-
         for (PlannedTask pt : tasks) {
             if (candidateLimit > 0 && planned >= candidateLimit) break;
 
             ActionPlan plan = pt.behavior().plan(pt.task(), mc, strict, checkLos, maxReach);
             if (plan == null) continue;
 
-            // 双箱子 merge 阶段重定向目标实体阻挡检查
+            // 重定向目标实体阻挡检查（双箱子 merge 阶段 targetPos 可能 ≠ task.pos）
             if (plan instanceof ActionPlan.PlaceBlock pb && hasBlockingEntity(pb.targetPos())) continue;
-
-            // 双箱子 preview 去重：同一 targetPos 只保留评分最优（先到先得，已按距离排序）
-            if (plan instanceof ActionPlan.PlaceBlock pb2
-                && pb2.desiredState().getBlock() instanceof ChestBlock
-                && !chestPlanTargets.add(pb2.targetPos())) {
-                continue;
-            }
 
             planned++;
 
@@ -963,7 +954,7 @@ public class Printer extends Module {
             PrinterTask task = new PrinterTask(pos, requiredState, currentState);
 
             // 多格对象锚点规范化：
-            // 床/门等双格对象，只从主格（放置锚点）规划，另一半由 onPlaced 联动。
+            // 床/门/双箱子等多格对象，只从主格（放置锚点）规划，另一半由 onPlaced 联动。
             // 这避免了两个 task 争抢同一个放置动作。
             if (requiredState.getBlock() instanceof BedBlock
                 && requiredState.contains(BedBlock.PART)
@@ -974,6 +965,11 @@ public class Printer extends Module {
                 && requiredState.contains(DoorBlock.HALF)
                 && requiredState.get(DoorBlock.HALF) != net.minecraft.block.enums.DoubleBlockHalf.LOWER) {
                 continue; // 只从 lower 半规划
+            }
+            if (requiredState.getBlock() instanceof ChestBlock
+                && requiredState.contains(ChestBlock.CHEST_TYPE)
+                && requiredState.get(ChestBlock.CHEST_TYPE) == ChestType.RIGHT) {
+                continue; // 只从 LEFT 半规划，merge/singleSafe 均由 LEFT 任务统一驱动
             }
 
             // 查找匹配的已启用行为

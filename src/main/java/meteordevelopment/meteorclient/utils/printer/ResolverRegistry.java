@@ -802,14 +802,15 @@ public final class ResolverRegistry {
         BlockPos mergeTarget = placePos.offset(mergeDir);
         BlockPos redirectPos = placePos.equals(ctx.targetPos()) ? null : placePos;
 
-        // Plan A: 直接点击合并目标的水平侧面（merge 由位置/朝向关系决定，无需严格 NCP/LOS）
-        // 仅需 placePos 可放置 + hitVec 在 reach 内
+        // Plan A: 直接点击合并目标的水平侧面（merge 由位置/朝向关系决定，无需严格 NCP 方向检测）
+        // 条件：placePos 可放置 + hitVec 在 reach 内 + LOS 可见
         BlockState placeState = ctx.world().getBlockState(placePos);
         if (placeState.isAir() || placeState.isReplaceable()) {
             Direction clickFace = mergeDir.getOpposite();
             Vec3d hitVec = Vec3d.ofCenter(mergeTarget).add(
                 clickFace.getOffsetX() * 0.5, 0, clickFace.getOffsetZ() * 0.5);
-            if (ctx.eyePos().distanceTo(hitVec) <= ctx.maxReach()) {
+            if (ctx.eyePos().distanceTo(hitVec) <= ctx.maxReach()
+                && (!ctx.checkLos() || BlockUtilHelper.canSeePoint(hitVec, ctx.world(), ctx.player()))) {
                 return new PlacementOption(mergeDir, false, singleState, hitVec, redirectPos);
             }
         }
