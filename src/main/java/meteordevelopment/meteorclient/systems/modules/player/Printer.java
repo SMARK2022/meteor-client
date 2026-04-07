@@ -306,6 +306,14 @@ public class Printer extends Module {
     private record ArmedAction(ActionPlan plan, Hand hand) {}
 
     /**
+     * PreviewCandidate - 通过完整 behavior.plan() 过滤的候选（含评分）
+     *
+     * <p>只有成功生成 ActionPlan 的任务才会进入此层。
+     * 渲染层和选拔层都基于此列表，而非原始的 {@code tasks}。
+     */
+    private record PreviewCandidate(PlannedTask plannedTask, ActionPlan plan, double score) {}
+
+    /**
      * 潜行准备结果
      */
     private enum SneakReadiness { READY, PREPARING, BLOCKED }
@@ -327,6 +335,9 @@ public class Printer extends Module {
     /** 当前 tick 有行为能处理但被用户关闭的不一致位置 */
     private final List<PrinterTask> disabledTasks = new ArrayList<>();
 
+    /** 当前 tick 已通过完整 plan 过滤的候选（score 升序，越小越优） */
+    private final List<PreviewCandidate> previewCandidates = new ArrayList<>();
+
     private int tickDelay = 0;
 
     /** 当前 tick 的动作计划（逻辑态） */
@@ -334,6 +345,9 @@ public class Printer extends Module {
 
     /** 记录当前潜行状态是否由打印机强制触发 */
     private boolean didPrinterForceSneak = false;
+
+    /** 本 tick 是否因某个候选真正进入了 sneak/物品准备态 */
+    private boolean preparingInputThisTick = false;
 
     // 渲染态（与逻辑态分离，确保 hit 点稳定显示 1~2 tick）
     private ActionPlan lastPlan = null;
@@ -361,6 +375,8 @@ public class Printer extends Module {
         tasks.clear();
         unsupportedTasks.clear();
         disabledTasks.clear();
+        previewCandidates.clear();
+        preparingInputThisTick = false;
         clearArmed();
     }
 
@@ -370,6 +386,8 @@ public class Printer extends Module {
         tasks.clear();
         unsupportedTasks.clear();
         disabledTasks.clear();
+        previewCandidates.clear();
+        preparingInputThisTick = false;
         clearArmed();
         resetSneakState();
     }
@@ -493,12 +511,24 @@ public class Printer extends Module {
         // 更新任务列表
         updateTasks(worldSchematic);
         if (tasks.isEmpty()) {
+            previewCandidates.clear();
             resetSneakState();
             return;
         }
 
-        // 尝试为最佳任务生成动作计划
-        armed = selectBestAction();
+        // 构建预览候选：纯函数式，无副作用
+        buildPreviewCandidates();
+
+        // 重置本 tick 的准备态标记
+        preparingInputThisTick = false;
+
+        // 尝试为最佳候选生成动作计划（副作用仅作用于最终选中的那一个）
+        armed = selectAndPrepare();
+
+        // 如果本 tick 既没有 armed、也没有进入准备态，释放潜行
+        if (armed == null && !preparingInputThisTick) {
+            resetSneakState();
+        }
 
         if (armed != null) {
             // 发布渲染快照
@@ -513,19 +543,22 @@ public class Printer extends Module {
     }
 
     /**
-     * 选择最佳动作计划（两阶段优先级版）
+     * 构建预览候选列表（纯函数式，无任何副作用）
      *
-     * 改进点（相对旧版）：
-     * 1. 扫描阶段已绑定 Behavior（PlannedTask），不再重复查找
-     * 2. 由 Behavior 统一生成 ActionPlan（支持 PlaceBlock、UseBlock 等多种动作）
-     * 3. 两阶段选择：先找"已就绪"的，再找"需要准备"的（不再因 sneak 切换浪费整 tick）
-     * 4. SneakPolicy 三态：对 UseBlock 正确处理"必须不潜行"
+     * <p>遍历 tasks，对每个调用 behavior.plan()。
+     * 只有成功生成 ActionPlan 的才进入 {@code previewCandidates}，
+     * 按综合评分升序排列（越小越优）。
+     *
+     * <p>此层即为渲染和选拔的统一数据源，
+     * 解决了旧代码中"渲染层画 tasks（过宽）"与"执行层才做 plan（过窄）"的层次错位。
      */
-    private ArmedAction selectBestAction() {
+    private void buildPreviewCandidates() {
+        previewCandidates.clear();
+
         // 如果本 tick 刚做过背包→热栏转移，跳过
         if (ItemSwitchHelper.didInventoryTransferThisTick()) {
             ItemSwitchHelper.resetTransferFlag();
-            return null;
+            return;
         }
 
         boolean strict = placeMode.get() == PlaceMode.STRICT;
@@ -535,9 +568,7 @@ public class Printer extends Module {
         Vec3d eyePos = mc.player.getEyePos();
 
         // Phase 1: 对任务调用 Behavior 生成计划并评分（无副作用）
-        record ScoredCandidate(ActionPlan plan, double score) {}
 
-        List<ScoredCandidate> scored = new ArrayList<>();
         int candidateLimit = maxCandidates.get(); // 0 = 不限制
         int planned = 0;
 
@@ -578,27 +609,44 @@ public class Printer extends Module {
                 + (needsItemSwitch ? 1.0 : 0.0)
                 + (nearReachEdge ? 1.2 : 0.0);
 
-            scored.add(new ScoredCandidate(plan, score));
+            previewCandidates.add(new PreviewCandidate(pt, plan, score));
         }
 
-        scored.sort(Comparator.comparingDouble(ScoredCandidate::score));
+        previewCandidates.sort(Comparator.comparingDouble(PreviewCandidate::score));
+    }
 
-        // Phase 2: 先找"已就绪"的候选（无副作用，本 tick 立即执行）
-        for (ScoredCandidate c : scored) {
+    /**
+     * 从 previewCandidates 中选择最优候选并执行必要的准备动作
+     *
+     * <p>两阶段选择：
+     * <ol>
+     *   <li>纯检查：找已经就绪（物品在手 + sneak 状态匹配）的候选，无副作用</li>
+     *   <li>单候选准备：对排名最高的"需要准备"的候选执行物品切换 / sneak</li>
+     * </ol>
+     *
+     * <p>副作用（切物品、切 sneak）仅作用于最终选中的那一个候选，
+     * 不再在遍历途中对多个候选产生泄漏。
+     */
+    private ArmedAction selectAndPrepare() {
+        // Phase 1: 找已就绪的候选（无副作用）
+        for (PreviewCandidate c : previewCandidates) {
             Hand hand = getReadyHand(c.plan);
             if (hand != null && isSneakStateOk(c.plan.sneakPolicy())) {
                 return new ArmedAction(c.plan, hand);
             }
         }
 
-        // Phase 3: 找"需要准备"的候选（有副作用：切物品/切潜行）
-        for (ScoredCandidate c : scored) {
+        // Phase 2: 对排名最高的需准备候选执行副作用
+        for (PreviewCandidate c : previewCandidates) {
             Hand hand = ensureItemAndGetHand(c.plan);
             if (hand == null) continue;
 
             SneakReadiness sr = prepareSneakState(c.plan.sneakPolicy());
             if (sr == SneakReadiness.READY) return new ArmedAction(c.plan, hand);
-            if (sr == SneakReadiness.PREPARING) return null; // 等下一 tick 同步
+            if (sr == SneakReadiness.PREPARING) {
+                preparingInputThisTick = true;
+                return null; // 等下一 tick 同步
+            }
             // BLOCKED: 用户手动潜行，跳过这个候选，尝试下一个
         }
 
@@ -1011,13 +1059,14 @@ public class Printer extends Module {
     private void onRender(Render3DEvent event) {
         if (!isActive() || !render.get()) return;
 
-        // 候选方块（按行为分组着色，排除当前计划目标）
-        for (PlannedTask pt : tasks) {
-            if (lastPlan != null && pt.task().pos().equals(lastPlan.targetPos())) continue;
-            if (pt.behavior().group() == PrinterBehavior.Group.PLACEMENT) {
-                event.renderer.box(pt.task().pos(), sideColor.get(), lineColor.get(), shapeMode.get(), 0);
+        // 已通过完整 plan 过滤的候选（按行为分组着色，排除当前计划目标）
+        for (PreviewCandidate c : previewCandidates) {
+            BlockPos pos = c.plannedTask().task().pos();
+            if (lastPlan != null && pos.equals(lastPlan.targetPos())) continue;
+            if (c.plannedTask().behavior().group() == PrinterBehavior.Group.PLACEMENT) {
+                event.renderer.box(pos, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
             } else {
-                event.renderer.box(pt.task().pos(), behaviorSideColor.get(), behaviorLineColor.get(), shapeMode.get(), 0);
+                event.renderer.box(pos, behaviorSideColor.get(), behaviorLineColor.get(), shapeMode.get(), 0);
             }
         }
 
@@ -1062,14 +1111,15 @@ public class Printer extends Module {
 
     @Override
     public String getInfoString() {
+        int preview = previewCandidates.size();
         int supported = tasks.size();
         int unsupported = unsupportedTasks.size();
         int disabled = disabledTasks.size();
         StringBuilder sb = new StringBuilder();
         if (armed != null) sb.append("ARMED (");
-        sb.append(supported);
-        if (disabled > 0) sb.append(" / ~").append(disabled);
-        if (unsupported > 0) sb.append(" / !").append(unsupported);
+        sb.append(preview).append("/").append(supported);
+        if (disabled > 0) sb.append(" ~").append(disabled);
+        if (unsupported > 0) sb.append(" !").append(unsupported);
         if (armed != null) sb.append(")");
         return sb.toString();
     }
