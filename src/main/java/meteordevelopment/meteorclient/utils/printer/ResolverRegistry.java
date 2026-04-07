@@ -702,7 +702,7 @@ public final class ResolverRegistry {
                 PlacementOption result = resolver.resolve(bottomCtx);
                 if (result != null) {
                     // 【修复】在返回时，将实际选择的目标状态（BOTTOM）和 hitVec 包含在 PlacementOption 中
-                    return new PlacementOption(result.direction(), result.isSelf(), bottomState, result.hitVec(), null);
+                    return new PlacementOption(result.direction(), result.isSelf(), bottomState, result.hitVec());
                 }
 
                 // 再尝试放 TOP
@@ -712,20 +712,11 @@ public final class ResolverRegistry {
                 result = resolver.resolve(topCtx);
                 if (result != null) {
                     // 【修复】在返回时，将实际选择的目标状态（TOP）和 hitVec 包含在 PlacementOption 中
-                    return new PlacementOption(result.direction(), result.isSelf(), topState, result.hitVec(), null);
+                    return new PlacementOption(result.direction(), result.isSelf(), topState, result.hitVec());
                 }
 
                 // 两种都不行则返回 null
                 return null;
-            }
-        }
-
-        // 特殊处理双箱子
-        if (ctx.targetBlock() instanceof ChestBlock
-            && ctx.hasProperty(ChestBlock.CHEST_TYPE)) {
-            ChestType taskType = ctx.getProperty(ChestBlock.CHEST_TYPE);
-            if (taskType == ChestType.LEFT || taskType == ChestType.RIGHT) {
-                return resolveDoubleChest(ctx, taskType);
             }
         }
 
@@ -734,146 +725,85 @@ public final class ResolverRegistry {
         return resolver.resolve(ctx);
     }
 
-    // ==================== 双箱子专用解析 ====================
+    // ==================== 双箱子 per-cell 解析 helpers ====================
 
     /**
      * 双箱子放置解析
      *
-     * MC 箱子合并三优先级规则：
-     * - 规则1: sneak + 点击同种同向 SINGLE 箱子的水平侧面 → 强制合并
-     * - 规则2: sneak + 点击非箱子面或箱子顶/底 → 放置独立 SINGLE
-     * - 规则3: 不 sneak → MC 按 clockwise / counterclockwise 顺序扫描邻居自动合并
-     *
-     * 本方法采用两阶段策略，根据世界状态自动路由：
-     * - 阶段一（两侧皆空）：在 thisPos 安全放 SINGLE，仅过滤 pair 范围内的规则1触发源
-     * - 阶段二（一侧已有 SINGLE）：Plan A（规则1强制合并）优先，Plan B（规则3自动合并）兜底
-     *
-     * 潜行策略由 {@code determineSneakPolicy} 自然决定（箱子 → sneak，其他 → keep），
-     * 不做全局强制 sneak，以最大化可用候选。
-     *
-     * @return 携带 actualTargetPos（位置重定向时非 null）的 PlacementOption
-     */
-    private static PlacementOption resolveDoubleChest(PlacementContext ctx, ChestType taskType) {
-        Direction facing = ctx.getProperty(Properties.HORIZONTAL_FACING);
-        // LEFT 的配对半（RIGHT）在 clockwise；RIGHT 的配对半（LEFT）在 counterclockwise
-        // 与 MC 合并逻辑一致：clockwise 有 SINGLE → 新箱子 = LEFT
-        Direction pairDir = taskType == ChestType.LEFT
-            ? facing.rotateYClockwise()
-            : facing.rotateYCounterclockwise();
-        BlockPos thisPos = ctx.targetPos();
-        BlockPos pairPos = thisPos.offset(pairDir);
-
-        boolean thisIsSingle = isSingleChest(ctx.world().getBlockState(thisPos), ctx.targetState(), facing);
-        boolean pairIsSingle = isSingleChest(ctx.world().getBlockState(pairPos), ctx.targetState(), facing);
-
-        // 情况 1: thisPos 已是 SINGLE → 去 pairPos 触发合并（位置重定向）
-        if (thisIsSingle && !pairIsSingle) {
-            return resolveMerge(ctx, pairPos, pairDir.getOpposite(), facing);
-        }
-
-        // 情况 2: pairPos 已是 SINGLE → 在 thisPos 触发合并（无重定向）
-        if (!thisIsSingle && pairIsSingle) {
-            return resolveMerge(ctx, thisPos, pairDir, facing);
-        }
-
-        // 情况 3: 两边都空 → 在 thisPos 安全放 SINGLE
-        if (!thisIsSingle && !pairIsSingle) {
-            return resolveSingleSafe(ctx, facing);
-        }
-
-        // 两边都已是 SINGLE → 理论上已满足
-        return null;
-    }
-
     /**
-     * 合并阶段：在 placePos 放置箱子，使其与 mergeDir 方向的 SINGLE 箱子合并
-     *
-     * 双重策略：
-     * - Plan A（规则1）：点击合并目标箱子的水平侧面 → determineSneakPolicy→sneak → 强制合并
-     * - Plan B（规则3）：第一链接侧（clockwise）无干扰时，点击非箱子面 → 不sneak → 自动合并
-     *
-     * Plan A 优先：更可靠，不依赖玩家当前潜行状态。
-     * Plan B 兜底：扩大可用候选范围，当 Plan A 因 NCP/LOS 失败时仍有机会。
-     *
-     * 当 placePos ≠ ctx.targetPos() 时设置 actualTargetPos 标记位置重定向。
-     */
-    private static PlacementOption resolveMerge(PlacementContext ctx, BlockPos placePos, Direction mergeDir, Direction facing) {
-        BlockState singleState = ctx.targetState().with(ChestBlock.CHEST_TYPE, ChestType.SINGLE);
-        BlockPos mergeTarget = placePos.offset(mergeDir);
-        BlockPos redirectPos = placePos.equals(ctx.targetPos()) ? null : placePos;
-
-        // Plan A: 直接点击合并目标的水平侧面（merge 由位置/朝向关系决定，无需严格 NCP 方向检测）
-        // 条件：placePos 可放置 + hitVec 在 reach 内 + LOS 可见
-        BlockState placeState = ctx.world().getBlockState(placePos);
-        if (placeState.isAir() || placeState.isReplaceable()) {
-            Direction clickFace = mergeDir.getOpposite();
-            Vec3d hitVec = Vec3d.ofCenter(mergeTarget).add(
-                clickFace.getOffsetX() * 0.5, 0, clickFace.getOffsetZ() * 0.5);
-            if (ctx.eyePos().distanceTo(hitVec) <= ctx.maxReach()
-                && (!ctx.checkLos() || BlockUtilHelper.canSeePoint(hitVec, ctx.world(), ctx.player()))) {
-                return new PlacementOption(mergeDir, false, singleState, hitVec, redirectPos);
-            }
-        }
-
-        // Plan B: 非箱子面 + 规则3自动合并（走完整 resolver pipeline）
-        PlacementContext placeCtx = new PlacementContext(
-            ctx.world(), placePos, singleState,
-            ctx.eyePos(), ctx.player(), ctx.strict(), ctx.checkLos(), ctx.maxReach()
-        );
-        List<PlacementOption> candidates = get(singleState).resolveAll(placeCtx);
-
-        // 安全条件：第一链接侧（clockwise）没有会干扰的同向 SINGLE（否则规则3先合并到错误目标）
-        BlockPos firstCheckPos = placePos.offset(facing.rotateYClockwise());
-        boolean planBSafe = !isSingleChest(ctx.world().getBlockState(firstCheckPos), ctx.targetState(), facing)
-            || firstCheckPos.equals(mergeTarget);
-
-        if (planBSafe) {
-            for (PlacementOption opt : candidates) {
-                BlockPos interactPos = opt.getInteractPos(placePos);
-                BlockState interactState = ctx.world().getBlockState(interactPos);
-                // 跳过需要潜行的交互目标：Plan B 依赖非潜行状态触发规则3
-                if (BlockUtilHelper.SNEAK_BLOCKS.contains(interactState.getBlock())) continue;
-                return new PlacementOption(opt.direction(), opt.isSelf(), singleState, opt.hitVec(), redirectPos);
-            }
-        }
-
-        return null;
-    }
-
-    /**
-     * 安全放置阶段：在 thisPos 放置独立 SINGLE 箱子，不触发意外合并
+     * 安全放置：在当前格位放置独立 SINGLE 箱子，不触发意外合并
      *
      * 仅过滤 pair 范围（clockwise + counterclockwise）内同种同向 SINGLE 箱子的水平侧面，
      * 防止规则1误合并。其他面（不同朝向箱子、非 pair 范围箱子、任意方块顶底面）均可用。
-     * 潜行策略由 determineSneakPolicy 自然决定，不额外强制。
+     *
+     * @param ctx    以 singleState 构造的放置上下文（targetPos = 当前格位）
+     * @param facing 箱子朝向
      */
-    private static PlacementOption resolveSingleSafe(PlacementContext ctx, Direction facing) {
-        BlockState singleState = ctx.targetState().with(ChestBlock.CHEST_TYPE, ChestType.SINGLE);
-        PlacementContext singleCtx = ctx.withTargetState(singleState);
-        List<PlacementOption> candidates = get(singleState).resolveAll(singleCtx);
+    public static PlacementOption resolveChestSingleSafe(PlacementContext ctx, Direction facing) {
+        BlockState singleState = ctx.targetState();
+        List<PlacementOption> candidates = get(singleState).resolveAll(ctx);
 
-        // pair 范围：facing 两侧均可能触发规则1合并
         BlockPos cwPos = ctx.targetPos().offset(facing.rotateYClockwise());
         BlockPos ccwPos = ctx.targetPos().offset(facing.rotateYCounterclockwise());
 
         for (PlacementOption opt : candidates) {
             BlockPos interactPos = opt.getInteractPos(ctx.targetPos());
 
-            // 仅过滤 pair 范围内同种同向 SINGLE 箱子的水平侧面（规则1触发条件）
+            // 仅过滤 pair 范围内同种同向 SINGLE 的水平侧面（规则1触发条件）
             if ((interactPos.equals(cwPos) || interactPos.equals(ccwPos))
-                && isSingleChest(ctx.world().getBlockState(interactPos), ctx.targetState(), facing)
+                && isSingleChest(ctx.world().getBlockState(interactPos), singleState, facing)
                 && opt.getClickedFace().getAxis().isHorizontal()) {
                 continue;
             }
-
-            return new PlacementOption(opt.direction(), opt.isSelf(), singleState, opt.hitVec(), null);
+            return opt;
         }
-
         return null;
     }
 
-    /** 判断给定状态是否为同种同向 SINGLE 箱子（用于两阶段条件判定） */
-    private static boolean isSingleChest(BlockState state, BlockState targetState, Direction facing) {
+    /**
+     * 合并放置：在当前格位放置箱子，使其与 partnerDir 方向的 SINGLE 合并
+     *
+     * 双重策略：
+     * - Plan A（规则1）：直接点击 partner 箱体水平侧面 + sneak → 强制合并（无需严格 NCP）
+     * - Plan B（规则3）：非 SNEAK_BLOCKS 面 + 不 sneak → 自动合并（完整 pipeline）
+     *
+     * @param ctx        以 singleState 构造的放置上下文（targetPos = 当前格位）
+     * @param facing     箱子朝向
+     * @param partnerDir 从当前格位指向 partner SINGLE 的方向
+     */
+    public static PlacementOption resolveChestMerge(PlacementContext ctx, Direction facing, Direction partnerDir) {
+        BlockState singleState = ctx.targetState();
+        BlockPos partnerPos = ctx.targetPos().offset(partnerDir);
+
+        // Plan A: 直接点击 partner 水平侧面（merge 由位置/朝向决定，NCP 宽松，仅需 reach + LOS）
+        Direction clickFace = partnerDir.getOpposite();
+        Vec3d hitVec = Vec3d.ofCenter(partnerPos).add(
+            clickFace.getOffsetX() * 0.5, 0, clickFace.getOffsetZ() * 0.5);
+        if (ctx.eyePos().distanceTo(hitVec) <= ctx.maxReach()
+            && (!ctx.checkLos() || BlockUtilHelper.canSeePoint(hitVec, ctx.world(), ctx.player()))) {
+            return new PlacementOption(partnerDir, false, singleState, hitVec);
+        }
+
+        // Plan B: 非 SNEAK_BLOCKS 面 + 规则3自动合并
+        // 安全条件：clockwise 方向无干扰同向 SINGLE（否则规则3先合并到错误目标）
+        List<PlacementOption> candidates = get(singleState).resolveAll(ctx);
+        BlockPos firstCheckPos = ctx.targetPos().offset(facing.rotateYClockwise());
+        boolean planBSafe = !isSingleChest(ctx.world().getBlockState(firstCheckPos), singleState, facing)
+            || firstCheckPos.equals(partnerPos);
+
+        if (planBSafe) {
+            for (PlacementOption opt : candidates) {
+                BlockPos interactPos = opt.getInteractPos(ctx.targetPos());
+                BlockState interactState = ctx.world().getBlockState(interactPos);
+                if (BlockUtilHelper.SNEAK_BLOCKS.contains(interactState.getBlock())) continue;
+                return opt;
+            }
+        }
+        return null;
+    }
+
+    /** 判断给定状态是否为同种同向 SINGLE 箱子 */
+    public static boolean isSingleChest(BlockState state, BlockState targetState, Direction facing) {
         return state.getBlock() instanceof ChestBlock
             && state.getBlock() == targetState.getBlock()
             && state.contains(ChestBlock.CHEST_TYPE)
@@ -928,15 +858,6 @@ public final class ResolverRegistry {
                 PlacementContext topCtx = ctx.withTargetState(ctx.targetState().with(SlabBlock.TYPE, SlabType.TOP));
                 resolver = get(topCtx.targetState());
                 return resolver.canResolve(topCtx);
-            }
-        }
-
-        // 特殊处理双箱子：委托给 resolveDoubleChest 检查可行性
-        if (ctx.targetBlock() instanceof ChestBlock
-            && ctx.hasProperty(ChestBlock.CHEST_TYPE)) {
-            ChestType taskType = ctx.getProperty(ChestBlock.CHEST_TYPE);
-            if (taskType == ChestType.LEFT || taskType == ChestType.RIGHT) {
-                return resolveDoubleChest(ctx, taskType) != null;
             }
         }
 

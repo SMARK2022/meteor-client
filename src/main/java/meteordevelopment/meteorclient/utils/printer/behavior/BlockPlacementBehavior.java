@@ -2,7 +2,7 @@ package meteordevelopment.meteorclient.utils.printer.behavior;
 
 import meteordevelopment.meteorclient.utils.printer.*;
 
-import net.minecraft.block.AbstractChestBlock;
+import net.minecraft.block.BlockState;
 import net.minecraft.block.ChestBlock;
 import net.minecraft.block.FluidBlock;
 import net.minecraft.block.SlabBlock;
@@ -22,61 +22,71 @@ import meteordevelopment.meteorclient.utils.player.Rotations;
 /**
  * BlockPlacementBehavior - 方块放置行为
  *
- * 处理标准的方块放置任务：
- * - 在空气/可替换位置放下新方块
- * - 完成半砖单层→双层升级
- * - 双箱子两阶段放置（安全 SINGLE → 合并，位置重定向由 ResolverRegistry 处理）
+ * 处理标准方块放置，包含双箱子 per-cell 状态机：
+ * - 标准放置：空气/流体/可替换位置放下新方块
+ * - 半砖升级：单层→双层
+ * - 双箱子：每格只对自己负责，根据邻居状态推导当前格下一步可构建状态
  *
- * 内部调用 {@link ResolverRegistry} 进行几何层解析。
- * 产出 {@link ActionPlan.PlaceBlock} 类型的动作计划。
+ * 双箱子状态机（{@link ChestStep}）：
+ * - SEED_SINGLE：当前格为空/可替换，partner 未就绪 → 安全放 SINGLE
+ * - MERGE_HERE：当前格为空/可替换，partner 已是 SINGLE → 放置触发合并
+ * - DEFER：当前格已是 SINGLE 中间态，等待 partner 推进 → 视为临时满足
+ * - REQUIRES_REPLACE：两侧均为 SINGLE，放置路径无法修复 → 不接管
  */
 public class BlockPlacementBehavior implements PrinterBehavior {
 
+    /** 双箱子格位状态机：描述当前格这一步应执行的动作 */
+    private enum ChestStep {
+        NONE,               // 非双箱子目标，或条件不满足
+        SATISFIED,          // 当前格已匹配最终目标
+        DEFER,              // 当前格已是合理中间态（SINGLE），等待 partner 推进
+        SEED_SINGLE,        // 安全放置独立 SINGLE（partner 未就绪）
+        MERGE_HERE,         // 放置 SINGLE 并与 partner 合并
+        REQUIRES_REPLACE    // 两侧均为 SINGLE，需要 break-replace
+    }
+
     @Override
     public boolean supports(PrinterTask task) {
-        // 流体目标不由此行为处理（将来由 WaterBehavior 负责）
         if (task.desiredState().getBlock() instanceof FluidBlock) return false;
+        if (task.desiredState().getBlock().asItem() == Items.AIR) return false;
 
-        // 方块必须有对应物品
-        Item item = task.desiredState().getBlock().asItem();
-        if (item == Items.AIR) return false;
-
-        // 情况 1：半砖升级（同种方块但需要从单层变双层）
         if (isSlabUpgrade(task)) return true;
 
-        // 情况 2：双箱子完成（thisPos 已有 SINGLE，需要合并阶段，ResolverRegistry 会重定向到 pairPos）
-        if (isDoubleChestCompletion(task)) return true;
+        // 双箱子中间态（SINGLE）：由 isSatisfied 判定为 DEFER
+        if (isChestIntermediate(task)) return true;
 
-        // 情况 3：标准放置（当前位置是空气、流体或可替换方块）
         var current = task.currentState();
-        if (current.isAir()) return true;
-        if (current.getBlock() instanceof FluidBlock) return true;
-        return current.isReplaceable();
+        return current.isAir() || current.getBlock() instanceof FluidBlock || current.isReplaceable();
     }
 
     @Override
     public boolean isSatisfied(PrinterTask task) {
-        // 方块类型不同 → 未满足
         if (task.desiredState().getBlock() != task.currentState().getBlock()) return false;
 
-        // 半砖额外检查：双层升级
+        // 半砖：双层升级
         if (task.desiredState().getBlock() instanceof SlabBlock
             && task.desiredState().contains(SlabBlock.TYPE)
             && task.currentState().contains(SlabBlock.TYPE)) {
-
             SlabType desired = task.desiredState().get(SlabBlock.TYPE);
             SlabType current = task.currentState().get(SlabBlock.TYPE);
             if (desired == SlabType.DOUBLE && current != SlabType.DOUBLE) return false;
         }
 
-        // 双箱子额外检查：ChestType 必须匹配（SINGLE 不等于 LEFT/RIGHT）
+        // 双箱子：SINGLE 中间态视为 DEFER（临时满足），等待 partner 推进
         if (task.desiredState().getBlock() instanceof ChestBlock
             && task.desiredState().contains(ChestBlock.CHEST_TYPE)
             && task.currentState().contains(ChestBlock.CHEST_TYPE)) {
-
             ChestType desired = task.desiredState().get(ChestBlock.CHEST_TYPE);
             ChestType current = task.currentState().get(ChestBlock.CHEST_TYPE);
-            if (desired != current) return false;
+            if (desired == current) return true;
+            // SINGLE 且同种同向 → DEFER
+            if (current == ChestType.SINGLE
+                && (desired == ChestType.LEFT || desired == ChestType.RIGHT)
+                && task.currentState().get(Properties.HORIZONTAL_FACING)
+                    == task.desiredState().get(Properties.HORIZONTAL_FACING)) {
+                return true;
+            }
+            return false;
         }
 
         return true;
@@ -85,136 +95,186 @@ public class BlockPlacementBehavior implements PrinterBehavior {
     @Override
     public ActionPlan plan(PrinterTask task, MinecraftClient mc, boolean strict, boolean checkLos, double maxReach) {
         Item item = task.desiredState().getBlock().asItem();
-
-        // 检查物品栏（包括背包）
         if (!InvUtils.find(item).found()) return null;
 
-        // 使用规则引擎解析放置几何（双箱子/半砖的特殊逻辑在 ResolverRegistry.resolve() 内处理）
+        // 双箱子走 per-cell 状态机
+        ChestStep step = classifyChestCell(task, mc);
+        if (step == ChestStep.SEED_SINGLE || step == ChestStep.MERGE_HERE) {
+            return planChest(task, mc, strict, checkLos, maxReach, step);
+        }
+        // DEFER/SATISFIED/REQUIRES_REPLACE/NONE 中的 DEFER 已在 isSatisfied 拦截
+
+        // 普通放置 / 半砖升级
         PlacementContext ctx = PlacementContext.of(
             mc.world, task.pos(), task.desiredState(), mc.player, strict, checkLos, maxReach
         );
         PlacementOption option = ResolverRegistry.resolve(ctx);
         if (option == null || option.hitVec() == null) return null;
 
-        // 确定实际放置位置（双箱子合并阶段可能重定向到 pairPos）
-        BlockPos effectivePos = option.actualTargetPos() != null ? option.actualTargetPos() : task.pos();
+        return buildPlacePlan(task.pos(), task.desiredState(), option, mc, item);
+    }
 
-        // 计算旋转角度
-        Vec3d hitVec = option.hitVec();
-        float yaw = (float) Rotations.getYaw(hitVec);
-        float pitch = (float) Rotations.getPitch(hitVec);
+    // ==================== 双箱子状态机 ====================
 
-        // 确定交互位置（基于实际放置位置计算）
-        BlockPos interactPos = option.getInteractPos(effectivePos);
-        boolean selfPlacement = interactPos.equals(effectivePos);
+    /**
+     * 分类当前格位在双箱子流程中的状态
+     *
+     * 每格只看自己 + partner 两个位置，不做对象级调度：
+     * - C 已匹配 → SATISFIED
+     * - C 为 SINGLE（中间态）→ partner 也是 SINGLE 则 REQUIRES_REPLACE，否则 DEFER
+     * - C 为空 + partner 是 SINGLE → MERGE_HERE
+     * - C 为空 + partner 未就绪 → SEED_SINGLE
+     */
+    private ChestStep classifyChestCell(PrinterTask task, MinecraftClient mc) {
+        if (!(task.desiredState().getBlock() instanceof ChestBlock)) return ChestStep.NONE;
+        if (!task.desiredState().contains(ChestBlock.CHEST_TYPE)) return ChestStep.NONE;
+        ChestType desired = task.desiredState().get(ChestBlock.CHEST_TYPE);
+        if (desired != ChestType.LEFT && desired != ChestType.RIGHT) return ChestStep.NONE;
 
-        // 确定潜行策略
-        var interactState = mc.world.getBlockState(interactPos);
-        ActionPlan.SneakPolicy sneakPolicy = BlockUtilHelper.determineSneakPolicy(interactState);
+        Direction facing = task.desiredState().get(Properties.HORIZONTAL_FACING);
+        Direction partnerDir = desired == ChestType.LEFT
+            ? facing.rotateYClockwise() : facing.rotateYCounterclockwise();
+        BlockState singleRef = task.desiredState().with(ChestBlock.CHEST_TYPE, ChestType.SINGLE);
 
-        // 双箱子潜行修正：与 base 策略合并，冲突时放弃候选
-        if (isDoubleChestTarget(task) && !(interactState.getBlock() instanceof AbstractChestBlock)) {
-            ActionPlan.SneakPolicy chestPolicy = computeChestSneakPolicy(mc, effectivePos, task);
-            if (chestPolicy != ActionPlan.SneakPolicy.KEEP_CURRENT) {
-                // 冲突检测：base 要求潜行但箱子逻辑要求不潜行（或反之）→ 无法兼顾
-                if (sneakPolicy == ActionPlan.SneakPolicy.REQUIRE_SNEAK
-                    && chestPolicy == ActionPlan.SneakPolicy.REQUIRE_NOT_SNEAK) return null;
-                if (sneakPolicy == ActionPlan.SneakPolicy.REQUIRE_NOT_SNEAK
-                    && chestPolicy == ActionPlan.SneakPolicy.REQUIRE_SNEAK) return null;
-                sneakPolicy = chestPolicy;
-            }
-            // chestPolicy == KEEP_CURRENT → 保留 base 策略（如对漏斗 REQUIRE_SNEAK）
+        BlockState currentC = task.currentState();
+        BlockState currentP = mc.world.getBlockState(task.pos().offset(partnerDir));
+
+        // C 已匹配最终态
+        if (currentC.getBlock() == task.desiredState().getBlock()
+            && currentC.contains(ChestBlock.CHEST_TYPE)
+            && currentC.get(ChestBlock.CHEST_TYPE) == desired
+            && currentC.get(Properties.HORIZONTAL_FACING) == facing) {
+            return ChestStep.SATISFIED;
         }
 
-        return new ActionPlan.PlaceBlock(
-            effectivePos,
-            task.desiredState(),
-            new ActionPlan.Interaction(
-                interactPos,
-                option.getClickedFace(),
-                hitVec,
-                yaw,
-                pitch,
-                selfPlacement
-            ),
-            item,
-            sneakPolicy,
-            ActionPlan.HandPolicy.ANY_HAND_WITH_ITEM
-        );
+        boolean cIsSingle = ResolverRegistry.isSingleChest(currentC, singleRef, facing);
+        boolean pIsSingle = ResolverRegistry.isSingleChest(currentP, singleRef, facing);
+
+        if (cIsSingle && pIsSingle) return ChestStep.REQUIRES_REPLACE;
+        if (cIsSingle) return ChestStep.DEFER;
+
+        boolean cIsEmpty = currentC.isAir() || currentC.isReplaceable()
+            || currentC.getBlock() instanceof FluidBlock;
+        if (!cIsEmpty) return ChestStep.NONE;
+
+        return pIsSingle ? ChestStep.MERGE_HERE : ChestStep.SEED_SINGLE;
     }
 
     /**
-     * 判断是否为半砖升级（单层→双层）
+     * 双箱子放置计划：根据 ChestStep 调用对应的 resolver helper
+     *
+     * 潜行策略：
+     * - SEED_SINGLE + 附近有同向 SINGLE → REQUIRE_SNEAK（抑制规则3意外合并）
+     * - MERGE_HERE Plan A（点击箱子侧面）→ determineSneakPolicy 自然 REQUIRE_SNEAK
+     * - MERGE_HERE Plan B（非箱子面）→ REQUIRE_NOT_SNEAK（规则3自动合并）
+     * - 与 base 策略（交互目标是否 SNEAK_BLOCK）合并，冲突则放弃候选
      */
+    private ActionPlan planChest(PrinterTask task, MinecraftClient mc,
+                                 boolean strict, boolean checkLos, double maxReach, ChestStep step) {
+        Item item = task.desiredState().getBlock().asItem();
+        Direction facing = task.desiredState().get(Properties.HORIZONTAL_FACING);
+        ChestType desired = task.desiredState().get(ChestBlock.CHEST_TYPE);
+        Direction partnerDir = desired == ChestType.LEFT
+            ? facing.rotateYClockwise() : facing.rotateYCounterclockwise();
+        BlockState singleState = task.desiredState().with(ChestBlock.CHEST_TYPE, ChestType.SINGLE);
+
+        PlacementContext ctx = PlacementContext.of(
+            mc.world, task.pos(), singleState, mc.player, strict, checkLos, maxReach
+        );
+
+        PlacementOption option = (step == ChestStep.MERGE_HERE)
+            ? ResolverRegistry.resolveChestMerge(ctx, facing, partnerDir)
+            : ResolverRegistry.resolveChestSingleSafe(ctx, facing);
+        if (option == null || option.hitVec() == null) return null;
+
+        // 潜行策略计算
+        BlockPos interactPos = option.getInteractPos(task.pos());
+        var interactState = mc.world.getBlockState(interactPos);
+        ActionPlan.SneakPolicy baseSneakPolicy = BlockUtilHelper.determineSneakPolicy(interactState);
+        ActionPlan.SneakPolicy chestPolicy = computeChestSneak(mc, task, step, interactState, facing);
+
+        // 合并 base 与 chest 策略，冲突则放弃
+        ActionPlan.SneakPolicy sneakPolicy = baseSneakPolicy;
+        if (chestPolicy != ActionPlan.SneakPolicy.KEEP_CURRENT) {
+            if (baseSneakPolicy == ActionPlan.SneakPolicy.REQUIRE_SNEAK
+                && chestPolicy == ActionPlan.SneakPolicy.REQUIRE_NOT_SNEAK) return null;
+            if (baseSneakPolicy == ActionPlan.SneakPolicy.REQUIRE_NOT_SNEAK
+                && chestPolicy == ActionPlan.SneakPolicy.REQUIRE_SNEAK) return null;
+            sneakPolicy = chestPolicy;
+        }
+
+        Vec3d hitVec = option.hitVec();
+        boolean selfPlacement = interactPos.equals(task.pos());
+
+        return new ActionPlan.PlaceBlock(
+            task.pos(),
+            task.desiredState(),
+            new ActionPlan.Interaction(interactPos, option.getClickedFace(), hitVec,
+                (float) Rotations.getYaw(hitVec), (float) Rotations.getPitch(hitVec), selfPlacement),
+            item, sneakPolicy, ActionPlan.HandPolicy.ANY_HAND_WITH_ITEM
+        );
+    }
+
+    /** 根据 ChestStep 和交互目标计算箱子专用潜行策略 */
+    private ActionPlan.SneakPolicy computeChestSneak(MinecraftClient mc, PrinterTask task,
+                                                      ChestStep step, BlockState interactState, Direction facing) {
+        if (step == ChestStep.MERGE_HERE) {
+            // Plan A（点击箱子）→ determineSneakPolicy 已处理；Plan B（非箱子）→ 需要 NOT_SNEAK
+            return (interactState.getBlock() instanceof ChestBlock)
+                ? ActionPlan.SneakPolicy.KEEP_CURRENT
+                : ActionPlan.SneakPolicy.REQUIRE_NOT_SNEAK;
+        }
+        // SEED_SINGLE：检查当前格两侧是否有同向 SINGLE（会触发规则3意外合并）
+        BlockPos cwPos = task.pos().offset(facing.rotateYClockwise());
+        BlockPos ccwPos = task.pos().offset(facing.rotateYCounterclockwise());
+        BlockState singleRef = task.desiredState().with(ChestBlock.CHEST_TYPE, ChestType.SINGLE);
+        if (ResolverRegistry.isSingleChest(mc.world.getBlockState(cwPos), singleRef, facing)
+            || ResolverRegistry.isSingleChest(mc.world.getBlockState(ccwPos), singleRef, facing)) {
+            return ActionPlan.SneakPolicy.REQUIRE_SNEAK;
+        }
+        return ActionPlan.SneakPolicy.KEEP_CURRENT;
+    }
+
+    // ==================== 通用 helpers ====================
+
+    /** 构建标准放置计划（普通方块 / 半砖） */
+    private ActionPlan buildPlacePlan(BlockPos pos, BlockState desiredState,
+                                      PlacementOption option, MinecraftClient mc, Item item) {
+        Vec3d hitVec = option.hitVec();
+        BlockPos interactPos = option.getInteractPos(pos);
+        boolean selfPlacement = interactPos.equals(pos);
+        var interactState = mc.world.getBlockState(interactPos);
+        ActionPlan.SneakPolicy sneakPolicy = BlockUtilHelper.determineSneakPolicy(interactState);
+
+        return new ActionPlan.PlaceBlock(
+            pos, desiredState,
+            new ActionPlan.Interaction(interactPos, option.getClickedFace(), hitVec,
+                (float) Rotations.getYaw(hitVec), (float) Rotations.getPitch(hitVec), selfPlacement),
+            item, sneakPolicy, ActionPlan.HandPolicy.ANY_HAND_WITH_ITEM
+        );
+    }
+
+    /** 半砖升级（单层→双层）判定 */
     private boolean isSlabUpgrade(PrinterTask task) {
         if (!(task.desiredState().getBlock() instanceof SlabBlock)) return false;
         if (task.desiredState().getBlock() != task.currentState().getBlock()) return false;
         if (!task.desiredState().contains(SlabBlock.TYPE) || !task.currentState().contains(SlabBlock.TYPE)) return false;
-
         SlabType desired = task.desiredState().get(SlabBlock.TYPE);
         SlabType current = task.currentState().get(SlabBlock.TYPE);
         return desired == SlabType.DOUBLE && current != SlabType.DOUBLE;
     }
 
-    /**
-     * 判断是否为双箱子完成阶段（thisPos 已有同种同向 SINGLE，需要在 pairPos 触发合并）
-     */
-    private boolean isDoubleChestCompletion(PrinterTask task) {
-        if (!isDoubleChestTarget(task)) return false;
-        // thisPos 已有同种方块（SINGLE chest），但 ChestType 不匹配 → 需要合并阶段
-        return task.currentState().getBlock() == task.desiredState().getBlock()
-            && task.currentState().contains(ChestBlock.CHEST_TYPE)
-            && task.currentState().get(ChestBlock.CHEST_TYPE) == ChestType.SINGLE;
-    }
-
-    /** 判断任务目标是否为双箱子（LEFT 或 RIGHT） */
-    private static boolean isDoubleChestTarget(PrinterTask task) {
+    /** 双箱子中间态判定（C = 同种同向 SINGLE，desired = LEFT/RIGHT）→ supports 通道进入 isSatisfied DEFER */
+    private boolean isChestIntermediate(PrinterTask task) {
         if (!(task.desiredState().getBlock() instanceof ChestBlock)) return false;
         if (!task.desiredState().contains(ChestBlock.CHEST_TYPE)) return false;
-        ChestType type = task.desiredState().get(ChestBlock.CHEST_TYPE);
-        return type == ChestType.LEFT || type == ChestType.RIGHT;
-    }
-
-    /**
-     * 双箱子非箱子面交互时的潜行策略计算
-     *
-     * 判断当前阶段（合并 vs 安全 SINGLE），返回对应策略：
-     * - 合并阶段（Plan B）：REQUIRE_NOT_SNEAK，让规则3自动合并生效
-     * - 安全 SINGLE + 附近有同向 SINGLE：REQUIRE_SNEAK，抑制规则3意外合并
-     * - 安全 SINGLE + 附近无同向 SINGLE：KEEP_CURRENT，无合并风险
-     */
-    private ActionPlan.SneakPolicy computeChestSneakPolicy(MinecraftClient mc, BlockPos effectivePos, PrinterTask task) {
-        Direction facing = task.desiredState().get(Properties.HORIZONTAL_FACING);
-        ChestType taskType = task.desiredState().get(ChestBlock.CHEST_TYPE);
-        Direction pairDir = taskType == ChestType.LEFT
-            ? facing.rotateYClockwise()
-            : facing.rotateYCounterclockwise();
-
-        // 判断阶段：pair 方向（任一侧）有同种同向 SINGLE → 合并阶段
-        boolean isMergePhase = isSameFacingSingle(mc, task.pos().offset(pairDir), task)
-            || isSameFacingSingle(mc, task.pos(), task);
-
-        if (isMergePhase) {
-            // Plan B merge：不潜行 → 规则3自动合并
-            return ActionPlan.SneakPolicy.REQUIRE_NOT_SNEAK;
-        }
-
-        // 安全 SINGLE 阶段：检查放置位置两侧是否有会触发规则3的同向 SINGLE
-        boolean cwHasSingle = isSameFacingSingle(mc, effectivePos.offset(facing.rotateYClockwise()), task);
-        boolean ccwHasSingle = isSameFacingSingle(mc, effectivePos.offset(facing.rotateYCounterclockwise()), task);
-
-        return (cwHasSingle || ccwHasSingle)
-            ? ActionPlan.SneakPolicy.REQUIRE_SNEAK
-            : ActionPlan.SneakPolicy.KEEP_CURRENT;
-    }
-
-    /** 检查指定位置是否为同种同向 SINGLE 箱子 */
-    private static boolean isSameFacingSingle(MinecraftClient mc, BlockPos pos, PrinterTask task) {
-        var state = mc.world.getBlockState(pos);
-        return state.getBlock() instanceof ChestBlock
-            && state.getBlock() == task.desiredState().getBlock()
-            && state.contains(ChestBlock.CHEST_TYPE)
-            && state.get(ChestBlock.CHEST_TYPE) == ChestType.SINGLE
-            && state.get(Properties.HORIZONTAL_FACING) == task.desiredState().get(Properties.HORIZONTAL_FACING);
+        ChestType desired = task.desiredState().get(ChestBlock.CHEST_TYPE);
+        if (desired != ChestType.LEFT && desired != ChestType.RIGHT) return false;
+        return task.currentState().getBlock() == task.desiredState().getBlock()
+            && task.currentState().contains(ChestBlock.CHEST_TYPE)
+            && task.currentState().get(ChestBlock.CHEST_TYPE) == ChestType.SINGLE
+            && task.currentState().contains(Properties.HORIZONTAL_FACING)
+            && task.currentState().get(Properties.HORIZONTAL_FACING)
+                == task.desiredState().get(Properties.HORIZONTAL_FACING);
     }
 }
