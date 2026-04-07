@@ -5,6 +5,7 @@ import meteordevelopment.meteorclient.utils.printer.*;
 import net.minecraft.block.NoteBlock;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.state.property.Properties;
+import net.minecraft.util.math.BlockPos;
 
 /**
  * NoteBlockBehavior - 音符盒音高修正行为
@@ -18,6 +19,7 @@ import net.minecraft.state.property.Properties;
  * - NOTE 范围 0-24，每次右键 (current + 1) % 25
  * - 从当前到目标需要 (desired - current + 25) % 25 次右键
  * - stillNeedsAction 谓词防止 stale-plan
+ * - 上方有实体方块时右键无效，plan 返回 null 避免无限重试
  *
  * 属性处理：
  * - NOTE:       可通过右键修正（目标属性，循环 0-24）
@@ -53,6 +55,10 @@ public class NoteBlockBehavior implements PrinterBehavior {
 
     @Override
     public ActionPlan plan(PrinterTask task, MinecraftClient mc, boolean strict, boolean checkLos, double maxReach) {
+        // 音符盒上方有实体方块时右键无法改变音高（Minecraft 硬编码行为）
+        BlockPos above = task.pos().up();
+        if (!mc.world.getBlockState(above).isAir()) return null;
+
         ActionPlan.Interaction interaction = InteractionPlanner.planSelfInteraction(
             mc, task.pos(), strict, checkLos, maxReach);
         if (interaction == null) return null;
