@@ -212,47 +212,4 @@ public class BlockPlacementBehavior implements PrinterBehavior {
             && state.get(ChestBlock.CHEST_TYPE) == ChestType.SINGLE
             && state.get(Properties.HORIZONTAL_FACING) == task.desiredState().get(Properties.HORIZONTAL_FACING);
     }
-
-    /**
-     * 双箱子非箱子面交互时的潜行策略计算
-     *
-     * 判断当前阶段（合并 vs 安全 SINGLE），返回对应策略：
-     * - 合并阶段（Plan B）：REQUIRE_NOT_SNEAK，让规则3自动合并生效
-     * - 安全 SINGLE + 附近有同向 SINGLE：REQUIRE_SNEAK，抑制规则3意外合并
-     * - 安全 SINGLE + 附近无同向 SINGLE：KEEP_CURRENT，无合并风险
-     */
-    private ActionPlan.SneakPolicy computeChestSneakPolicy(MinecraftClient mc, BlockPos effectivePos, PrinterTask task) {
-        Direction facing = task.desiredState().get(Properties.HORIZONTAL_FACING);
-        ChestType taskType = task.desiredState().get(ChestBlock.CHEST_TYPE);
-        Direction pairDir = taskType == ChestType.LEFT
-            ? facing.rotateYClockwise()
-            : facing.rotateYCounterclockwise();
-
-        // 判断阶段：pair 方向（任一侧）有同种同向 SINGLE → 合并阶段
-        boolean isMergePhase = isSameFacingSingle(mc, task.pos().offset(pairDir), task)
-            || isSameFacingSingle(mc, task.pos(), task);
-
-        if (isMergePhase) {
-            // Plan B merge：不潜行 → 规则3自动合并
-            return ActionPlan.SneakPolicy.REQUIRE_NOT_SNEAK;
-        }
-
-        // 安全 SINGLE 阶段：检查放置位置两侧是否有会触发规则3的同向 SINGLE
-        boolean cwHasSingle = isSameFacingSingle(mc, effectivePos.offset(facing.rotateYClockwise()), task);
-        boolean ccwHasSingle = isSameFacingSingle(mc, effectivePos.offset(facing.rotateYCounterclockwise()), task);
-
-        return (cwHasSingle || ccwHasSingle)
-            ? ActionPlan.SneakPolicy.REQUIRE_SNEAK
-            : ActionPlan.SneakPolicy.KEEP_CURRENT;
-    }
-
-    /** 检查指定位置是否为同种同向 SINGLE 箱子 */
-    private static boolean isSameFacingSingle(MinecraftClient mc, BlockPos pos, PrinterTask task) {
-        var state = mc.world.getBlockState(pos);
-        return state.getBlock() instanceof ChestBlock
-            && state.getBlock() == task.desiredState().getBlock()
-            && state.contains(ChestBlock.CHEST_TYPE)
-            && state.get(ChestBlock.CHEST_TYPE) == ChestType.SINGLE
-            && state.get(Properties.HORIZONTAL_FACING) == task.desiredState().get(Properties.HORIZONTAL_FACING);
-    }
 }

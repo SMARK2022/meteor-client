@@ -37,7 +37,9 @@ import meteordevelopment.meteorclient.utils.printer.PrinterTask;
 import meteordevelopment.meteorclient.utils.printer.behavior.*;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.*;
+import net.minecraft.block.enums.ChestType;
 import net.minecraft.block.enums.SlabType;
+import net.minecraft.state.property.Properties;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.ExperienceOrbEntity;
@@ -189,6 +191,20 @@ public class Printer extends Module {
             .description("Fix daylight detector inverted state.")
             .defaultValue(true)
             .visible(fixInteractable::get)
+            .build());
+
+    private final Setting<Boolean> fixLever = sgBehavior.add(new BoolSetting.Builder()
+            .name("fix-lever")
+            .description("Fix lever powered state.")
+            .defaultValue(true)
+            .visible(fixInteractable::get)
+            .build());
+
+    private final Setting<Boolean> fixNoteBlock = sgBehavior.add(new BoolSetting.Builder()
+            .name("fix-note-block")
+            .description("Fix note block note value.")
+            .defaultValue(true)
+            .visible(fixRedstone::get)
             .build());
 
     // Fluid group toggle
@@ -367,6 +383,8 @@ public class Printer extends Module {
         subToggles.put(PrinterBehavior.Key.DAYLIGHT_DETECTOR, fixDaylightDetector);
         subToggles.put(PrinterBehavior.Key.FLUID_SOURCE, placeFluidSource);
         subToggles.put(PrinterBehavior.Key.WATERLOG, fixWaterlog);
+        subToggles.put(PrinterBehavior.Key.LEVER_POWERED, fixLever);
+        subToggles.put(PrinterBehavior.Key.NOTE_BLOCK_NOTE, fixNoteBlock);
     }
 
     @Override
@@ -572,11 +590,24 @@ public class Printer extends Module {
         int candidateLimit = maxCandidates.get(); // 0 = 不限制
         int planned = 0;
 
+        Set<BlockPos> chestPlanTargets = new HashSet<>();
+
         for (PlannedTask pt : tasks) {
             if (candidateLimit > 0 && planned >= candidateLimit) break;
 
             ActionPlan plan = pt.behavior().plan(pt.task(), mc, strict, checkLos, maxReach);
             if (plan == null) continue;
+
+            // 双箱子 merge 阶段重定向目标实体阻挡检查
+            if (plan instanceof ActionPlan.PlaceBlock pb && hasBlockingEntity(pb.targetPos())) continue;
+
+            // 双箱子 preview 去重：同一 targetPos 只保留评分最优（先到先得，已按距离排序）
+            if (plan instanceof ActionPlan.PlaceBlock pb2
+                && pb2.desiredState().getBlock() instanceof ChestBlock
+                && !chestPlanTargets.add(pb2.targetPos())) {
+                continue;
+            }
+
             planned++;
 
             ActionPlan.Interaction inter = plan.interaction();
@@ -803,6 +834,9 @@ public class Printer extends Module {
     }
 
     private boolean isPlaceBlockStillValid(ActionPlan.PlaceBlock plan, Hand hand) {
+        // 重定向目标位实体阻挡复查（执行前最后防线）
+        if (hasBlockingEntity(plan.targetPos())) return false;
+
         ActionPlan.Interaction inter = plan.interaction();
 
         // 目标不再需要放置
@@ -960,6 +994,12 @@ public class Printer extends Module {
             // 实体阻挡检查（仅对放置类行为有意义）
             if (behavior instanceof BlockPlacementBehavior && hasBlockingEntity(pos)) continue;
 
+            // 双箱子两侧均为 SINGLE → 需要 break-replace，当前放置路径无法修复
+            if (behavior instanceof BlockPlacementBehavior && isBothSingleChestPair(task)) {
+                unsupportedTasks.add(task);
+                continue;
+            }
+
             tasks.add(new PlannedTask(task, behavior));
         }
 
@@ -999,6 +1039,34 @@ public class Printer extends Module {
         }
 
         return list;
+    }
+
+    /**
+     * 检查双箱子任务是否处于"两侧均为 SINGLE"的不可修复状态。
+     * 此状态需要 break-replace，当前放置路径无法处理。
+     */
+    private boolean isBothSingleChestPair(PrinterTask task) {
+        if (!(task.desiredState().getBlock() instanceof ChestBlock)) return false;
+        if (!task.desiredState().contains(ChestBlock.CHEST_TYPE)) return false;
+        ChestType type = task.desiredState().get(ChestBlock.CHEST_TYPE);
+        if (type != ChestType.LEFT && type != ChestType.RIGHT) return false;
+
+        Direction facing = task.desiredState().get(Properties.HORIZONTAL_FACING);
+
+        // thisPos 必须是同种同向 SINGLE
+        BlockState thisState = task.currentState();
+        if (!(thisState.getBlock() instanceof ChestBlock)
+            || thisState.get(ChestBlock.CHEST_TYPE) != ChestType.SINGLE
+            || thisState.get(Properties.HORIZONTAL_FACING) != facing) return false;
+
+        // pairPos 也必须是同种同向 SINGLE
+        Direction pairDir = type == ChestType.LEFT
+            ? facing.rotateYClockwise() : facing.rotateYCounterclockwise();
+        BlockState pairState = mc.world.getBlockState(task.pos().offset(pairDir));
+        return pairState.getBlock() == task.desiredState().getBlock()
+            && pairState.contains(ChestBlock.CHEST_TYPE)
+            && pairState.get(ChestBlock.CHEST_TYPE) == ChestType.SINGLE
+            && pairState.get(Properties.HORIZONTAL_FACING) == facing;
     }
 
     /**
