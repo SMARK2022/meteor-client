@@ -187,8 +187,14 @@ public class BlockPlacementBehavior implements PrinterBehavior {
             : ResolverRegistry.resolveChestSingleSafe(ctx, facing);
         if (option == null || option.hitVec() == null) return null;
 
-        // 潜行策略计算
+        // 统一出口闸：确保 chest helper 产出的候选与全系统几何约束一致
         BlockPos interactPos = option.getInteractPos(task.pos());
+        if (!BlockUtilHelper.isPointValid(option.hitVec(), option.getClickedFace(), interactPos,
+            mc.player.getEyePos(), mc.world, mc.player, strict, checkLos, maxReach, task.pos())) {
+            return null;
+        }
+
+        // 潜行策略计算
         var interactState = mc.world.getBlockState(interactPos);
         ActionPlan.SneakPolicy baseSneakPolicy = BlockUtilHelper.determineSneakPolicy(interactState);
         ActionPlan.SneakPolicy chestPolicy = computeChestSneak(mc, task, step, interactState, facing);

@@ -764,7 +764,8 @@ public final class ResolverRegistry {
      * 合并放置：在当前格位放置箱子，使其与 partnerDir 方向的 SINGLE 合并
      *
      * 双重策略：
-     * - Plan A（规则1）：直接点击 partner 箱体水平侧面 + sneak → 强制合并（无需严格 NCP）
+     * - Plan A（规则1）：直接点击 partner 箱体水平侧面 + sneak → 强制合并
+     *   走统一的 placeability + isPointValid 验证，与执行前复验一致
      * - Plan B（规则3）：非 SNEAK_BLOCKS 面 + 不 sneak → 自动合并（完整 pipeline）
      *
      * @param ctx        以 singleState 构造的放置上下文（targetPos = 当前格位）
@@ -775,13 +776,18 @@ public final class ResolverRegistry {
         BlockState singleState = ctx.targetState();
         BlockPos partnerPos = ctx.targetPos().offset(partnerDir);
 
-        // Plan A: 直接点击 partner 水平侧面（merge 由位置/朝向决定，NCP 宽松，仅需 reach + LOS）
-        Direction clickFace = partnerDir.getOpposite();
-        Vec3d hitVec = Vec3d.ofCenter(partnerPos).add(
-            clickFace.getOffsetX() * 0.5, 0, clickFace.getOffsetZ() * 0.5);
-        if (ctx.eyePos().distanceTo(hitVec) <= ctx.maxReach()
-            && (!ctx.checkLos() || BlockUtilHelper.canSeePoint(hitVec, ctx.world(), ctx.player()))) {
-            return new PlacementOption(partnerDir, false, singleState, hitVec);
+        // Plan A: 点击 partner 水平侧面，走统一几何验证（placeability + NCP + LOS + reach）
+        if (singleState.canPlaceAt(ctx.world(), ctx.targetPos())) {
+            Direction clickFace = partnerDir.getOpposite();
+            Vec3d hitVec = Vec3d.ofCenter(partnerPos).add(
+                clickFace.getOffsetX() * 0.5, 0, clickFace.getOffsetZ() * 0.5);
+            PlacementOption planA = new PlacementOption(partnerDir, false, singleState, hitVec);
+            BlockPos interactPos = planA.getInteractPos(ctx.targetPos());
+            if (BlockUtilHelper.isPointValid(hitVec, planA.getClickedFace(), interactPos,
+                ctx.eyePos(), ctx.world(), ctx.player(),
+                ctx.strict(), ctx.checkLos(), ctx.maxReach(), ctx.targetPos())) {
+                return planA;
+            }
         }
 
         // Plan B: 非 SNEAK_BLOCKS 面 + 规则3自动合并
