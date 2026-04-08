@@ -495,39 +495,9 @@ public class PacketMine extends Module {
             lockedToolSlot = findBestToolSlot(blockState);
             ensureTaskToolSelected(MyBlock.this);
 
-            int effectiveSlot = lockedToolSlot != -1
-                ? lockedToolSlot
-                : mc.player.getInventory().selectedSlot;
-
-            // 如果是瞬破方块，直接走快速路径
-            double delta = BlockUtils.getBreakDelta(effectiveSlot, blockState);
-            if (delta >= 1.0) {
-                Runnable send = () -> {
-                    if (phase != Phase.PENDING_START) { clearRotationState(); return; }
-                    ensureTaskToolSelected(MyBlock.this);
-                    sendSwing();
-                    sendStartPacket(blockPos, direction);
-                    sendStopPacket(blockPos, direction);
-                    mining = true;
-                    progress = 1.0;
-                    // 瞬破方块不套 postBreakCooldown，避免软方块吞吐大幅下降
-                    phase = Phase.FINISHED;
-                    clearRotationState();
-                };
-
-                if (rotateOnStart.get()) {
-                    if (rotationQueued) return;  // 已有排队请求，等它执行
-                    rotationQueued = true;
-                    rotationPhaseToken = Phase.PENDING_START;
-                    Vec3d anchor = getFaceAnchor(blockPos, direction);
-                    Rotations.rotate(Rotations.getYaw(anchor), Rotations.getPitch(anchor), 50, send);
-                } else {
-                    send.run();
-                }
-                return;
-            }
-
-            // 正常路径：只发 START
+            // 统一路径：所有方块（含 delta >= 1 的瞬破块）都走 START → MINING → STOP
+            // 瞬破块在 MINING 第一 tick 就会 progress >= 1.0，下一拍进入 PENDING_STOP
+            // 这比同 tick START+STOP 更安全（Grim blockBreakBalance 不会持续积累）
             Runnable send = () -> {
                 if (phase != Phase.PENDING_START) { clearRotationState(); return; }
                 ensureTaskToolSelected(MyBlock.this);
