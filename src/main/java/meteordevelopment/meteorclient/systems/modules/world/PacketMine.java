@@ -6,6 +6,7 @@
 package meteordevelopment.meteorclient.systems.modules.world;
 
 import meteordevelopment.meteorclient.events.entity.player.StartBreakingBlockEvent;
+import meteordevelopment.meteorclient.events.meteor.MouseScrollEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
@@ -186,6 +187,11 @@ public class PacketMine extends Module {
      */
     private int savedSlot = -1;
 
+    /** 本 tick 是否检测到鼠标滚轮事件（用于判断用户主动切槽） */
+    private boolean scrolledThisTick = false;
+    /** 连续槽位冲突 tick 计数（用于模块干扰的渐进式响应） */
+    private int slotConflictTicks = 0;
+
     public PacketMine() {
         super(Categories.World, "packet-mine", "Sends packets to mine blocks without the mining animation.");
     }
@@ -197,6 +203,8 @@ public class PacketMine extends Module {
         lastFinishMs = 0;
         localDelayBalance = 0;
         savedSlot = -1;
+        scrolledThisTick = false;
+        slotConflictTicks = 0;
     }
 
     @Override
@@ -205,6 +213,8 @@ public class PacketMine extends Module {
         restoreSlot();
         for (MyBlock block : blocks) blockPool.free(block);
         blocks.clear();
+        scrolledThisTick = false;
+        slotConflictTicks = 0;
     }
 
     // ======================== Events ========================
@@ -245,34 +255,44 @@ public class PacketMine extends Module {
             restoreSlot();
         }
 
-        // 手动换槽检测：autoSwitch 模式下，如果用户主动切换了槽位，
-        // 视为"用户接管控制" → 中止并清空所有队列，不恢复槽位
+        // 槽位冲突检测：渐进式响应，区分用户接管和模块干扰
         if (autoSwitch.get() && !blocks.isEmpty()) {
             MyBlock active = blocks.getFirst();
             if (active.lockedToolSlot != -1 && active.mining
                 && mc.player.getInventory().selectedSlot != active.lockedToolSlot) {
-                abortAndClearAll();
-                savedSlot = -1;
-                return;
+
+                if (isUserSlotInput()) {
+                    // 用户主动切槽（数字键 / 鼠标滚轮）：中止当前任务，不恢复槽位
+                    active.lockedToolSlot = -1;
+                    active.phase = Phase.ABORTING;
+                    savedSlot = -1;
+                    slotConflictTicks = 0;
+                    scrolledThisTick = false;
+                } else {
+                    // 模块干扰：ensureTaskToolSelected 会在 tickMining 里尝试重申
+                    slotConflictTicks++;
+                    if (slotConflictTicks >= 3) {
+                        // 持续对抗 3 tick，放弃当前任务（保留队列其余部分）
+                        active.phase = Phase.ABORTING;
+                        slotConflictTicks = 0;
+                    }
+                }
+            } else {
+                slotConflictTicks = 0;
             }
         }
 
         // 每 tick 只驱动队列中第一个活跃任务
         if (!blocks.isEmpty()) blocks.getFirst().tick();
+
+        // 消费本 tick 的滚轮标记
+        scrolledThisTick = false;
     }
 
-    /**
-     * 中止所有活跃任务并清空队列。
-     * 对已发过 START 的任务发送 ABORT 包，然后归还对象池。
-     */
-    private void abortAndClearAll() {
-        for (MyBlock b : blocks) {
-            if (b.mining) {
-                sendAbortPacket(b.blockPos, b.currentFace);
-            }
-            blockPool.free(b);
-        }
-        blocks.clear();
+    @EventHandler
+    private void onMouseScroll(MouseScrollEvent event) {
+        // 标记本 tick 有滚轮操作，供槽位冲突检测使用
+        scrolledThisTick = true;
     }
 
     @EventHandler
@@ -290,6 +310,17 @@ public class PacketMine extends Module {
     }
 
     // ======================== Helpers ========================
+
+    /**
+     * 检测是否存在用户主动切换槽位的输入。
+     * 涵盖数字键 1~9 和鼠标滚轮两种操作方式。
+     */
+    private boolean isUserSlotInput() {
+        for (var key : mc.options.hotbarKeys) {
+            if (key.isPressed()) return true;
+        }
+        return scrolledThisTick;
+    }
 
     /** 判断当前 tick 是否"安静"——没有使用物品等会和 dig 包冲突的行为 */
     private boolean isQuietTick() {
@@ -374,11 +405,13 @@ public class PacketMine extends Module {
     }
 
     /**
-     * 外部查询：PacketMine 是否正在自行管理工具切换。
-     * AutoTool 用此判断是否应让出控制权。
+     * 外部查询：PacketMine 是否拥有工具槽位的控制权。
+     *
+     * <p>只要模块开启且 autoSwitch 打开，就表示“本次挖掘系统由 PacketMine 接管工具槽位”。
+     * 不再依赖 blocks 是否非空，避免第一块加入前 AutoTool 抢先切槽的竞态。
      */
-    public boolean isAutoSwitching() {
-        return autoSwitch.get() && !blocks.isEmpty();
+    public boolean shouldOwnToolSelection() {
+        return isActive() && autoSwitch.get();
     }
 
     /**
@@ -606,10 +639,11 @@ public class PacketMine extends Module {
         // -------------------- MINING --------------------
 
         private void tickMining() {
-            // 按当前手持槽位计算本 tick 的 block damage
-            int effectiveSlot = lockedToolSlot != -1
-                ? lockedToolSlot
-                : mc.player.getInventory().selectedSlot;
+            // 每 tick 先重申工具，确保画面/服务端/progress 三者一致
+            ensureTaskToolSelected(MyBlock.this);
+
+            // 使用实际选中槽位计算 delta（ensureTaskToolSelected 已保证槽位正确）
+            int effectiveSlot = mc.player.getInventory().selectedSlot;
             double delta = BlockUtils.getBreakDelta(effectiveSlot, blockState);
             progress += delta;
             elapsedTicks++;

@@ -125,6 +125,16 @@ public class AutoTool extends Module {
     private void onTick(TickEvent.Post event) {
         if (Modules.get().isActive(InfinityMiner.class)) return;
 
+        // PacketMine 接管工具选择期间，清空 AutoTool 的 pending 状态，防止后续暗中切槽
+        PacketMine packetMine = Modules.get().get(PacketMine.class);
+        if (packetMine.shouldOwnToolSelection()) {
+            shouldSwitch = false;
+            ticks = 0;
+            bestSlot = -1;
+            wasPressed = mc.options.attackKey.isPressed();
+            return;
+        }
+
         if (switchBack.get() && !mc.options.attackKey.isPressed() && wasPressed && InvUtils.previousSlot != -1) {
             InvUtils.swapBack();
             wasPressed = false;
@@ -145,9 +155,9 @@ public class AutoTool extends Module {
     private void onStartBreakingBlock(StartBreakingBlockEvent event) {
         if (Modules.get().isActive(InfinityMiner.class)) return;
 
-        // PacketMine 活跃且自行管理工具切换时，让出控制权
+        // PacketMine 接管工具选择时，AutoTool 完全让位（包括第一块开始前）
         PacketMine packetMine = Modules.get().get(PacketMine.class);
-        if (packetMine.isActive() && packetMine.isAutoSwitching()) return;
+        if (packetMine.shouldOwnToolSelection()) return;
 
         // Get blockState
         BlockState blockState = mc.world.getBlockState(event.blockPos);
@@ -177,7 +187,7 @@ public class AutoTool extends Module {
         if ((bestSlot != -1 && (bestScore > getScore(currentStack, blockState, silkTouchForEnderChest.get(), fortuneForOresCrops.get(), prefer.get(), itemStack -> !shouldStopUsing(itemStack))) || shouldStopUsing(currentStack) || !isTool(currentStack))) {
             ticks = switchDelay.get();
 
-            if (ticks == 0) InvUtils.swap(bestSlot, true);
+            if (ticks == 0) InvUtils.swap(bestSlot, switchBack.get());
             else shouldSwitch = true;
         }
 
