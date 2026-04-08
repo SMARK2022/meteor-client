@@ -13,6 +13,7 @@ import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
+import meteordevelopment.meteorclient.systems.modules.player.AutoTool;
 import meteordevelopment.meteorclient.systems.modules.render.BreakIndicators;
 import meteordevelopment.meteorclient.utils.misc.Pool;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
@@ -244,8 +245,34 @@ public class PacketMine extends Module {
             restoreSlot();
         }
 
+        // 手动换槽检测：autoSwitch 模式下，如果用户主动切换了槽位，
+        // 视为"用户接管控制" → 中止并清空所有队列，不恢复槽位
+        if (autoSwitch.get() && !blocks.isEmpty()) {
+            MyBlock active = blocks.getFirst();
+            if (active.lockedToolSlot != -1 && active.mining
+                && mc.player.getInventory().selectedSlot != active.lockedToolSlot) {
+                abortAndClearAll();
+                savedSlot = -1;
+                return;
+            }
+        }
+
         // 每 tick 只驱动队列中第一个活跃任务
         if (!blocks.isEmpty()) blocks.getFirst().tick();
+    }
+
+    /**
+     * 中止所有活跃任务并清空队列。
+     * 对已发过 START 的任务发送 ABORT 包，然后归还对象池。
+     */
+    private void abortAndClearAll() {
+        for (MyBlock b : blocks) {
+            if (b.mining) {
+                sendAbortPacket(b.blockPos, b.currentFace);
+            }
+            blockPool.free(b);
+        }
+        blocks.clear();
     }
 
     @EventHandler
@@ -346,10 +373,30 @@ public class PacketMine extends Module {
         return best;
     }
 
-    /** 找到热栏中最快的工具槽位，-1 表示没找到更好的 */
+    /**
+     * 外部查询：PacketMine 是否正在自行管理工具切换。
+     * AutoTool 用此判断是否应让出控制权。
+     */
+    public boolean isAutoSwitching() {
+        return autoSwitch.get() && !blocks.isEmpty();
+    }
+
+    /**
+     * 为指定方块状态找到热栏中的最佳工具槽位。
+     *
+     * <p>当 AutoTool 模块启用时，委托其评分系统（附魔偏好、精准/时运、
+     * 耐久保护、黑白名单全部生效）；否则回退到纯速度评估。
+     *
+     * @return 最佳槽位（0~8），或 -1 表示不切换
+     */
     private int findBestToolSlot(BlockState state) {
         if (!autoSwitch.get()) return -1;
         if (notOnUse.get() && mc.player.isUsingItem()) return -1;
+
+        AutoTool autoTool = Modules.get().get(AutoTool.class);
+        if (autoTool.isActive()) {
+            return autoTool.findBestSlot(state);
+        }
 
         FindItemResult result = InvUtils.findFastestTool(state);
         return result.found() ? result.slot() : -1;
@@ -559,12 +606,6 @@ public class PacketMine extends Module {
         // -------------------- MINING --------------------
 
         private void tickMining() {
-            // autoSwitch 模式下：如果玩家手动切了槽（如切武器打怪），abort 本次挖掘
-            if (lockedToolSlot != -1 && mc.player.getInventory().selectedSlot != lockedToolSlot) {
-                phase = Phase.ABORTING;
-                return;
-            }
-
             // 按当前手持槽位计算本 tick 的 block damage
             int effectiveSlot = lockedToolSlot != -1
                 ? lockedToolSlot

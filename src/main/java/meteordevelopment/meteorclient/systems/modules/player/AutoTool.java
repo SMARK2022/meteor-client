@@ -14,6 +14,7 @@ import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.modules.render.Xray;
 import meteordevelopment.meteorclient.systems.modules.world.InfinityMiner;
+import meteordevelopment.meteorclient.systems.modules.world.PacketMine;
 import meteordevelopment.meteorclient.utils.Utils;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
@@ -144,6 +145,10 @@ public class AutoTool extends Module {
     private void onStartBreakingBlock(StartBreakingBlockEvent event) {
         if (Modules.get().isActive(InfinityMiner.class)) return;
 
+        // PacketMine 活跃且自行管理工具切换时，让出控制权
+        PacketMine packetMine = Modules.get().get(PacketMine.class);
+        if (packetMine.isActive() && packetMine.isAutoSwitching()) return;
+
         // Get blockState
         BlockState blockState = mc.world.getBlockState(event.blockPos);
         if (!BlockUtils.canBreak(event.blockPos, blockState)) return;
@@ -183,6 +188,38 @@ public class AutoTool extends Module {
             mc.options.attackKey.setPressed(false);
             event.cancel();
         }
+    }
+
+    /**
+     * 为指定方块状态找到热栏中的最佳工具槽位。
+     * 复用 AutoTool 的全部设置（附魔偏好、精准/时运、耐久保护、黑白名单）。
+     *
+     * @return 最佳槽位（0~8），或 -1 表示没有合适工具
+     */
+    public int findBestSlot(BlockState state) {
+        if (mc.player == null) return -1;
+
+        double bestScore = -1;
+        int best = -1;
+
+        for (int i = 0; i < 9; i++) {
+            ItemStack stack = mc.player.getInventory().getStack(i);
+
+            if (listMode.get() == ListMode.Whitelist && !whitelist.get().contains(stack.getItem())) continue;
+            if (listMode.get() == ListMode.Blacklist && blacklist.get().contains(stack.getItem())) continue;
+
+            double score = getScore(stack, state,
+                silkTouchForEnderChest.get(), fortuneForOresCrops.get(),
+                prefer.get(), item -> !shouldStopUsing(item));
+            if (score < 0) continue;
+
+            if (score > bestScore) {
+                bestScore = score;
+                best = i;
+            }
+        }
+
+        return best;
     }
 
     private boolean shouldStopUsing(ItemStack itemStack) {
