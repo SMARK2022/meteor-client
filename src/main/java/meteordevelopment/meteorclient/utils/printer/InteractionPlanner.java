@@ -87,7 +87,11 @@ public final class InteractionPlanner {
 
     /**
      * 验证点击点是否满足 reach / NCP / LOS 约束。
-     * 自身交互不需要 targetPos 豁免（与放置不同），placementTargetPos 传 null。
+     *
+     * <p>自身交互（右键方块本身来 toggle / waterlog / 调频等）的几何约束
+     * 由服务端始终验证——玩家必须物理可达所点击的面。因此此处
+     * 无论调用方的 strict / checkLos 如何设置，一律开启 NCP 方向检查和视线检查，
+     * 防止选到被遮挡或背对玩家的面而导致服务端静默拒绝。
      */
     private static boolean isPointValid(
         Vec3d hitVec, Direction face, BlockPos pos,
@@ -96,7 +100,15 @@ public final class InteractionPlanner {
     ) {
         return BlockUtilHelper.isPointValid(
             hitVec, face, pos, eyePos, world, mc.player,
-            strict, checkLos, maxReach, null
+            true,  // NCP: 自身交互始终验证面朝向
+            true,  // LOS: 自身交互始终验证视线
+           an checkLos, double maxReach
+    ) {
+        return BlockUtilHelper.isPointValid(
+            hitVec, face, pos, eyePos, world, mc.player,
+            true,  // NCP: 自身交互始终验证面朝向
+            true,  // LOS: 自身交互始终验证视线
+            maxReach, null
         );
     }
 
