@@ -368,6 +368,24 @@ public class Printer extends Module {
     private Vec3d lastHitVec = null;
     private int lastHitVecTicks = 0;
 
+    /** 全局 tick 计数器（用于 pendingUseBlocks 超时） */
+    private int tickCounter;
+
+    /**
+     * UseBlock 执行后等待服务端确认的方块集合。
+     *
+     * <p>交互类动作（拉杆/门/活板门/栅栏门等）不像放置方块那样有客户端状态预测——
+     * {@code Block.onUse()} 在 {@code isClient} 分支中不会调用 {@code world.setBlockState()}。
+     * 状态变更只在服务端发生，然后通过 {@code BlockUpdateS2CPacket} 回传。
+     * 在该回传到达之前，Printer 的扫描仍然会看到旧状态并尝试重复交互，
+     * 导致拉杆等被反复切换（"抽搐"现象）。
+     *
+     * <p>此集合记录已执行但尚未收到服务端确认的 UseBlock 位置。
+     * 每次扫描前清理已确认（状态已改变）或超时（40 tick）的条目。
+     */
+    private record PendingUse(BlockState stateAtInteraction, int tickCreated) {}
+    private final Map<BlockPos, PendingUse> pendingUseBlocks = new HashMap<>();
+
     public Printer() {
         super(Categories.Player, "printer", "Automatically places blocks based on Litematica schematic.");
 
@@ -388,22 +406,26 @@ public class Printer extends Module {
     @Override
     public void onActivate() {
         tickDelay = 0;
+        tickCounter = 0;
         tasks.clear();
         unsupportedTasks.clear();
         disabledTasks.clear();
         previewCandidates.clear();
         preparingInputThisTick = false;
+        pendingUseBlocks.clear();
         clearArmed();
     }
 
     @Override
     public void onDeactivate() {
         tickDelay = 0;
+        tickCounter = 0;
         tasks.clear();
         unsupportedTasks.clear();
         disabledTasks.clear();
         previewCandidates.clear();
         preparingInputThisTick = false;
+        pendingUseBlocks.clear();
         clearArmed();
         resetSneakState();
     }
@@ -497,6 +519,8 @@ public class Printer extends Module {
     @EventHandler
     private void onTickPre(TickEvent.Pre event) {
         if (!isActive() || mc.player == null || mc.world == null) return;
+
+        tickCounter++;
 
         // 每 tick 衰减渲染态倒计时
         tickRenderState();
@@ -907,6 +931,13 @@ public class Printer extends Module {
 
         if (mc.interactionManager.interactBlock(mc.player, armed.hand(), hitResult).isAccepted()) {
             swingOrPacket(armed.hand());
+
+            // UseBlock 交互成功后，记录到等待确认集合
+            // 防止服务端回包之前扫描到旧状态而反复交互（toggle 类方块抽搐）
+            if (plan instanceof ActionPlan.UseBlock ub) {
+                pendingUseBlocks.put(ub.targetPos().toImmutable(),
+                    new PendingUse(mc.world.getBlockState(ub.targetPos()), tickCounter));
+            }
         }
     }
 
@@ -931,6 +962,13 @@ public class Printer extends Module {
 
         if (mc.player == null || mc.world == null) return;
 
+        // 清理已确认或超时的 UseBlock 等待条目
+        // 状态已改变 = 服务端确认了交互；超过 40 tick ≈ 2s = 视为服务端拒绝，允许重试
+        pendingUseBlocks.entrySet().removeIf(e -> {
+            if (mc.world.getBlockState(e.getKey()) != e.getValue().stateAtInteraction()) return true;
+            return tickCounter - e.getValue().tickCreated() > 40;
+        });
+
         Vec3d playerPos = mc.player.getEyePos();
         double range = placeRange.get();
         double preSelectionRange = range + 1.0;
@@ -948,6 +986,9 @@ public class Printer extends Module {
 
             // 完全一致，跳过
             if (requiredState == currentState) continue;
+
+            // UseBlock 等待服务端确认中，跳过（防止 toggle 类方块被反复交互）
+            if (pendingUseBlocks.containsKey(pos)) continue;
 
             PrinterTask task = new PrinterTask(pos, requiredState, currentState);
 
