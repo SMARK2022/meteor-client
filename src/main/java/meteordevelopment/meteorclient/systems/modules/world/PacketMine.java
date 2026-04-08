@@ -46,7 +46,7 @@ import java.util.List;
  *   <li>START / STOP / ABORT 是唯一的 dig 里程碑包，中间不发 dig 包</li>
  *   <li>旋转仅在 START / STOP / ABORT 时做一次性 silent rotation</li>
  *   <li>心跳挥手（HandSwing）模拟玩家持续按住左键的动画信号</li>
- *   <li>两块之间的冷却（post-break-cooldown）防止连续瞬挖被判定</li>
+ *   <li>本地镜像 Grim blockDelayBalance，自适应调度块间节奏（允许 burst 但自动恢复）</li>
  *   <li>动态 face 解析：挖掘过程中玩家移位后，自动切换到当前仍可合法击中的面</li>
  * </ul>
  */
@@ -56,12 +56,12 @@ public class PacketMine extends Module {
 
     // ======================== General ========================
 
-    private final Setting<Integer> postBreakCooldown = sgGeneral.add(new IntSetting.Builder()
-        .name("post-break-cooldown")
-        .description("Ticks to wait after a block is finished before the next START is allowed.")
-        .defaultValue(6)
+    private final Setting<Integer> delayBudgetTarget = sgGeneral.add(new IntSetting.Builder()
+        .name("delay-budget-target")
+        .description("Maximum allowed Grim-style delay balance (ms). Lower = safer, higher = faster burst. Stable ~700, Edge ~900.")
+        .defaultValue(800)
         .min(0)
-        .sliderMax(20)
+        .sliderMax(1000)
         .build()
     );
 
@@ -174,8 +174,10 @@ public class PacketMine extends Module {
     private final Pool<MyBlock> blockPool = new Pool<>(MyBlock::new);
     public final List<MyBlock> blocks = new ArrayList<>();
 
-    /** 全局冷却：上一块 STOP 后到下一块 START 的最小间隔 */
-    private int globalCooldown;
+    /** 上一块 STOP 发出时的系统时间戳（ms），用于本地镜像 Grim blockDelayBalance */
+    private long lastFinishMs;
+    /** 本地镜像：Grim blockDelayBalance 的估计值（ms） */
+    private double localDelayBalance;
 
     /**
      * autoSwitch 生效时，记住任务开始前玩家实际握的原始槽位。
@@ -191,7 +193,8 @@ public class PacketMine extends Module {
 
     @Override
     public void onActivate() {
-        globalCooldown = 0;
+        lastFinishMs = 0;
+        localDelayBalance = 0;
         savedSlot = -1;
     }
 
@@ -225,7 +228,6 @@ public class PacketMine extends Module {
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
-        if (globalCooldown > 0) globalCooldown--;
 
         // 清理已完成的任务，归还对象池
         Iterator<MyBlock> it = blocks.iterator();
@@ -268,6 +270,35 @@ public class PacketMine extends Module {
         if (mc.player.isUsingItem()) return false;
         if (mc.options.useKey.isPressed()) return false;
         return true;
+    }
+
+    /**
+     * 预测当前时刻开始挖掘后，Grim blockDelayBalance 的投影值。
+     *
+     * <p>镜像 Grim FastBreak 的块间检查逻辑：
+     * <ul>
+     *   <li>breakDelay >= 275ms → balance *= 0.9（衰减）</li>
+     *   <li>breakDelay &lt; 275ms → balance += (300 - breakDelay)（累积）</li>
+     * </ul>
+     */
+    private double projectedDelayBalance() {
+        long now = System.currentTimeMillis();
+        double breakDelay = now - lastFinishMs;
+        return breakDelay >= 275
+            ? localDelayBalance * 0.9
+            : localDelayBalance + (300 - breakDelay);
+    }
+
+    /**
+     * 在 START 实际发出时，提交本地 delayBalance 更新。
+     * 必须在 sendStartPacket 所在的 callback 中调用。
+     */
+    private void commitStartDelayBudget() {
+        long now = System.currentTimeMillis();
+        double breakDelay = now - lastFinishMs;
+        localDelayBalance = breakDelay >= 275
+            ? localDelayBalance * 0.9
+            : localDelayBalance + (300 - breakDelay);
     }
 
     /** 获取 face 中心点的微偏移锚点（用于旋转/距离判断） */
@@ -488,8 +519,9 @@ public class PacketMine extends Module {
         // -------------------- PENDING_START --------------------
 
         private void tickPendingStart() {
-            if (globalCooldown > 0) return;
             if (!isQuietTick()) return;
+            // 本地镜像 Grim blockDelayBalance：只有投影值在预算内才允许开始
+            if (projectedDelayBalance() > delayBudgetTarget.get()) return;
 
             // 在 START 前确定并锁定工具
             lockedToolSlot = findBestToolSlot(blockState);
@@ -503,6 +535,7 @@ public class PacketMine extends Module {
                 ensureTaskToolSelected(MyBlock.this);
                 sendSwing();
                 sendStartPacket(blockPos, direction);
+                commitStartDelayBudget();
                 mining = true;
                 progress = 0;
                 elapsedTicks = 0;
@@ -588,7 +621,7 @@ public class PacketMine extends Module {
                 ensureTaskToolSelected(MyBlock.this);
                 sendSwing();
                 sendStopPacket(blockPos, currentFace);
-                globalCooldown = postBreakCooldown.get();
+                lastFinishMs = System.currentTimeMillis();
                 phase = Phase.FINISHED;
                 clearRotationState();
             };
