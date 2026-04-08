@@ -127,36 +127,34 @@ public interface HitVecCalculator {
         double y = pos.getY();
         double z = pos.getZ();
 
-        // [Fix] 面坐标轻微内缩，避免精确边界上的面判定抖动
-        final double FACE_EPS = 1.0e-3;
         double cx = x + (minX + maxX) / 2.0;
         double cz = z + (minZ + maxZ) / 2.0;
 
-        // 根据点击的面计算点击点
+        // 根据点击的面计算点击点（直接使用精确的面坐标，不做法线方向内缩）
         switch (side) {
             case UP -> {
-                // 点击顶面：固定在 Shape 最高点（轻微内缩）
-                return new Vec3d(cx, y + Math.max(minY, maxY - FACE_EPS), cz);
+                // 点击顶面：固定在 Shape 最高点
+                return new Vec3d(cx, y + maxY, cz);
             }
             case DOWN -> {
-                // 点击底面：固定在 Shape 最低点（轻微内缩）
-                return new Vec3d(cx, y + Math.min(maxY, minY + FACE_EPS), cz);
+                // 点击底面：固定在 Shape 最低点
+                return new Vec3d(cx, y + minY, cz);
             }
             case NORTH -> {
                 // 点击北面（Z 轴负向）：使用计算出的 finalRelY
-                return new Vec3d(cx, y + finalRelY, z + Math.min(maxZ, minZ + FACE_EPS));
+                return new Vec3d(cx, y + finalRelY, z + minZ);
             }
             case SOUTH -> {
                 // 点击南面（Z 轴正向）
-                return new Vec3d(cx, y + finalRelY, z + Math.max(minZ, maxZ - FACE_EPS));
+                return new Vec3d(cx, y + finalRelY, z + maxZ);
             }
             case WEST -> {
                 // 点击西面（X 轴负向）
-                return new Vec3d(x + Math.min(maxX, minX + FACE_EPS), y + finalRelY, cz);
+                return new Vec3d(x + minX, y + finalRelY, cz);
             }
             case EAST -> {
                 // 点击东面（X 轴正向）
-                return new Vec3d(x + Math.max(minX, maxX - FACE_EPS), y + finalRelY, cz);
+                return new Vec3d(x + maxX, y + finalRelY, cz);
             }
         }
         return Vec3d.ofCenter(pos);
@@ -350,22 +348,16 @@ public interface HitVecCalculator {
         double minU, double maxU,
         double minV, double maxV
     ) {
-        private static final double FACE_EPS = 1.0e-3;
-
         /**
          * 将 patch 内的 (u, v) 坐标转换为世界坐标。
-         * 自动沿法线方向内缩 FACE_EPS，避免精确边界判定抖动。
+         * 直接使用精确的面坐标，不做法线方向内缩。
          */
         public Vec3d toWorld(BlockPos pos, double u, double v) {
-            double fc = switch (face) {
-                case EAST, UP, SOUTH -> fixedCoord - FACE_EPS;
-                case WEST, DOWN, NORTH -> fixedCoord + FACE_EPS;
-            };
             double bx = pos.getX(), by = pos.getY(), bz = pos.getZ();
             return switch (face) {
-                case EAST, WEST   -> new Vec3d(bx + fc, by + v, bz + u);
-                case UP, DOWN     -> new Vec3d(bx + u, by + fc, bz + v);
-                case NORTH, SOUTH -> new Vec3d(bx + u, by + v, bz + fc);
+                case EAST, WEST   -> new Vec3d(bx + fixedCoord, by + v, bz + u);
+                case UP, DOWN     -> new Vec3d(bx + u, by + fixedCoord, bz + v);
+                case NORTH, SOUTH -> new Vec3d(bx + u, by + v, bz + fixedCoord);
             };
         }
 

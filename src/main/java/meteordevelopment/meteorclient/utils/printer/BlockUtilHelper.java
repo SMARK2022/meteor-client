@@ -310,14 +310,13 @@ public class BlockUtilHelper {
                                            BlockPos placementTargetPos) {
         if (targetPoint == null || world == null || player == null) return false;
 
-        // 关键：向被点击方块内部轻微缩进，避免"刚好在面上"导致 MISS
-        final double EPS = 1.0e-3;
+        // 直接信任 targetPoint 作为精确的面点。
+        // 为了确保射线引擎能完整穿透到目标面（避免浮点边界 MISS），
+        // 沿眼睐→目标方向将射线终点延伸微量。
         Vec3d start = player.getEyePos();
-        Vec3d end = targetPoint.add(
-            -face.getOffsetX() * EPS,
-            -face.getOffsetY() * EPS,
-            -face.getOffsetZ() * EPS
-        );
+        Vec3d rayDir = targetPoint.subtract(start);
+        double len = rayDir.length();
+        Vec3d end = len > 0 ? targetPoint.add(rayDir.multiply(0.01 / len)) : targetPoint;
 
         // 使用 BlockView.raycast 自定义逐方块射线检测：
         // - 对每个经过的 BlockPos 查询 outline shape
