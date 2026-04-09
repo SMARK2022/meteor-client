@@ -200,6 +200,22 @@ public class PacketMine extends Module {
         .build()
     );
 
+    private final Setting<SettingColor> drainSideColor = sgRender.add(new ColorSetting.Builder()
+        .name("drain-side-color")
+        .description("The color of the sides of the drain target block.")
+        .defaultValue(new SettingColor(100, 50, 200, 10))
+        .visible(() -> grimBypass.get() && drainEnabled.get())
+        .build()
+    );
+
+    private final Setting<SettingColor> drainLineColor = sgRender.add(new ColorSetting.Builder()
+        .name("drain-line-color")
+        .description("The color of the lines of the drain target block.")
+        .defaultValue(new SettingColor(100, 50, 200, 255))
+        .visible(() -> grimBypass.get() && drainEnabled.get())
+        .build()
+    );
+
     // ======================== State ========================
 
     private final Pool<MyBlock> blockPool = new Pool<>(MyBlock::new);
@@ -221,6 +237,11 @@ public class PacketMine extends Module {
     /** 连续槽位冲突 tick 计数（用于模块干扰的渐进式响应） */
     private int slotConflictTicks = 0;
 
+    /** 当前 drain 目标位置（渲染用），null = 无活跃 drain */
+    private BlockPos drainRenderPos;
+    /** drain 渲染过期时间（ms） */
+    private long drainRenderExpiry;
+
     public PacketMine() {
         super(Categories.World, "packet-mine", "Sends packets to mine blocks without the mining animation.");
     }
@@ -233,6 +254,7 @@ public class PacketMine extends Module {
         savedSlot = -1;
         scrolledThisTick = false;
         slotConflictTicks = 0;
+        drainRenderPos = null;
     }
 
     @Override
@@ -243,9 +265,8 @@ public class PacketMine extends Module {
         blocks.clear();
         scrolledThisTick = false;
         slotConflictTicks = 0;
+        drainRenderPos = null;
     }
-
-    // ======================== Events ========================
 
     @EventHandler
     private void onStartBreakingBlock(StartBreakingBlockEvent event) {
@@ -339,6 +360,27 @@ public class PacketMine extends Module {
                 continue;
             }
             block.render(event);
+        }
+
+        // Drain 目标渲染：半透明紫色边框，500ms 后自动消失
+        if (drainRenderPos != null && System.currentTimeMillis() < drainRenderExpiry) {
+            BlockState drainState = mc.world.getBlockState(drainRenderPos);
+            VoxelShape shape = drainState.getOutlineShape(mc.world, drainRenderPos);
+            double x1, y1, z1, x2, y2, z2;
+            if (shape.isEmpty()) {
+                x1 = drainRenderPos.getX(); y1 = drainRenderPos.getY(); z1 = drainRenderPos.getZ();
+                x2 = x1 + 1; y2 = y1 + 1; z2 = z1 + 1;
+            } else {
+                x1 = drainRenderPos.getX() + shape.getMin(Direction.Axis.X);
+                y1 = drainRenderPos.getY() + shape.getMin(Direction.Axis.Y);
+                z1 = drainRenderPos.getZ() + shape.getMin(Direction.Axis.Z);
+                x2 = drainRenderPos.getX() + shape.getMax(Direction.Axis.X);
+                y2 = drainRenderPos.getY() + shape.getMax(Direction.Axis.Y);
+                z2 = drainRenderPos.getZ() + shape.getMax(Direction.Axis.Z);
+            }
+            event.renderer.box(x1, y1, z1, x2, y2, z2, drainSideColor.get(), drainLineColor.get(), shapeMode.get(), 0);
+        } else {
+            drainRenderPos = null;
         }
     }
 
@@ -497,6 +539,9 @@ public class PacketMine extends Module {
     private boolean executeDrainStep() {
         DrainTarget target = findDrainTarget();
         if (target == null) return false;
+
+        drainRenderPos = target.pos;
+        drainRenderExpiry = System.currentTimeMillis() + 500;
 
         Vec3d anchor = getFaceAnchor(target.pos, target.face);
         Rotations.rotate(Rotations.getYaw(anchor), Rotations.getPitch(anchor), 50, () -> {
