@@ -75,14 +75,6 @@ public class SpeedMine extends Module {
         .build()
     );
 
-    private final Setting<Boolean> grimBypass = sgGeneral.add(new BoolSetting.Builder()
-        .name("grim-bypass")
-        .description("Bypasses Grim's fastbreak check, working as of 2.3.58")
-        .defaultValue(false)
-        .visible(() -> mode.get() == Mode.Damage)
-        .build()
-    );
-
     // ======================== Grim State Machine ========================
 
     private final SettingGroup sgGrim = settings.createGroup("Grim");
@@ -193,12 +185,6 @@ public class SpeedMine extends Module {
             } else if (packet.getAction() == PlayerActionC2SPacket.Action.ABORT_DESTROY_BLOCK) {
                 grimTrackAbort();
             }
-        }
-
-        // Existing grimBypass: send ABORT after STOP to confuse Grim's tracking
-        if (grimBypass.get() && packet.getAction() == PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK) {
-            mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(
-                PlayerActionC2SPacket.Action.ABORT_DESTROY_BLOCK, packet.getPos().up(), packet.getDirection()));
         }
     }
 
