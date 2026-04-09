@@ -16,10 +16,19 @@ import meteordevelopment.meteorclient.utils.network.PacketUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.network.packet.Packet;
 import net.minecraft.network.packet.c2s.play.*;
+import net.minecraft.network.packet.s2c.play.*;
 
+import java.io.BufferedWriter;
+import java.io.IOException;
 import java.lang.reflect.RecordComponent;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.Set;
 import java.util.StringJoiner;
+import java.util.concurrent.atomic.AtomicLong;
 
 public class PacketLogger extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
@@ -35,6 +44,20 @@ public class PacketLogger extends Module {
     private final Setting<Boolean> detailed = sgGeneral.add(new BoolSetting.Builder()
         .name("detailed")
         .description("Print detailed field values for each packet.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Boolean> logToFile = sgGeneral.add(new BoolSetting.Builder()
+        .name("log-to-file")
+        .description("Write packet log to a file in logs/packet-logger/ directory.")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Boolean> showTimestamp = sgGeneral.add(new BoolSetting.Builder()
+        .name("show-timestamp")
+        .description("Prefix each log line with tick, elapsed ms, and sequence number.")
         .defaultValue(true)
         .build()
     );
@@ -126,16 +149,44 @@ public class PacketLogger extends Module {
 
     // ======================== S2C ========================
 
+    private final Setting<Boolean> logBlockUpdate = sgS2C.add(new BoolSetting.Builder()
+        .name("block-update")
+        .description("Log BlockUpdateS2CPacket.")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Boolean> logPlayerPosLook = sgS2C.add(new BoolSetting.Builder()
+        .name("player-pos-look")
+        .description("Log PlayerPositionLookS2CPacket (server corrections).")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Boolean> logHealthUpdate = sgS2C.add(new BoolSetting.Builder()
+        .name("health-update")
+        .description("Log HealthUpdateS2CPacket.")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Boolean> logPlaySound = sgS2C.add(new BoolSetting.Builder()
+        .name("play-sound")
+        .description("Log PlaySoundS2CPacket.")
+        .defaultValue(false)
+        .build()
+    );
+
     private final Setting<Set<Class<? extends Packet<?>>>> s2cPackets = sgS2C.add(new PacketListSetting.Builder()
-        .name("S2C-packets")
-        .description("Server-to-client packets to log when received.")
+        .name("extra-S2C-packets")
+        .description("Additional S2C packets not covered by dedicated toggles above.")
         .filter(aClass -> PacketUtils.getS2CPackets().contains(aClass))
         .build()
     );
 
     private final Setting<Boolean> s2cLogAll = sgS2C.add(new BoolSetting.Builder()
         .name("log-all-S2C")
-        .description("Log all S2C packets regardless of the selection above.")
+        .description("Log all S2C packets.")
         .defaultValue(false)
         .build()
     );
@@ -153,12 +204,71 @@ public class PacketLogger extends Module {
         super(Categories.Misc, "packet-logger", "Logs selected packets to chat with detailed field output.");
     }
 
+    // ======================== State ========================
+
+    private final AtomicLong seqCounter = new AtomicLong();
+    private long activateMs;
+    private BufferedWriter fileWriter;
+    private static final DateTimeFormatter FILE_TS = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss");
+
+    @Override
+    public void onActivate() {
+        seqCounter.set(0);
+        activateMs = System.currentTimeMillis();
+        if (logToFile.get()) openLogFile();
+    }
+
+    @Override
+    public void onDeactivate() {
+        closeLogFile();
+    }
+
+    private void openLogFile() {
+        try {
+            Path dir = Path.of("logs", "packet-logger");
+            Files.createDirectories(dir);
+            Path file = dir.resolve("packets_" + FILE_TS.format(LocalDateTime.now()) + ".log");
+            fileWriter = Files.newBufferedWriter(file, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        } catch (IOException e) {
+            error("Failed to open packet log file: " + e.getMessage());
+            fileWriter = null;
+        }
+    }
+
+    private void closeLogFile() {
+        if (fileWriter != null) {
+            try { fileWriter.close(); } catch (IOException ignored) {}
+            fileWriter = null;
+        }
+    }
+
     @EventHandler
     private void onReceivePacket(PacketEvent.Receive event) {
+        Packet<?> packet = event.packet;
+
+        // Dedicated S2C toggles
+        if (packet instanceof BlockUpdateS2CPacket) {
+            if (logBlockUpdate.get()) logPacket("[S2C]", packet, packet.getClass());
+            return;
+        }
+        if (packet instanceof PlayerPositionLookS2CPacket) {
+            if (logPlayerPosLook.get()) logPacket("[S2C]", packet, packet.getClass());
+            return;
+        }
+        if (packet instanceof HealthUpdateS2CPacket) {
+            if (logHealthUpdate.get()) logPacket("[S2C]", packet, packet.getClass());
+            return;
+        }
+        if (packet instanceof PlaySoundS2CPacket) {
+            if (logPlaySound.get()) logPacket("[S2C]", packet, packet.getClass());
+            return;
+        }
+
+        // Fallback: generic S2C list
         @SuppressWarnings("unchecked")
-        Class<? extends Packet<?>> packetClass = (Class<? extends Packet<?>>) event.packet.getClass();
+        Class<? extends Packet<?>> packetClass = (Class<? extends Packet<?>>) packet.getClass();
         if (s2cLogAll.get() || s2cPackets.get().contains(packetClass)) {
-            logPacket("[S2C]", event.packet, packetClass);
+            logPacket("[S2C]", packet, packetClass);
         }
     }
 
@@ -217,29 +327,45 @@ public class PacketLogger extends Module {
 
     @SuppressWarnings("unchecked")
     private void logPacket(String direction, Packet<?> packet, Class<?> packetClass) {
+        long seq = seqCounter.incrementAndGet();
+        long elapsedMs = System.currentTimeMillis() - activateMs;
+        long tick = mc.world != null ? mc.world.getTime() : -1;
+
         String name = PacketUtils.getName((Class<? extends Packet<?>>) packetClass);
         if (name == null) name = packetClass.getSimpleName();
 
-        if (!detailed.get()) {
-            info("(highlight)%s(default) %s", direction, name);
-            return;
+        // Build timestamp prefix
+        String tsPrefix = "";
+        if (showTimestamp.get()) {
+            tsPrefix = String.format("#%d t%d +%dms ", seq, tick, elapsedMs);
         }
 
-        // Try special formatters first, then fallback to reflection
-        String detail = formatSpecial(packet);
-        if (detail == null) detail = formatReflective(packet);
+        // Build detail suffix
+        String detail = "";
+        if (detailed.get()) {
+            String d = formatSpecial(packet);
+            if (d == null) d = formatReflective(packet);
+            if (d != null && !d.isEmpty()) detail = d;
+        }
 
-        if (detail != null && !detail.isEmpty()) {
-            info("(highlight)%s(default) %s (gray)%s", direction, name, detail);
+        // Chat output
+        if (!detail.isEmpty()) {
+            info("(highlight)%s(default) %s%s %s (gray)%s", direction, tsPrefix, name, "", detail);
         } else {
-            info("(highlight)%s(default) %s", direction, name);
+            info("(highlight)%s(default) %s%s", direction, tsPrefix, name);
+        }
+
+        // File output
+        if (fileWriter != null) {
+            try {
+                fileWriter.write(String.format("%s %s%s %s%n", direction, tsPrefix, name, detail));
+                fileWriter.flush();
+            } catch (IOException ignored) {}
         }
     }
 
-    /**
-     * Special formatters for well-known packets with meaningful human-readable fields.
-     */
     private String formatSpecial(Packet<?> packet) {
+        // C2S
         if (packet instanceof PlayerActionC2SPacket p) {
             return "action=" + p.getAction() + " pos=" + p.getPos().toShortString() + " face=" + p.getDirection();
         }
@@ -256,12 +382,22 @@ public class PacketLogger extends Module {
         if (packet instanceof HandSwingC2SPacket p) {
             return "hand=" + p.getHand();
         }
+        // S2C
+        if (packet instanceof BlockUpdateS2CPacket p) {
+            return "pos=" + p.getPos().toShortString() + " state=" + p.getState();
+        }
+        if (packet instanceof PlayerPositionLookS2CPacket p) {
+            return "teleportId=" + p.teleportId() + " relatives=" + p.relatives();
+        }
+        if (packet instanceof HealthUpdateS2CPacket p) {
+            return "health=" + fmt(p.getHealth()) + " food=" + p.getFood() + " saturation=" + fmt(p.getSaturation());
+        }
+        if (packet instanceof PlaySoundS2CPacket p) {
+            return "sound=" + p.getSound().value().id() + " pos=(" + fmt(p.getX()) + ", " + fmt(p.getY()) + ", " + fmt(p.getZ()) + ") vol=" + fmt(p.getVolume()) + " pitch=" + fmt(p.getPitch());
+        }
         return null;
     }
 
-    /**
-     * Reflective formatter: dump all record components or declared fields.
-     */
     private String formatReflective(Packet<?> packet) {
         Class<?> cls = packet.getClass();
         RecordComponent[] components = cls.getRecordComponents();
