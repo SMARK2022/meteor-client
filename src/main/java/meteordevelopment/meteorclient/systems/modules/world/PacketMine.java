@@ -131,7 +131,7 @@ public class PacketMine extends Module {
     private final Setting<Integer> delayBudgetTarget = sgGrimBypass.add(new IntSetting.Builder()
         .name("delay-budget-target")
         .description("Maximum allowed Grim-style delay balance (ms). Lower = safer, higher = faster burst. Stable ~700, Edge ~900.")
-        .defaultValue(800)
+        .defaultValue(900)
         .min(0)
         .sliderMax(1000)
         .visible(grimBypass::get)
@@ -149,7 +149,7 @@ public class PacketMine extends Module {
     private final Setting<Integer> drainTarget = sgGrimBypass.add(new IntSetting.Builder()
         .name("drain-target")
         .description("Drain balance down to this level (ms). Lower = more aggressive drain.")
-        .defaultValue(200)
+        .defaultValue(100)
         .min(0)
         .sliderMax(800)
         .visible(() -> grimBypass.get() && drainEnabled.get())
@@ -486,11 +486,17 @@ public class PacketMine extends Module {
 
     // -------------------- Balance Drain --------------------
 
-    /** 是否应在本 tick 执行 balance 主动消耗 */
+    /**
+     * 是否应在本 tick 执行 balance 主动消耗。
+     *
+     * <p>触发条件：breakDelay >= 275ms（Grim 走衰减路径）且衰减后 balance 仍高于 drainTarget。
+     * 这样 drain 后的 START 以极低 balance 起步，后续多个块可连续即时 START。
+     */
     private boolean shouldDrain() {
         if (!grimBypass.get() || !drainEnabled.get()) return false;
-        if (localDelayBalance <= delayBudgetTarget.get()) return false;
-        return System.currentTimeMillis() - lastFinishMs >= 275;
+        long breakDelay = System.currentTimeMillis() - lastFinishMs;
+        if (breakDelay < 275) return false;
+        return localDelayBalance * 0.9 > drainTarget.get();
     }
 
     /**
