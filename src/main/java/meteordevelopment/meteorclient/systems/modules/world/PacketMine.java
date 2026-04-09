@@ -30,10 +30,12 @@ import net.minecraft.block.BlockState;
 import net.minecraft.network.packet.c2s.play.HandSwingC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
 import net.minecraft.util.Hand;
+import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.shape.VoxelShape;
+import net.minecraft.world.RaycastContext;
 
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -525,6 +527,11 @@ public class PacketMine extends Module {
                     if (face == null) continue;
 
                     Vec3d anchor = getFaceAnchor(pos, face);
+
+                    // LOS 检查：raycast 从眼睛到面锚点，确保没有其他方块遮挡
+                    BlockHitResult hit = mc.world.raycast(new RaycastContext(
+                        eye, anchor, RaycastContext.ShapeType.OUTLINE, RaycastContext.FluidHandling.NONE, mc.player));
+                    if (!hit.getBlockPos().equals(pos)) continue;
                     Vec3d toBlock = anchor.subtract(eye).normalize();
                     double anglePenalty = 1.0 - look.dotProduct(toBlock);
                     double score = anglePenalty * 3.0 + eye.distanceTo(anchor);
@@ -552,7 +559,7 @@ public class PacketMine extends Module {
         Vec3d anchor = getFaceAnchor(target.pos, target.face);
         Rotations.rotate(Rotations.getYaw(anchor), Rotations.getPitch(anchor), 50, () -> {
             int pairs = 0;
-            while (localDelayBalance > drainTarget.get() && pairs < 20) {
+            while (localDelayBalance > drainTarget.get() && pairs < 30) {
                 sendStartPacket(target.pos, target.face);
                 sendAbortPacket(target.pos, target.face);
                 localDelayBalance *= 0.9;
