@@ -576,8 +576,6 @@ public class PacketMine extends Module {
         Phase phase;
         /** START 时锁定的工具槽位（-1 = 当前手持） */
         int lockedToolSlot;
-        /** START 后已经过的 tick 数 */
-        int elapsedTicks;
         /** 心跳计数器 */
         int heartbeatTimer;
 
@@ -592,8 +590,18 @@ public class PacketMine extends Module {
         /** 提交 rotation callback 时的阶段快照，callback 执行时需校验 */
         Phase rotationPhaseToken;
 
-        /** 首次达到可发 STOP 条件的 tick（-1 = 尚未到达），用于 strictMargin 判断 */
-        int readyTick;
+        /**
+         * START 实际发出时的 wall-clock 时间戳（ms）。
+         * 镜像 Grim 的 {@code startBreak = System.currentTimeMillis()}，
+         * 用于 canStopNow() 计算 realTime，确保无论 rotation 相位如何都准确。
+         */
+        long startMs;
+
+        /**
+         * 首次满足 canStopNow() 条件的 wall-clock 时间戳（ms），0 = 尚未到达。
+         * 用于 strictMargin：首次 ready 后需再等 >= 50ms（约一个 tick）才允许 STOP。
+         */
+        long readyMs;
 
         /** 本块挖掘期间观察到的最大单 tick delta（镜像 Grim maximumBlockDamage） */
         double maxDelta;
@@ -611,11 +619,11 @@ public class PacketMine extends Module {
             this.mining = false;
             this.progress = 0;
             this.lockedToolSlot = -1;
-            this.elapsedTicks = 0;
             this.heartbeatTimer = 0;
             this.rotationQueued = false;
             this.rotationPhaseToken = null;
-            this.readyTick = -1;
+            this.startMs = 0;
+            this.readyMs = 0;
             this.maxDelta = 0;
             this.pendingSinceMs = System.currentTimeMillis();
             return this;
@@ -692,12 +700,15 @@ public class PacketMine extends Module {
                 sendStartPacket(blockPos, direction);
                 commitStartDelayBudget();
                 mining = true;
+                startMs = System.currentTimeMillis();
 
                 if (instaMine) {
-                    // 瞬破：只需 START，服务端直接破坏；不更新 lastFinishMs（无 STOP 发包）
+                    // 瞬破：只需 START，服务端在 delta >= 1.0 时直接破坏方块。
+                    // 不更新 lastFinishMs：Grim 的 lastFinishBreak 也仅在 FINISHED_DIGGING 更新
+                    // （FastBreak.java:108），instamine 不发 STOP 所以 Grim 侧同样不更新，模型一致。
                     phase = Phase.FINISHED;
                 } else {
-                    progress = 0; elapsedTicks = 0; heartbeatTimer = 0; readyTick = -1;
+                    progress = 0; heartbeatTimer = 0; readyMs = 0;
                     phase = Phase.MINING;
                 }
                 clearRotationState();
@@ -714,14 +725,16 @@ public class PacketMine extends Module {
             int effectiveSlot = mc.player.getInventory().selectedSlot;
             double delta = BlockUtils.getBreakDelta(effectiveSlot, blockState);
             progress += delta;
-            elapsedTicks++;
 
             // 追踪最大 delta（镜像 Grim 的 maximumBlockDamage）
             maxDelta = Math.max(maxDelta, delta);
 
-            // 记录首次达到可发 STOP 条件的 tick
-            if (readyTick == -1 && canStopNow()) {
-                readyTick = elapsedTicks;
+            // 缓存 canStopNow 结果，避免同拍重复计算
+            boolean canStop = canStopNow();
+
+            // 记录首次满足 canStopNow 的 wall-clock 时刻
+            if (readyMs == 0 && canStop) {
+                readyMs = System.currentTimeMillis();
             }
 
             // 心跳挥手（仅安静 tick 时发，避免和 use/interact 冲突）
@@ -733,13 +746,8 @@ public class PacketMine extends Module {
                 }
             }
 
-            // 在关键里程碑前更新 currentFace
-            if (canStopNow()) {
-                refreshCurrentFace();
-            }
-
-            // 判断是否可以发 STOP
-            if (isReadyToStop()) {
+            // 判断是否可以发 STOP（refreshCurrentFace 在 tickPendingStop 里统一做）
+            if (canStop && isReadyToStop()) {
                 phase = Phase.PENDING_STOP;
                 clearRotationState();
                 tickPendingStop();
@@ -751,18 +759,21 @@ public class PacketMine extends Module {
          *
          * <p>联动 SpeedMine 的 break balance 余量：
          * <ul>
-         *   <li>计算 Grim 视角下的 predictedTime 和当前 elapsedTime</li>
-         *   <li>diff = predictedTime - elapsedTime 就是 Grim 会记入 blockBreakBalance 的值</li>
+         *   <li>计算 Grim 视角下的 predictedTime 和当前 realTime（wall-clock，镜像 Grim 的 now - startBreak）</li>
+         *   <li>diff = predictedTime - realTime 就是 Grim 会记入 blockBreakBalance 的值</li>
          *   <li>只有当 diff <= headroom（或 diff < 25 触发衰减）时才允许提前 STOP</li>
          *   <li>headroom == 0 时退化为 progress >= 1.0 的标准行为</li>
          * </ul>
+         *
+         * <p>使用 wall-clock 而非 elapsedTicks*50 可确保无论 START/STOP 分别在 Pre 还是 Post 相位
+         * 发出，计时模型都与 Grim 一致，消除 ref 指出的相位失配问题。
          */
         private boolean canStopNow() {
-            if (maxDelta <= 0) return false;
+            if (maxDelta <= 0 || startMs == 0) return false;
 
             double predictedMs = Math.ceil(1.0 / maxDelta) * 50;
-            double elapsedMs = elapsedTicks * 50.0;
-            double diff = predictedMs - elapsedMs;
+            double realMs = System.currentTimeMillis() - startMs;
+            double diff = predictedMs - realMs;
 
             // diff < 25 → Grim 会衰减而非累积，always safe
             if (diff < 25) return true;
@@ -774,8 +785,10 @@ public class PacketMine extends Module {
 
         private boolean isReadyToStop() {
             if (!canStopNow()) return false;
-            // strictMargin: 首次达到 ready 后多等 1 tick
-            if (strictMargin.get()) return elapsedTicks > readyTick;
+            // strictMargin: 首次 ready 后再等 >= 50ms（约一个 tick）才放行
+            if (strictMargin.get() && readyMs > 0) {
+                return System.currentTimeMillis() - readyMs >= 50;
+            }
             return true;
         }
 
