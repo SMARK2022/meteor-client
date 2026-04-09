@@ -31,7 +31,6 @@ import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
 import net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Box;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.util.shape.VoxelShape;
@@ -201,7 +200,7 @@ public class PacketMine extends Module {
 
     @Override
     public void onActivate() {
-        // 不重置 lastFinishMs / localDelayBalance —— 服务器端 Grim 不会因模块开关而重置
+        // Grim 服务端不会因模块开关而重置 delay 状态，所以不重置 lastFinishMs / localDelayBalance
         savedSlot = -1;
         scrolledThisTick = false;
         slotConflictTicks = 0;
@@ -453,7 +452,7 @@ public class PacketMine extends Module {
     /**
      * 外部查询：PacketMine 是否拥有工具槽位的控制权。
      *
-     * <p>只要模块开启且 autoSwitch 打开，就表示“本次挖掘系统由 PacketMine 接管工具槽位”。
+     * <p>只要模块开启且 autoSwitch 打开，就表示"本次挖掘系统由 PacketMine 接管工具槽位"。
      * 不再依赖 blocks 是否非空，避免第一块加入前 AutoTool 抢先切槽的竞态。
      */
     public boolean shouldOwnToolSelection() {
@@ -633,6 +632,23 @@ public class PacketMine extends Module {
             rotationPhaseToken = null;
         }
 
+        /**
+         * 统一旋转分发：若 shouldRotate 为 true，排队 silent rotation 后执行 action；
+         * 否则直接执行。callback 会校验 phase 一致性，防止陈旧回调。
+         */
+        private void dispatchWithRotation(boolean shouldRotate, Phase expectedPhase,
+                                          BlockPos pos, Direction face, Runnable action) {
+            if (!shouldRotate) { action.run(); return; }
+            if (rotationQueued) return;
+            rotationQueued = true;
+            rotationPhaseToken = expectedPhase;
+            Vec3d anchor = getFaceAnchor(pos, face);
+            Rotations.rotate(Rotations.getYaw(anchor), Rotations.getPitch(anchor), 50, () -> {
+                if (phase != expectedPhase) { clearRotationState(); return; }
+                action.run();
+            });
+        }
+
         // -------------------- Main tick --------------------
 
         void tick() {
@@ -660,23 +676,17 @@ public class PacketMine extends Module {
         private void tickPendingStart() {
             if (!isQuietTick()) return;
 
-            // 硬超时保护：PENDING_START 超过 2000ms 仍未开始，临时允许恢复性 start
-            long pendingDuration = System.currentTimeMillis() - pendingSinceMs;
-            boolean timedOut = pendingDuration > 2000;
-
-            // 双路径 delay 调度：软预算 + 恢复性路径（避免死锁）
+            // 硬超时保护 2000ms + 双路径 delay 调度（软预算 + 恢复路径，避免死锁）
+            boolean timedOut = System.currentTimeMillis() - pendingSinceMs > 2000;
             if (!timedOut && !canIssueStartNow()) return;
 
-            // 在 START 前确定并锁定工具
+            // 锁定工具并预判瞬破
             lockedToolSlot = findBestToolSlot(blockState);
             ensureTaskToolSelected(MyBlock.this);
-
-            // 预判是否瞬破：delta >= 1.0 → 服务端在 START 时就直接破坏方块
             int effectiveSlot = mc.player.getInventory().selectedSlot;
             boolean instaMine = BlockUtils.getBreakDelta(effectiveSlot, blockState) >= 1.0;
 
-            Runnable send = () -> {
-                if (phase != Phase.PENDING_START) { clearRotationState(); return; }
+            dispatchWithRotation(rotateOnStart.get(), Phase.PENDING_START, blockPos, direction, () -> {
                 ensureTaskToolSelected(MyBlock.this);
                 sendSwing();
                 sendStartPacket(blockPos, direction);
@@ -684,32 +694,14 @@ public class PacketMine extends Module {
                 mining = true;
 
                 if (instaMine) {
-                    // 瞬破：只需 START，不发 STOP
-                    // - 服务端收到 START 直接破坏（delta >= 1.0）
-                    // - Grim 的 blockBreakBalance 仅在 FINISHED_DIGGING 检查，完全跳过
-                    // - 不更新 lastFinishMs：因为没有真正的 STOP 发包，
-                    //   后续 START 的 delay 应从上一次真正 STOP 算起
+                    // 瞬破：只需 START，服务端直接破坏；不更新 lastFinishMs（无 STOP 发包）
                     phase = Phase.FINISHED;
                 } else {
-                    // 非瞬破：进入正常 MINING → PENDING_STOP 流程
-                    progress = 0;
-                    elapsedTicks = 0;
-                    heartbeatTimer = 0;
-                    readyTick = -1;
+                    progress = 0; elapsedTicks = 0; heartbeatTimer = 0; readyTick = -1;
                     phase = Phase.MINING;
                 }
                 clearRotationState();
-            };
-
-            if (rotateOnStart.get()) {
-                if (rotationQueued) return;
-                rotationQueued = true;
-                rotationPhaseToken = Phase.PENDING_START;
-                Vec3d anchor = getFaceAnchor(blockPos, direction);
-                Rotations.rotate(Rotations.getYaw(anchor), Rotations.getPitch(anchor), 50, send);
-            } else {
-                send.run();
-            }
+            });
         }
 
         // -------------------- MINING --------------------
@@ -791,64 +783,33 @@ public class PacketMine extends Module {
 
         private void tickPendingStop() {
             if (!isQuietTick()) return;
-
-            // 发 STOP 前再次校准 face 和工具
             refreshCurrentFace();
             ensureTaskToolSelected(MyBlock.this);
 
-            Runnable send = () -> {
-                if (phase != Phase.PENDING_STOP) { clearRotationState(); return; }
+            dispatchWithRotation(rotateOnStop.get(), Phase.PENDING_STOP, blockPos, currentFace, () -> {
                 ensureTaskToolSelected(MyBlock.this);
                 sendSwing();
                 sendStopPacket(blockPos, currentFace);
                 lastFinishMs = System.currentTimeMillis();
                 phase = Phase.FINISHED;
                 clearRotationState();
-            };
-
-            if (rotateOnStop.get()) {
-                if (rotationQueued) return;
-                rotationQueued = true;
-                rotationPhaseToken = Phase.PENDING_STOP;
-                Vec3d anchor = getFaceAnchor(blockPos, currentFace);
-                Rotations.rotate(Rotations.getYaw(anchor), Rotations.getPitch(anchor), 50, send);
-            } else {
-                send.run();
-            }
+            });
         }
 
         // -------------------- ABORTING --------------------
 
         private void tickAborting() {
-            if (!mining) {
-                // 未发过 START，直接本地清理
-                phase = Phase.FINISHED;
-                return;
-            }
-
+            if (!mining) { phase = Phase.FINISHED; return; } // 未发过 START，直接清理
             if (!isQuietTick()) return;
-
-            // 中止前校准 face 和工具
             refreshCurrentFace();
             ensureTaskToolSelected(MyBlock.this);
 
-            Runnable send = () -> {
-                if (phase != Phase.ABORTING) { clearRotationState(); return; }
+            dispatchWithRotation(rotateOnAbort.get(), Phase.ABORTING, blockPos, currentFace, () -> {
                 ensureTaskToolSelected(MyBlock.this);
                 sendAbortPacket(blockPos, currentFace);
                 phase = Phase.FINISHED;
                 clearRotationState();
-            };
-
-            if (rotateOnAbort.get()) {
-                if (rotationQueued) return;
-                rotationQueued = true;
-                rotationPhaseToken = Phase.ABORTING;
-                Vec3d anchor = getFaceAnchor(blockPos, currentFace);
-                Rotations.rotate(Rotations.getYaw(anchor), Rotations.getPitch(anchor), 50, send);
-            } else {
-                send.run();
-            }
+            });
         }
 
         // -------------------- Face resolution --------------------
