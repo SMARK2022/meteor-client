@@ -23,12 +23,12 @@ import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
+import meteordevelopment.meteorclient.mixininterface.IClientPlayerInteractionManager;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.network.packet.c2s.play.HandSwingC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
-import net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket;
 import net.minecraft.util.Hand;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
@@ -491,6 +491,8 @@ public class PacketMine extends Module {
      * <p>如果 auto-switch 未启用或任务没有锁定工具，则不做任何事。
      * 否则，幂等地保证本地和服务端的选中槽位都是任务工具。
      * 首次切槽时记录 {@code savedSlot}，以便任务结束后恢复。
+     *
+     * <p>使用 vanilla 的 syncSelectedSlot 而非直接发包，避免绕过 lastSelectedSlot 跟踪导致重复发包。
      */
     private void ensureTaskToolSelected(MyBlock block) {
         if (!autoSwitch.get()) return;
@@ -504,15 +506,18 @@ public class PacketMine extends Module {
 
         if (selected != block.lockedToolSlot) {
             mc.player.getInventory().selectedSlot = block.lockedToolSlot;
-            mc.player.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(block.lockedToolSlot));
+            ((IClientPlayerInteractionManager) mc.interactionManager).meteor$syncSelected();
         }
     }
 
-    /** 恢复到 autoSwitch 之前的原始槽位 */
+    /**
+     * 恢复到 autoSwitch 之前的原始槽位。
+     * 同样使用 vanilla syncSelectedSlot 避免重复发包。
+     */
     private void restoreSlot() {
         if (savedSlot == -1) return;
         mc.player.getInventory().selectedSlot = savedSlot;
-        mc.player.networkHandler.sendPacket(new UpdateSelectedSlotC2SPacket(savedSlot));
+        ((IClientPlayerInteractionManager) mc.interactionManager).meteor$syncSelected();
         savedSlot = -1;
     }
 
@@ -606,8 +611,11 @@ public class PacketMine extends Module {
         /** 本块挖掘期间观察到的最大单 tick delta（镜像 Grim maximumBlockDamage） */
         double maxDelta;
 
-        /** PENDING_START 进入时的时间戳（ms），用于超时保护 */
+        /** PENDING_START 超时保护的基准时间戳（ms），在首次 tick() 时重置以排除排队等候耗时 */
         long pendingSinceMs;
+
+        /** 是否已被 tick() 首次驱动（用于延迟初始化 pendingSinceMs） */
+        boolean activated;
 
         public MyBlock set(StartBreakingBlockEvent event) {
             this.blockPos = event.blockPos;
@@ -626,6 +634,7 @@ public class PacketMine extends Module {
             this.readyMs = 0;
             this.maxDelta = 0;
             this.pendingSinceMs = System.currentTimeMillis();
+            this.activated = false;
             return this;
         }
 
@@ -660,6 +669,13 @@ public class PacketMine extends Module {
         // -------------------- Main tick --------------------
 
         void tick() {
+            // 首次被驱动时刷新 pendingSinceMs，避免在队列中排队等候期间老化
+            // （入队时 pendingSinceMs 已设，但只有成为队首后才真正开始尝试 START）
+            if (!activated) {
+                activated = true;
+                pendingSinceMs = System.currentTimeMillis();
+            }
+
             // 先检查目标是否仍然有效
             if (!isStillValid()) {
                 if (mining) {
@@ -694,10 +710,14 @@ public class PacketMine extends Module {
             int effectiveSlot = mc.player.getInventory().selectedSlot;
             boolean instaMine = BlockUtils.getBreakDelta(effectiveSlot, blockState) >= 1.0;
 
-            dispatchWithRotation(rotateOnStart.get(), Phase.PENDING_START, blockPos, direction, () -> {
+            // 在真正发 START 前刷新面：入队后玩家可能已移动，旧 direction 可能不是最优/最稳的面
+            refreshCurrentFace();
+
+            dispatchWithRotation(rotateOnStart.get(), Phase.PENDING_START, blockPos, currentFace, () -> {
                 ensureTaskToolSelected(MyBlock.this);
                 sendSwing();
-                sendStartPacket(blockPos, direction);
+                sendStartPacket(blockPos, currentFace);
+                direction = currentFace; // 记录实际使用的 START face
                 commitStartDelayBudget();
                 mining = true;
                 startMs = System.currentTimeMillis();
