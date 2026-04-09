@@ -100,7 +100,7 @@ public class SpeedMine extends Module {
     private final Setting<Integer> rechargeBuffer = sgGrim.add(new IntSetting.Builder()
         .name("recharge-buffer")
         .description("How far below budget (ms) the balance must drop before re-accelerating. 0 = resume as soon as below budget.")
-        .defaultValue(0)
+        .defaultValue(240)
         .min(0)
         .sliderMax(500)
         .visible(() -> mode.get() == Mode.Damage && grimAware.get())
@@ -158,17 +158,58 @@ public class SpeedMine extends Module {
 
             if (pos == null || progress <= 0) return;
 
-            // Update grimMaxDelta each tick (mirrors Grim's per-tick maximumBlockDamage update)
+            double delta = mc.world.getBlockState(pos).calcBlockBreakingDelta(mc.player, mc.world, pos);
+
+            // 每 tick 更新 Grim 追踪的 maxDelta（镜像 Grim 的 per-tick maximumBlockDamage 更新）
             if (grimAware.get() && grimCurrentPos != null) {
-                double tickDelta = mc.world.getBlockState(grimCurrentPos).calcBlockBreakingDelta(mc.player, mc.world, grimCurrentPos);
-                grimMaxDelta = Math.max(grimMaxDelta, tickDelta);
+                grimMaxDelta = Math.max(grimMaxDelta, delta);
             }
 
-            boolean shouldBoost = !grimAware.get() || grimPhase == GrimPhase.ACCELERATING;
-
-            if (shouldBoost && progress + mc.world.getBlockState(pos).calcBlockBreakingDelta(mc.player, mc.world, pos) >= 0.7f)
+            // 动态判断是否可以提前完成挖掘
+            if (shouldAccelerate(progress, delta)) {
                 im.setCurrentBreakingProgress(1f);
+            }
         }
+    }
+
+    /**
+     * 判断是否可以在当前 tick 将挖掘进度强制设为 1.0（跳过剩余挖掘时间）。
+     *
+     * <p>两种模式：
+     * <ul>
+     *   <li>无 Grim 感知：当 progress + delta >= 0.7 时直接跳过（旧行为，恒定跳过最后 30%）</li>
+     *   <li>Grim 感知：计算 Grim 视角下的跳过量 diff = predictedTime - realTime，
+     *       确保 diff <= headroom 或 diff < 25（Grim 衰减区，无条件安全）</li>
+     * </ul>
+     */
+    private boolean shouldAccelerate(float progress, double delta) {
+        if (delta <= 0) return false;
+
+        if (!grimAware.get()) {
+            // 无 Grim 感知：固定 0.7 阈值（经验值，对多数服务端安全）
+            return progress + delta >= 0.7;
+        }
+
+        // Grim 冷却期不加速
+        if (grimPhase == GrimPhase.COOLING_DOWN) return false;
+
+        // Grim 追踪未初始化：保守回退
+        if (grimCurrentPos == null || grimMaxDelta <= 0 || grimStartMs <= 0) {
+            return progress + delta >= 0.7;
+        }
+
+        // Grim 模型：predictedTime = ceil(1.0 / maxDelta) * 50
+        // realTime = 实际已经过去的 wall-clock 时间
+        // diff = predictedTime - realTime（提前量，即 Grim 会记入 blockBreakBalance 的值）
+        double predictedTime = Math.ceil(1.0 / grimMaxDelta) * 50;
+        double realTime = System.currentTimeMillis() - grimStartMs;
+        double diff = predictedTime - realTime;
+
+        // diff < 25: Grim 走衰减路径（blockBreakBalance *= 0.9），天然安全
+        if (diff < 25) return true;
+
+        // diff >= 25: 提前量不超出当前余量即可
+        return diff <= getBreakBudgetHeadroom();
     }
 
     @EventHandler
@@ -212,7 +253,8 @@ public class SpeedMine extends Module {
             blockDelayBalance += (300 - breakDelay);
         }
 
-        grimStartMs = now - (grimCurrentPos == null ? 50 : 0);
+        // 直接使用 now（镜像 Grim: startBreak = System.currentTimeMillis()）
+        grimStartMs = now;
         grimCurrentPos = pos.toImmutable();
         grimMaxDelta = mc.world.getBlockState(pos).calcBlockBreakingDelta(mc.player, mc.world, pos);
 
