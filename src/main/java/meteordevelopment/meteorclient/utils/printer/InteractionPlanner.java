@@ -102,12 +102,6 @@ public final class InteractionPlanner {
             hitVec, face, pos, eyePos, world, mc.player,
             true,  // NCP: 自身交互始终验证面朝向
             true,  // LOS: 自身交互始终验证视线
-           an checkLos, double maxReach
-    ) {
-        return BlockUtilHelper.isPointValid(
-            hitVec, face, pos, eyePos, world, mc.player,
-            true,  // NCP: 自身交互始终验证面朝向
-            true,  // LOS: 自身交互始终验证视线
             maxReach, null
         );
     }
