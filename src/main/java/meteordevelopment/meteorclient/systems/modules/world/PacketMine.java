@@ -15,6 +15,7 @@ import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.modules.player.AutoTool;
+import meteordevelopment.meteorclient.systems.modules.player.SpeedMine;
 import meteordevelopment.meteorclient.systems.modules.render.BreakIndicators;
 import meteordevelopment.meteorclient.utils.misc.Pool;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
@@ -200,8 +201,7 @@ public class PacketMine extends Module {
 
     @Override
     public void onActivate() {
-        lastFinishMs = 0;
-        localDelayBalance = 0;
+        // 不重置 lastFinishMs / localDelayBalance —— 服务器端 Grim 不会因模块开关而重置
         savedSlot = -1;
         scrolledThisTick = false;
         slotConflictTicks = 0;
@@ -348,6 +348,46 @@ public class PacketMine extends Module {
     }
 
     /**
+     * 判断当前时刻是否可以发出 START。
+     *
+     * <p>双路径设计，避免 ref 中描述的 "永远等不下来" 死锁：
+     * <ol>
+     *   <li>软预算路径：projected <= delayBudgetTarget</li>
+     *   <li>恢复性路径：已等过 275ms 衰减点，且 projected <= 900（clamp=1000 后单次 0.9 的硬上限）</li>
+     * </ol>
+     * 恢复路径让系统在高 buffer 区间仍能执行合法的恢复性 START，
+     * 每次 START 都会通过 commitStartDelayBudget() 真正降低 localDelayBalance。
+     */
+    private boolean canIssueStartNow() {
+        double projected = projectedDelayBalance();
+
+        // 1. 正常软预算路径
+        if (projected <= delayBudgetTarget.get()) return true;
+
+        // 2. 恢复性路径：距上次 finish 已过 275ms 并且 projected 在 Grim 可恢复区内
+        long now = System.currentTimeMillis();
+        double breakDelay = now - lastFinishMs;
+        if (breakDelay >= 275 && projected <= 900.0) return true;
+
+        return false;
+    }
+
+    /**
+     * 联动 SpeedMine：查询当前可用的 blockBreakBalance 余量（ms）。
+     *
+     * <p>当 SpeedMine 的 Grim 状态机处于加速阶段时，返回可用余量；
+     * 否则返回 0（不加速）。PacketMine 在 isReadyToStop() 中
+     * 据此计算可提前发送 STOP 的时间量。
+     */
+    private double getBreakBudgetHeadroom() {
+        SpeedMine speedMine = Modules.get().get(SpeedMine.class);
+        if (speedMine != null && speedMine.isGrimAware() && !speedMine.isGrimCoolingDown()) {
+            return speedMine.getBreakBudgetHeadroom();
+        }
+        return 0;
+    }
+
+    /**
      * 在 START 实际发出时，提交本地 delayBalance 更新。
      * 必须在 sendStartPacket 所在的 callback 中调用。
      */
@@ -357,6 +397,12 @@ public class PacketMine extends Module {
         localDelayBalance = breakDelay >= 275
             ? localDelayBalance * 0.9
             : localDelayBalance + (300 - breakDelay);
+        clampDelayBalance();
+    }
+
+    private void clampDelayBalance() {
+        double cap = 1000.0;
+        localDelayBalance = Math.max(-cap, Math.min(cap, localDelayBalance));
     }
 
     /** 获取 face 中心点的微偏移锚点（用于旋转/距离判断） */
@@ -412,6 +458,11 @@ public class PacketMine extends Module {
      */
     public boolean shouldOwnToolSelection() {
         return isActive() && autoSwitch.get();
+    }
+
+    /** Expose local delay balance estimate for cross-module coordination. */
+    public double getLocalDelayBalance() {
+        return localDelayBalance;
     }
 
     /**
@@ -542,8 +593,14 @@ public class PacketMine extends Module {
         /** 提交 rotation callback 时的阶段快照，callback 执行时需校验 */
         Phase rotationPhaseToken;
 
-        /** 首次 progress >= 1.0 的 tick（-1 = 尚未到达），用于 strictMargin 判断 */
+        /** 首次达到可发 STOP 条件的 tick（-1 = 尚未到达），用于 strictMargin 判断 */
         int readyTick;
+
+        /** 本块挖掘期间观察到的最大单 tick delta（镜像 Grim maximumBlockDamage） */
+        double maxDelta;
+
+        /** PENDING_START 进入时的时间戳（ms），用于超时保护 */
+        long pendingSinceMs;
 
         public MyBlock set(StartBreakingBlockEvent event) {
             this.blockPos = event.blockPos;
@@ -560,12 +617,14 @@ public class PacketMine extends Module {
             this.rotationQueued = false;
             this.rotationPhaseToken = null;
             this.readyTick = -1;
+            this.maxDelta = 0;
+            this.pendingSinceMs = System.currentTimeMillis();
             return this;
         }
 
         /** 外部契约：是否可以立刻破坏（用于渲染颜色判断） */
         public boolean isReady() {
-            return progress >= 1;
+            return canStopNow();
         }
 
         /** 清除 rotation 排队状态，防止陈旧 callback 卡死后续 phase */
@@ -600,8 +659,13 @@ public class PacketMine extends Module {
 
         private void tickPendingStart() {
             if (!isQuietTick()) return;
-            // 本地镜像 Grim blockDelayBalance：只有投影值在预算内才允许开始
-            if (projectedDelayBalance() > delayBudgetTarget.get()) return;
+
+            // 硬超时保护：PENDING_START 超过 2000ms 仍未开始，临时允许恢复性 start
+            long pendingDuration = System.currentTimeMillis() - pendingSinceMs;
+            boolean timedOut = pendingDuration > 2000;
+
+            // 双路径 delay 调度：软预算 + 恢复性路径（避免死锁）
+            if (!timedOut && !canIssueStartNow()) return;
 
             // 在 START 前确定并锁定工具
             lockedToolSlot = findBestToolSlot(blockState);
@@ -648,8 +712,11 @@ public class PacketMine extends Module {
             progress += delta;
             elapsedTicks++;
 
-            // 记录首次达到 progress >= 1.0 的 tick
-            if (readyTick == -1 && progress >= 1.0) {
+            // 追踪最大 delta（镜像 Grim 的 maximumBlockDamage）
+            maxDelta = Math.max(maxDelta, delta);
+
+            // 记录首次达到可发 STOP 条件的 tick
+            if (readyTick == -1 && canStopNow()) {
                 readyTick = elapsedTicks;
             }
 
@@ -663,7 +730,7 @@ public class PacketMine extends Module {
             }
 
             // 在关键里程碑前更新 currentFace
-            if (progress >= 1.0) {
+            if (canStopNow()) {
                 refreshCurrentFace();
             }
 
@@ -675,8 +742,34 @@ public class PacketMine extends Module {
             }
         }
 
+        /**
+         * 判断当前 tick 是否可以提前发送 STOP。
+         *
+         * <p>联动 SpeedMine 的 break balance 余量：
+         * <ul>
+         *   <li>计算 Grim 视角下的 predictedTime 和当前 elapsedTime</li>
+         *   <li>diff = predictedTime - elapsedTime 就是 Grim 会记入 blockBreakBalance 的值</li>
+         *   <li>只有当 diff <= headroom（或 diff < 25 触发衰减）时才允许提前 STOP</li>
+         *   <li>headroom == 0 时退化为 progress >= 1.0 的标准行为</li>
+         * </ul>
+         */
+        private boolean canStopNow() {
+            if (maxDelta <= 0) return false;
+
+            double predictedMs = Math.ceil(1.0 / maxDelta) * 50;
+            double elapsedMs = elapsedTicks * 50.0;
+            double diff = predictedMs - elapsedMs;
+
+            // diff < 25 → Grim 会衰减而非累积，always safe
+            if (diff < 25) return true;
+
+            // diff >= 25 → 需要 break budget headroom 消化
+            double headroom = getBreakBudgetHeadroom();
+            return diff <= headroom;
+        }
+
         private boolean isReadyToStop() {
-            if (progress < 1.0) return false;
+            if (!canStopNow()) return false;
             // strictMargin: 首次达到 ready 后多等 1 tick
             if (strictMargin.get()) return elapsedTicks > readyTick;
             return true;

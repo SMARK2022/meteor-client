@@ -83,13 +83,69 @@ public class SpeedMine extends Module {
         .build()
     );
 
+    // ======================== Grim State Machine ========================
+
+    private final SettingGroup sgGrim = settings.createGroup("Grim");
+
+    private final Setting<Boolean> grimAware = sgGrim.add(new BoolSetting.Builder()
+        .name("grim-aware")
+        .description("Grim-aware state machine: cycles between acceleration and cooldown to stay below detection threshold.")
+        .defaultValue(false)
+        .visible(() -> mode.get() == Mode.Damage)
+        .build()
+    );
+
+    private final Setting<Integer> grimBalanceBudget = sgGrim.add(new IntSetting.Builder()
+        .name("balance-budget")
+        .description("Maximum allowed blockBreakBalance (ms) before entering cooldown. Grim flags at 1000ms.")
+        .defaultValue(900)
+        .min(0)
+        .sliderMax(1000)
+        .visible(() -> mode.get() == Mode.Damage && grimAware.get())
+        .build()
+    );
+
+    private final Setting<Integer> rechargeBuffer = sgGrim.add(new IntSetting.Builder()
+        .name("recharge-buffer")
+        .description("How far below budget (ms) the balance must drop before re-accelerating. 0 = resume as soon as below budget.")
+        .defaultValue(0)
+        .min(0)
+        .sliderMax(500)
+        .visible(() -> mode.get() == Mode.Damage && grimAware.get())
+        .build()
+    );
+
+    // Grim state machine fields
+    private GrimPhase grimPhase = GrimPhase.ACCELERATING;
+    private double blockBreakBalance = 0;
+    private double blockDelayBalance = 0;
+    private long lastBreakFinishMs = 0;
+    private long grimStartMs = 0;
+    private BlockPos grimCurrentPos = null;
+    private double grimMaxDelta = 0;
+
     public SpeedMine() {
         super(Categories.Player, "speed-mine", "Allows you to quickly mine blocks.");
     }
 
     @Override
+    public void onActivate() {
+        grimPhase = GrimPhase.ACCELERATING;
+        blockBreakBalance = 0;
+        blockDelayBalance = 0;
+        lastBreakFinishMs = 0;
+        grimStartMs = 0;
+        grimCurrentPos = null;
+        grimMaxDelta = 0;
+    }
+
+    @Override
     public void onDeactivate() {
         removeHaste();
+        grimPhase = GrimPhase.ACCELERATING;
+        blockBreakBalance = 0;
+        blockDelayBalance = 0;
+        grimCurrentPos = null;
     }
 
     @EventHandler
@@ -109,18 +165,40 @@ public class SpeedMine extends Module {
             BlockPos pos = im.getCurrentBreakingBlockPos();
 
             if (pos == null || progress <= 0) return;
-            if (progress + mc.world.getBlockState(pos).calcBlockBreakingDelta(mc.player, mc.world, pos) >= 0.7f)
+
+            // Update grimMaxDelta each tick (mirrors Grim's per-tick maximumBlockDamage update)
+            if (grimAware.get() && grimCurrentPos != null) {
+                double tickDelta = mc.world.getBlockState(grimCurrentPos).calcBlockBreakingDelta(mc.player, mc.world, grimCurrentPos);
+                grimMaxDelta = Math.max(grimMaxDelta, tickDelta);
+            }
+
+            boolean shouldBoost = !grimAware.get() || grimPhase == GrimPhase.ACCELERATING;
+
+            if (shouldBoost && progress + mc.world.getBlockState(pos).calcBlockBreakingDelta(mc.player, mc.world, pos) >= 0.7f)
                 im.setCurrentBreakingProgress(1f);
         }
     }
 
     @EventHandler
     private void onPacket(PacketEvent.Send event) {
-        if (!(mode.get() == Mode.Damage) || !grimBypass.get()) return;
+        if (mode.get() != Mode.Damage) return;
+        if (!(event.packet instanceof PlayerActionC2SPacket packet)) return;
 
-        // https://github.com/GrimAnticheat/Grim/issues/1296
-        if (event.packet instanceof PlayerActionC2SPacket packet && packet.getAction() == PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK) {
-            mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.ABORT_DESTROY_BLOCK, packet.getPos().up(), packet.getDirection()));
+        // Grim balance tracking — catches ALL START/STOP/ABORT packets (normal mining, instamine, PacketMine)
+        if (grimAware.get()) {
+            if (packet.getAction() == PlayerActionC2SPacket.Action.START_DESTROY_BLOCK) {
+                grimTrackStart(packet.getPos());
+            } else if (packet.getAction() == PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK) {
+                grimTrackFinish();
+            } else if (packet.getAction() == PlayerActionC2SPacket.Action.ABORT_DESTROY_BLOCK) {
+                grimTrackAbort();
+            }
+        }
+
+        // Existing grimBypass: send ABORT after STOP to confuse Grim's tracking
+        if (grimBypass.get() && packet.getAction() == PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK) {
+            mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(
+                PlayerActionC2SPacket.Action.ABORT_DESTROY_BLOCK, packet.getPos().up(), packet.getDirection()));
         }
     }
 
@@ -131,13 +209,123 @@ public class SpeedMine extends Module {
         if (haste != null && !haste.shouldShowIcon()) mc.player.removeStatusEffect(HASTE);
     }
 
+    // ======================== Grim Balance Tracking ========================
+
+    /**
+     * Mirror Grim FastBreak START_DIGGING: update blockDelayBalance and reset per-block state.
+     */
+    private void grimTrackStart(BlockPos pos) {
+        if (mc.world == null) return;
+        long now = System.currentTimeMillis();
+
+        // blockDelayBalance update (mirrors Grim)
+        double breakDelay = now - lastBreakFinishMs;
+        if (breakDelay >= 275) {
+            blockDelayBalance *= 0.9;
+        } else {
+            blockDelayBalance += (300 - breakDelay);
+        }
+
+        grimStartMs = now - (grimCurrentPos == null ? 50 : 0);
+        grimCurrentPos = pos.toImmutable();
+        grimMaxDelta = mc.world.getBlockState(pos).calcBlockBreakingDelta(mc.player, mc.world, pos);
+
+        clampGrimBalance();
+    }
+
+    /**
+     * Mirror Grim FastBreak FINISHED_DIGGING: update blockBreakBalance and transition state machine.
+     */
+    private void grimTrackFinish() {
+        long now = System.currentTimeMillis();
+
+        if (grimCurrentPos != null && grimMaxDelta > 0) {
+            double predictedTime = Math.ceil(1.0 / grimMaxDelta) * 50;
+            double realTime = now - grimStartMs;
+            double diff = predictedTime - realTime;
+
+            if (diff < 25) {
+                blockBreakBalance *= 0.9;
+            } else {
+                blockBreakBalance += diff;
+            }
+            clampGrimBalance();
+        }
+
+        lastBreakFinishMs = grimStartMs = now;
+
+        updateGrimPhase();
+    }
+
+    /**
+     * ABORT_DESTROY_BLOCK: Grim 不更新 balance，但需要重置当前目标。
+     * 如果不重置，下一次 FINISH 会误算时间差。
+     */
+    private void grimTrackAbort() {
+        grimCurrentPos = null;
+        grimMaxDelta = 0;
+    }
+
+    private void updateGrimPhase() {
+        if (grimPhase == GrimPhase.ACCELERATING) {
+            if (blockBreakBalance >= grimBalanceBudget.get()) {
+                grimPhase = GrimPhase.COOLING_DOWN;
+            }
+        } else if (grimPhase == GrimPhase.COOLING_DOWN) {
+            if ((grimBalanceBudget.get() - blockBreakBalance) >= rechargeBuffer.get()) {
+                grimPhase = GrimPhase.ACCELERATING;
+            }
+        }
+    }
+
+    private void clampGrimBalance() {
+        double max = 1000;
+        blockBreakBalance = Math.max(-max, Math.min(blockBreakBalance, max));
+        blockDelayBalance = Math.max(-max, Math.min(blockDelayBalance, max));
+    }
+
+    // ======================== Public API (for PacketMine integration) ========================
+
+    /** Whether the Grim-aware state machine is active. */
+    public boolean isGrimAware() {
+        return isActive() && mode.get() == Mode.Damage && grimAware.get();
+    }
+
+    /** Whether currently in cooldown phase (not boosting). */
+    public boolean isGrimCoolingDown() {
+        return isGrimAware() && grimPhase == GrimPhase.COOLING_DOWN;
+    }
+
+    /** Current estimated Grim blockBreakBalance. */
+    public double getBlockBreakBalance() {
+        return blockBreakBalance;
+    }
+
+    /** Current estimated Grim blockDelayBalance. */
+    public double getBlockDelayBalance() {
+        return blockDelayBalance;
+    }
+
+    /**
+     * 返回当前可用的 blockBreakBalance 余量（ms）。
+     *
+     * <p>即 grimBalanceBudget - blockBreakBalance。
+     * PacketMine 用此值计算可以提前发送 STOP 的时间量。
+     * 值 <= 0 表示没有余量。
+     */
+    public double getBreakBudgetHeadroom() {
+        return Math.max(0, grimBalanceBudget.get() - blockBreakBalance);
+    }
+
     public boolean filter(Block block) {
         if (blocksFilter.get() == ListMode.Blacklist && !blocks.get().contains(block)) return true;
         return blocksFilter.get() == ListMode.Whitelist && blocks.get().contains(block);
     }
 
     public boolean instamine() {
-        return isActive() && mode.get() == Mode.Damage && instamine.get();
+        if (!isActive() || mode.get() != Mode.Damage || !instamine.get()) return false;
+        if (grimAware.get() && grimPhase == GrimPhase.COOLING_DOWN) return false;
+        return true;
     }
 
     public enum Mode {
@@ -149,5 +337,10 @@ public class SpeedMine extends Module {
     public enum ListMode {
         Whitelist,
         Blacklist
+    }
+
+    public enum GrimPhase {
+        ACCELERATING,
+        COOLING_DOWN
     }
 }
