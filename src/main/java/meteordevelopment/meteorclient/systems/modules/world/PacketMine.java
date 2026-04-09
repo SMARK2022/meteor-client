@@ -54,18 +54,10 @@ import java.util.List;
  */
 public class PacketMine extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
+    private final SettingGroup sgGrimBypass = settings.createGroup("Grim Bypass");
     private final SettingGroup sgRender = settings.createGroup("Render");
 
     // ======================== General ========================
-
-    private final Setting<Integer> delayBudgetTarget = sgGeneral.add(new IntSetting.Builder()
-        .name("delay-budget-target")
-        .description("Maximum allowed Grim-style delay balance (ms). Lower = safer, higher = faster burst. Stable ~700, Edge ~900.")
-        .defaultValue(800)
-        .min(0)
-        .sliderMax(1000)
-        .build()
-    );
 
     private final Setting<Boolean> rotateOnStart = sgGeneral.add(new BoolSetting.Builder()
         .name("rotate-on-start")
@@ -124,6 +116,43 @@ public class PacketMine extends Module {
         .name("strict-margin")
         .description("Wait one additional tick before STOP for extra safety.")
         .defaultValue(false)
+        .build()
+    );
+
+    // ======================== Grim Bypass ========================
+
+    private final Setting<Boolean> grimBypass = sgGrimBypass.add(new BoolSetting.Builder()
+        .name("grim-bypass")
+        .description("Enable Grim-aware delay balance tracking and proactive drain. When off, uses simple 275ms fixed delay.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Integer> delayBudgetTarget = sgGrimBypass.add(new IntSetting.Builder()
+        .name("delay-budget-target")
+        .description("Maximum allowed Grim-style delay balance (ms). Lower = safer, higher = faster burst. Stable ~700, Edge ~900.")
+        .defaultValue(800)
+        .min(0)
+        .sliderMax(1000)
+        .visible(grimBypass::get)
+        .build()
+    );
+
+    private final Setting<Boolean> drainEnabled = sgGrimBypass.add(new BoolSetting.Builder()
+        .name("drain-enabled")
+        .description("Proactively drain delay balance via START+ABORT on nearby blocks when balance exceeds budget.")
+        .defaultValue(true)
+        .visible(grimBypass::get)
+        .build()
+    );
+
+    private final Setting<Integer> drainTarget = sgGrimBypass.add(new IntSetting.Builder()
+        .name("drain-target")
+        .description("Drain balance down to this level (ms). Lower = more aggressive drain.")
+        .defaultValue(200)
+        .min(0)
+        .sliderMax(800)
+        .visible(() -> grimBypass.get() && drainEnabled.get())
         .build()
     );
 
@@ -282,7 +311,12 @@ public class PacketMine extends Module {
         }
 
         // 每 tick 只驱动队列中第一个活跃任务
-        if (!blocks.isEmpty()) blocks.getFirst().tick();
+        if (!blocks.isEmpty()) {
+            MyBlock active = blocks.getFirst();
+            // 主动消耗：活跃任务在 PENDING_START 等待时，利用空闲 tick 对周围方块 START+ABORT 衰减 balance
+            boolean drained = active.phase == Phase.PENDING_START && shouldDrain() && executeDrainStep();
+            if (!drained) active.tick();
+        }
 
         // 消费本 tick 的滚轮标记
         scrolledThisTick = false;
@@ -358,6 +392,9 @@ public class PacketMine extends Module {
      * 每次 START 都会通过 commitStartDelayBudget() 真正降低 localDelayBalance。
      */
     private boolean canIssueStartNow() {
+        // Grim Bypass 关闭时：简化为固定 275ms 块间延迟
+        if (!grimBypass.get()) return System.currentTimeMillis() - lastFinishMs >= 275;
+
         double projected = projectedDelayBalance();
 
         // 1. 正常软预算路径
@@ -391,6 +428,7 @@ public class PacketMine extends Module {
      * 必须在 sendStartPacket 所在的 callback 中调用。
      */
     private void commitStartDelayBudget() {
+        if (!grimBypass.get()) return;
         long now = System.currentTimeMillis();
         double breakDelay = now - lastFinishMs;
         localDelayBalance = breakDelay >= 275
@@ -403,6 +441,78 @@ public class PacketMine extends Module {
         double cap = 1000.0;
         localDelayBalance = Math.max(-cap, Math.min(cap, localDelayBalance));
     }
+
+    // -------------------- Balance Drain --------------------
+
+    /** 是否应在本 tick 执行 balance 主动消耗 */
+    private boolean shouldDrain() {
+        if (!grimBypass.get() || !drainEnabled.get()) return false;
+        if (localDelayBalance <= delayBudgetTarget.get()) return false;
+        return System.currentTimeMillis() - lastFinishMs >= 275;
+    }
+
+    /**
+     * 在交互范围内搜索最佳 drain 目标。
+     * 评分综合：视角偏转（权重 3）+ 距离。排除瞬破方块和正在挖的方块。
+     */
+    private DrainTarget findDrainTarget() {
+        Vec3d eye = mc.player.getEyePos();
+        Vec3d look = mc.player.getRotationVec(1.0f);
+        double range = mc.player.getBlockInteractionRange();
+        int slot = mc.player.getInventory().selectedSlot;
+        BlockPos center = mc.player.getBlockPos();
+        int r = (int) Math.ceil(range);
+
+        DrainTarget best = null;
+        for (int dx = -r; dx <= r; dx++) {
+            for (int dy = -r; dy <= r; dy++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    BlockPos pos = center.add(dx, dy, dz);
+                    BlockState state = mc.world.getBlockState(pos);
+                    if (state.isAir() || !BlockUtils.canBreak(pos)) continue;
+                    if (BlockUtils.getBreakDelta(slot, state) >= 1.0) continue;
+                    if (isMiningBlock(pos)) continue;
+
+                    Direction face = resolveBestFace(pos);
+                    if (face == null) continue;
+
+                    Vec3d anchor = getFaceAnchor(pos, face);
+                    Vec3d toBlock = anchor.subtract(eye).normalize();
+                    double anglePenalty = 1.0 - look.dotProduct(toBlock);
+                    double score = anglePenalty * 3.0 + eye.distanceTo(anchor);
+                    if (best == null || score < best.score) best = new DrainTarget(pos, face, score);
+                }
+            }
+        }
+        return best;
+    }
+
+    /**
+     * 对目标方块快速发送 START+ABORT 序列以消耗 delay balance。
+     * 每组 START 在 Grim 侧触发 balance *= 0.9（breakDelay >= 275ms 保证衰减路径），
+     * CANCELLED_DIGGING 不影响任何 Grim 检查。
+     *
+     * @return true 如果注册了旋转（占用本 tick），false 如果无可用目标
+     */
+    private boolean executeDrainStep() {
+        DrainTarget target = findDrainTarget();
+        if (target == null) return false;
+
+        Vec3d anchor = getFaceAnchor(target.pos, target.face);
+        Rotations.rotate(Rotations.getYaw(anchor), Rotations.getPitch(anchor), 50, () -> {
+            int pairs = 0;
+            while (localDelayBalance > drainTarget.get() && pairs < 20) {
+                sendStartPacket(target.pos, target.face);
+                sendAbortPacket(target.pos, target.face);
+                localDelayBalance *= 0.9;
+                pairs++;
+            }
+            clampDelayBalance();
+        });
+        return true;
+    }
+
+    private record DrainTarget(BlockPos pos, Direction face, double score) {}
 
     /** 获取 face 中心点的微偏移锚点（用于旋转/距离判断） */
     private static Vec3d getFaceAnchor(BlockPos pos, Direction face) {
