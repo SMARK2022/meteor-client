@@ -671,9 +671,10 @@ public class PacketMine extends Module {
             lockedToolSlot = findBestToolSlot(blockState);
             ensureTaskToolSelected(MyBlock.this);
 
-            // 统一路径：所有方块（含 delta >= 1 的瞬破块）都走 START → MINING → STOP
-            // 瞬破块在 MINING 第一 tick 就会 progress >= 1.0，下一拍进入 PENDING_STOP
-            // 这比同 tick START+STOP 更安全（Grim blockBreakBalance 不会持续积累）
+            // 预判是否瞬破：delta >= 1.0 → 服务端在 START 时就直接破坏方块
+            int effectiveSlot = mc.player.getInventory().selectedSlot;
+            boolean instaMine = BlockUtils.getBreakDelta(effectiveSlot, blockState) >= 1.0;
+
             Runnable send = () -> {
                 if (phase != Phase.PENDING_START) { clearRotationState(); return; }
                 ensureTaskToolSelected(MyBlock.this);
@@ -681,11 +682,22 @@ public class PacketMine extends Module {
                 sendStartPacket(blockPos, direction);
                 commitStartDelayBudget();
                 mining = true;
-                progress = 0;
-                elapsedTicks = 0;
-                heartbeatTimer = 0;
-                readyTick = -1;
-                phase = Phase.MINING;
+
+                if (instaMine) {
+                    // 瞬破：只需 START，不发 STOP
+                    // - 服务端收到 START 直接破坏（delta >= 1.0）
+                    // - Grim 的 blockBreakBalance 仅在 FINISHED_DIGGING 检查，完全跳过
+                    // - 不更新 lastFinishMs：因为没有真正的 STOP 发包，
+                    //   后续 START 的 delay 应从上一次真正 STOP 算起
+                    phase = Phase.FINISHED;
+                } else {
+                    // 非瞬破：进入正常 MINING → PENDING_STOP 流程
+                    progress = 0;
+                    elapsedTicks = 0;
+                    heartbeatTimer = 0;
+                    readyTick = -1;
+                    phase = Phase.MINING;
+                }
                 clearRotationState();
             };
 
