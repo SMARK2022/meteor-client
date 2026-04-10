@@ -159,7 +159,7 @@ public class Printer extends Module {
     // Interactable group toggle
     private final Setting<Boolean> fixInteractable = sgBehavior.add(new BoolSetting.Builder()
             .name("fix-interactable")
-            .description("Enable interactable block state fixes (trapdoor / door / fence gate / daylight detector).")
+            .description("Enable interactable block state fixes (trapdoor / door / fence gate / campfire / daylight detector).")
             .defaultValue(false)
             .build());
 
@@ -195,6 +195,13 @@ public class Printer extends Module {
     private final Setting<Boolean> fixLever = sgBehavior.add(new BoolSetting.Builder()
             .name("fix-lever")
             .description("Fix lever powered state.")
+            .defaultValue(true)
+            .visible(fixInteractable::get)
+            .build());
+
+    private final Setting<Boolean> fixCampfire = sgBehavior.add(new BoolSetting.Builder()
+            .name("fix-campfire-lit")
+            .description("Fix campfire lit state (extinguish with shovel / light with flint & steel).")
             .defaultValue(true)
             .visible(fixInteractable::get)
             .build());
@@ -441,6 +448,7 @@ public class Printer extends Module {
         subToggles.put(PrinterBehavior.Key.FLUID_SOURCE, placeFluidSource);
         subToggles.put(PrinterBehavior.Key.WATERLOG, fixWaterlog);
         subToggles.put(PrinterBehavior.Key.LEVER_POWERED, fixLever);
+        subToggles.put(PrinterBehavior.Key.CAMPFIRE_LIT, fixCampfire);
         subToggles.put(PrinterBehavior.Key.NOTE_BLOCK_NOTE, fixNoteBlock);
     }
 

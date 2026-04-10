@@ -52,6 +52,7 @@ public interface PrinterBehavior {
         LEVER_POWERED("fix-lever", "Fix lever powered state."),
         DAYLIGHT_DETECTOR("fix-daylight-detector", "Fix daylight detector inverted state."),
         NOTE_BLOCK_NOTE("fix-note-block", "Fix note block note value."),
+        CAMPFIRE_LIT("fix-campfire-lit", "Fix campfire lit state."),
         FLUID_SOURCE("place-fluid-source", "Place water/lava source blocks from buckets."),
         WATERLOG("fix-waterlog", "Add water to waterloggable blocks."),
         BREAK_MISMATCHED("break-mismatched", "Break blocks that don't match the schematic."),
@@ -114,12 +115,12 @@ public interface PrinterBehavior {
      * 特化行为在前，通用放置在后。
      *
      * 顺序决定优先级：
-     * 1-7. 红石组件状态修正（repeater / comparator / wire / note block）
-     * 8-11. 可交互组件状态修正（trapdoor / door / fence gate / lever / daylight detector）
-     * 12.  流体放置（water/lava bucket）
-     * 13.  方块含水（waterlog with bucket）
-     * 14.  双箱子放置（two-phase merge）
-     * 15.  通用方块放置（fallback）
+     * 1-4.  红石组件状态修正（repeater / comparator / wire / note block）
+     * 5-10. 可交互组件状态修正（trapdoor / door / fence gate / lever / daylight detector / campfire）
+     * 11.   流体放置（water/lava bucket）
+     * 12.   方块含水（waterlog with bucket）
+     * 13.   破坏不匹配方块（委托 PacketMine）
+     * 14.   通用方块放置（fallback，含双箱子两阶段）
      */
     List<PrinterBehavior> REGISTRY = List.of(
         // 红石组件状态修正
@@ -133,6 +134,7 @@ public interface PrinterBehavior {
         new FenceGateBehavior(),
         new LeverBehavior(),
         new DaylightDetectorBehavior(),
+        new CampfireBehavior(),
         // 流体放置
         new WaterBehavior(),
         // 方块含水
