@@ -645,6 +645,15 @@ public class Printer extends Module {
         // 每 tick 衰减渲染态倒计时
         tickRenderState();
 
+        // ── 容器物品填充子系统：busy 状态必须每 tick 推进 ──
+        // 状态机处于 PREPARING / OPENING / COOLDOWN 时，如果被 armed != null 饿死，
+        // 会卡在中间状态导致"明明有材料也不开始"。
+        // 因此 busy 时无条件推进状态机，标准打印管线让路。
+        if (fillContainers.get() && containerFillManager.isBusy()) {
+            containerFillManager.tick(tickCounter, placeRange.get());
+            return;
+        }
+
         // 如果已有未执行的 plan，跳过
         if (armed != null) return;
 
@@ -698,10 +707,8 @@ public class Printer extends Module {
             }
         }
 
-        // ── 容器物品填充子系统 ──
-        // 仅在标准管线未 arm 动作、且容器填充已启用时运行。
-        // 容器填充正在进行时（isBusy），标准管线在下一 tick 的 armed != null 检查中不会被跳过，
-        // 而是通过 containerFillManager.isBusy() 在此处阻断。
+        // ── 容器物品填充子系统：IDLE 时尝试拾取新目标 ──
+        // busy 路径已在方法头部提前 return，此处仅处理 IDLE 状态的新目标搜索。
         if (armed == null && fillContainers.get()) {
             containerFillManager.tick(tickCounter, placeRange.get());
         }
@@ -1515,11 +1522,11 @@ public class Printer extends Module {
         ContainerFillManager.State st = containerFillManager.getState();
         String stTag = switch (st) {
             case IDLE      -> "";
-            case PREPARING -> " §e⏳";
-            case OPENING   -> " §6⟳";
-            case COOLDOWN  -> " §7…";
+            case PREPARING -> " \u23f3";
+            case OPENING   -> " \u27f3";
+            case COOLDOWN  -> " \u2026";
         };
-        String title = "§fC: " + doneC + "/" + totalC + stTag;
+        String title = "C: " + doneC + "/" + totalC + stTag;
         int titleColor = doneC == totalC ? 0xFF55FF55 : 0xFFFFAA00;
         ctx.drawText(tr, title, x, y + 4, titleColor, true);
         y += rowH;
@@ -1535,7 +1542,7 @@ public class Printer extends Module {
 
         // 物品需求行
         if (!itemNeeds.isEmpty()) {
-            ctx.drawText(tr, "§8── Items ──", x, y + 4, 0xFF999999, true);
+            ctx.drawText(tr, "-- Items --", x, y + 4, 0xFF999999, true);
             y += rowH;
 
             for (var entry : itemNeeds.entrySet()) {

@@ -3,8 +3,10 @@ package meteordevelopment.meteorclient.utils.printer;
 import meteordevelopment.meteorclient.gui.GuiTheme;
 import meteordevelopment.meteorclient.gui.WindowScreen;
 import meteordevelopment.meteorclient.gui.widgets.WItemWithLabel;
+import meteordevelopment.meteorclient.gui.widgets.WLabel;
 import meteordevelopment.meteorclient.gui.widgets.containers.WTable;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
+import meteordevelopment.meteorclient.utils.render.color.Color;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.item.Item;
 import net.minecraft.item.ItemStack;
@@ -20,12 +22,22 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  *
  * <p>三段式布局：
  * <ol>
- *   <li><b>状态概览</b> — 总进度、当前状态机状态</li>
+ *   <li><b>状态概览</b> — 总进度、当前状态机状态、目标坐标</li>
  *   <li><b>容器明细</b> — 每个容器的坐标、类型、状态、蓝图需求</li>
  *   <li><b>物品汇总</b> — 按物品类型聚合的总需求 vs 玩家库存</li>
  * </ol>
+ *
+ * <p>注意：Meteor GUI 的 {@code theme.label()} 不支持 Minecraft 的 {@code §} 颜色码，
+ * 使用 {@link WLabel#color} 字段设置颜色。
  */
 public class ContainerFillScreen extends WindowScreen {
+
+    // 语义颜色常量（ARGB 去掉 alpha，由 WLabel 内部处理）
+    private static final Color COLOR_GREEN  = new Color(85, 255, 85);     // 成功/满足
+    private static final Color COLOR_RED    = new Color(255, 85, 85);     // 失败/缺失
+    private static final Color COLOR_YELLOW = new Color(255, 255, 85);    // 进行中
+    private static final Color COLOR_GRAY   = new Color(170, 170, 170);   // 次要信息
+    private static final Color COLOR_ORANGE = new Color(255, 170, 0);     // 警告
 
     private final ContainerFillManager manager;
     private final int range;
@@ -73,25 +85,36 @@ public class ContainerFillScreen extends WindowScreen {
         //  §1  状态概览
         // ════════════════════════════════════════
         ContainerFillManager.State st = manager.getState();
-        String stateLabel = switch (st) {
-            case IDLE      -> "§7Idle";
-            case PREPARING -> "§ePreparing...";
-            case OPENING   -> "§eOpening...";
-            case COOLDOWN  -> "§eCooldown";
+        String stateText = switch (st) {
+            case IDLE      -> "Idle";
+            case PREPARING -> "Preparing...";
+            case OPENING   -> "Opening...";
+            case COOLDOWN  -> "Cooldown";
+        };
+        Color stateColor = switch (st) {
+            case IDLE      -> COLOR_GRAY;
+            case PREPARING, OPENING -> COLOR_YELLOW;
+            case COOLDOWN  -> COLOR_ORANGE;
         };
 
-        add(theme.label("Progress: §f" + satisfied + " §7/ §f" + total
-            + "  §8|  State: " + stateLabel)).expandX();
+        // 进度行
+        WLabel progressLabel = add(theme.label("Progress: " + satisfied + " / " + total
+            + "  |  State: " + stateText)).expandX().widget();
+        progressLabel.color = (satisfied == total && total > 0) ? COLOR_GREEN : stateColor;
 
+        // 当前目标位置
         BlockPos target = manager.getTargetPos();
         if (target != null) {
-            add(theme.label("  §8Target: §f" + target.getX() + ", " + target.getY() + ", " + target.getZ()));
+            WLabel targetLabel = add(theme.label(
+                "  Target: " + target.getX() + ", " + target.getY() + ", " + target.getZ())).widget();
+            targetLabel.color = COLOR_GRAY;
         }
 
         add(theme.horizontalSeparator()).expandX();
 
         if (entries.isEmpty()) {
-            add(theme.label("§7No schematic containers in range.")).expandX();
+            WLabel emptyLabel = add(theme.label("No schematic containers in range.")).expandX().widget();
+            emptyLabel.color = COLOR_GRAY;
             return;
         }
 
@@ -115,23 +138,25 @@ public class ContainerFillScreen extends WindowScreen {
             if (e.icon != null) {
                 table.add(new WItemWithLabel(new ItemStack(e.icon), e.icon.getName().getString()));
             } else {
-                table.add(theme.label("§8?"));
+                WLabel unknownLabel = table.add(theme.label("?")).widget();
+                unknownLabel.color = COLOR_GRAY;
             }
 
-            // 状态
-            table.add(theme.label(e.satisfied ? "§a✓" : "§c✗"));
+            // 状态标示
+            WLabel statusLabel = table.add(theme.label(e.satisfied ? "\u2713" : "\u2717")).widget();
+            statusLabel.color = e.satisfied ? COLOR_GREEN : COLOR_RED;
 
             // 蓝图需求物品
             StringBuilder sb = new StringBuilder();
             boolean first = true;
             for (var ni : e.needs.entrySet()) {
-                if (!first) sb.append("§8, ");
+                if (!first) sb.append(", ");
                 first = false;
-                sb.append(e.satisfied ? "§a" : "§f")
-                  .append(ni.getKey().getName().getString())
-                  .append(" §7×").append(ni.getValue());
+                sb.append(ni.getKey().getName().getString())
+                  .append(" x").append(ni.getValue());
             }
-            table.add(theme.label(sb.toString()));
+            WLabel needsLabel = table.add(theme.label(sb.toString())).widget();
+            needsLabel.color = e.satisfied ? COLOR_GREEN : Color.WHITE;
 
             table.row();
         }
@@ -145,7 +170,8 @@ public class ContainerFillScreen extends WindowScreen {
         // 聚合所有未满足容器的物品需求
         Map<Item, Integer> totalNeeds = manager.getAllUnsatisfiedItemNeeds();
         if (totalNeeds.isEmpty()) {
-            add(theme.label("§aAll containers satisfied!")).expandX();
+            WLabel allOk = add(theme.label("All containers satisfied!")).expandX().widget();
+            allOk.color = COLOR_GREEN;
             return;
         }
 
@@ -162,11 +188,14 @@ public class ContainerFillScreen extends WindowScreen {
             int have = InvUtils.find(item).count();
 
             itemTable.add(new WItemWithLabel(new ItemStack(item), item.getName().getString()));
-            itemTable.add(theme.label("§f" + need));
-            itemTable.add(theme.label("§f" + have));
-            itemTable.add(theme.label(have >= need
-                ? "§a✓ OK"
-                : "§c✗ −" + (need - have)));
+            itemTable.add(theme.label(String.valueOf(need)));
+            itemTable.add(theme.label(String.valueOf(have)));
+
+            boolean sufficient = have >= need;
+            WLabel verdictLabel = itemTable.add(theme.label(
+                sufficient ? "\u2713 OK" : "\u2717 -" + (need - have))).widget();
+            verdictLabel.color = sufficient ? COLOR_GREEN : COLOR_RED;
+
             itemTable.row();
         }
     }

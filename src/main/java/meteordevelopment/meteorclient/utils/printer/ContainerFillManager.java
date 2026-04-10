@@ -330,6 +330,14 @@ public class ContainerFillManager {
      *   <li>1.13+ CLICK_WINDOW 免 Post 检查，无数量限制</li>
      *   <li>serverOpenedInventoryThisTick 豁免 MultiActionsC</li>
      * </ul>
+     *
+     * <h3>修正要点</h3>
+     * <ul>
+     *   <li><b>实际观察</b>：每次 shift-click 后从 handler 重读容器区实际数量，
+     *       用真实增量而非纸面估算驱动 deficit，避免过填/欠填</li>
+     *   <li><b>post-fill 重算</b>：填充结束后重新扫描 handler，
+     *       判定是否满足蓝图需求 → 准确更新 satisfiedPositions</li>
+     * </ul>
      */
     private void fillAndClose(Map<Item, Integer> containerContents, int containerSlotCount) {
         Map<Item, Integer> needs = schematicCache.get(targetPos);
@@ -341,24 +349,36 @@ public class ContainerFillManager {
             return;
         }
 
-        boolean allSatisfied = true;
         int totalSlots = handler.slots.size();
 
+        // ── 按物品逐类填充 ──
         for (var entry : needs.entrySet()) {
             Item item = entry.getKey();
-            int deficit = entry.getValue() - containerContents.getOrDefault(item, 0);
-            if (deficit <= 0) continue;
+            int required = entry.getValue();
 
-            allSatisfied = false;
-            int remaining = deficit;
+            // 每次 shift-click 后都从 handler 重读容器实际数量
+            int existing = countItemInContainer(handler, item, containerSlotCount);
+            if (existing >= required) continue;
 
-            // 在容器窗口的玩家背包区域查找并 QUICK_MOVE
-            for (int slot = containerSlotCount; slot < totalSlots && remaining > 0; slot++) {
+            for (int slot = containerSlotCount; slot < totalSlots; slot++) {
                 ItemStack stack = handler.getSlot(slot).getStack();
                 if (stack.isEmpty() || stack.getItem() != item) continue;
 
                 InvUtils.shiftClick().slotId(slot);
-                remaining -= Math.min(stack.getCount(), remaining);
+
+                // 重读容器区，用真实数量判断 deficit（而非纸面 -= stack.getCount()）
+                existing = countItemInContainer(handler, item, containerSlotCount);
+                if (existing >= required) break;
+            }
+        }
+
+        // ── post-fill 重算：从 handler 最终状态准确判定 satisfied ──
+        boolean allSatisfied = true;
+        for (var entry : needs.entrySet()) {
+            int existing = countItemInContainer(handler, entry.getKey(), containerSlotCount);
+            if (existing < entry.getValue()) {
+                allSatisfied = false;
+                break;
             }
         }
 
@@ -366,6 +386,21 @@ public class ContainerFillManager {
 
         closeContainerSilently();
         state = State.COOLDOWN;
+    }
+
+    /**
+     * 从 ScreenHandler 的容器区（前 containerSlotCount 个槽位）统计指定物品的实际数量。
+     * <p>QUICK_MOVE 后 handler 本地预测已更新，因此此方法能反映真实插入量。
+     */
+    private static int countItemInContainer(ScreenHandler handler, Item item, int containerSlotCount) {
+        int count = 0;
+        for (int i = 0; i < containerSlotCount; i++) {
+            ItemStack stack = handler.getSlot(i).getStack();
+            if (!stack.isEmpty() && stack.getItem() == item) {
+                count += stack.getCount();
+            }
+        }
+        return count;
     }
 
     // ==================== 内部：交互辅助 ====================
