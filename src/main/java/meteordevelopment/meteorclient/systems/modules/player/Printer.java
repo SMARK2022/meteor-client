@@ -25,6 +25,7 @@ import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.ItemSwitchHelper;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
@@ -38,7 +39,6 @@ import meteordevelopment.meteorclient.utils.printer.behavior.*;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.*;
 import net.minecraft.block.enums.SlabType;
-import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.ExperienceOrbEntity;
@@ -228,24 +228,32 @@ public class Printer extends Module {
             .visible(placeFluid::get)
             .build());
 
-    // Break group toggle
+    // ── 泥土/草方块混淆 ──
+    // dirt ↔ grass_block 视为等价：放置可互换，已存在的不因不匹配而破坏。
+    private final Setting<Boolean> tolerateDirt = sgBehavior.add(new BoolSetting.Builder()
+            .name("tolerate-dirt")
+            .description("Treat dirt and grass block as interchangeable. Dirt can be placed where grass is required (and vice versa). Existing dirt/grass mismatches are treated as satisfied.")
+            .defaultValue(true)
+            .build());
+
+    // ── 破坏不匹配方块 ──
     private final Setting<Boolean> breakMismatched = sgBehavior.add(new BoolSetting.Builder()
             .name("break-mismatched")
             .description("Break blocks that don't match the schematic (requires PacketMine active). Fallback when no behavior can fix the mismatch.")
             .defaultValue(false)
             .build());
 
-    // Break sub-toggles (tolerance)
-    private final Setting<Boolean> tolerateDirt = sgBehavior.add(new BoolSetting.Builder()
-            .name("tolerate-dirt")
-            .description("Don't break dirt, grass, podzol, mycelium and other dirt-like blocks.")
-            .defaultValue(true)
+    // 破坏子开关：空气位多余方块的容忍
+    private final Setting<Boolean> tolerateExtraDirt = sgBehavior.add(new BoolSetting.Builder()
+            .name("tolerate-extra-dirt")
+            .description("Don't break dirt/grass blocks occupying positions where the schematic requires air. Useful when stray dirt/grass from terrain generation is acceptable.")
+            .defaultValue(false)
             .visible(breakMismatched::get)
             .build());
 
     private final Setting<Boolean> tolerateScaffolding = sgBehavior.add(new BoolSetting.Builder()
             .name("tolerate-scaffolding")
-            .description("Don't break scaffolding blocks.")
+            .description("Don't break scaffolding blocks occupying positions where the schematic requires air.")
             .defaultValue(true)
             .visible(breakMismatched::get)
             .build());
@@ -1005,25 +1013,29 @@ public class Printer extends Module {
             BlockState requiredState = worldSchematic.getBlockState(pos);
             BlockState currentState = mc.world.getBlockState(pos);
 
-            // 蓝图要求空气
+            // ── 蓝图要求空气 ──
             if (requiredState.isAir()) {
-                // 世界也是空气或可替换，一致
                 if (currentState.isAir() || currentState.isReplaceable()) continue;
-                // 破坏关闭 或 容忍名单内的方块 → 跳过
-                if (!breakMismatched.get() || isToleratedBlock(currentState)) continue;
-                // 走 behavior pipeline：BlockBreakBehavior 会捕获此 task
+                // 破坏未启用 → 无法处理多余方块，跳过
+                if (!breakMismatched.get()) continue;
+                // 空气位容忍：多余的 dirt/grass 或脚手架允许保留
+                if (isToleratedInAir(currentState)) continue;
+                // 走 behavior pipeline（BlockBreakBehavior 捕获）
             }
 
             // 完全一致，跳过
             if (requiredState == currentState) continue;
 
-            // 容忍名单：当前方块虽与蓝图不符，但属于用户可接受范围（不破坏也不替换）
-            if (breakMismatched.get() && !currentState.isAir() && isToleratedBlock(currentState)) continue;
+            // 泥土混淆等价：dirt ↔ grass_block 视为相同，无需修正
+            if (tolerateDirt.get() && isDirtGrassEquivalent(requiredState, currentState)) continue;
 
             // UseBlock 等待服务端确认中，跳过（防止 toggle 类方块被反复交互）
             if (pendingUseBlocks.containsKey(pos)) continue;
 
-            PrinterTask task = new PrinterTask(pos, requiredState, currentState);
+            // 泥土混淆放置：当背包缺少蓝图指定的 dirt/grass 时，用对方替代
+            BlockState effectiveDesired = resolveDirtSubstitute(requiredState);
+
+            PrinterTask task = new PrinterTask(pos, effectiveDesired, currentState);
 
             // 多格对象锚点规范化：
             // 床/门/双箱子等多格对象，只从主格（放置锚点）规划，另一半由 onPlaced 联动。
@@ -1102,10 +1114,57 @@ public class Printer extends Module {
      * 检查方块是否属于容忍名单（不需要破坏的方块类型）。
      * 容忍的方块即使与蓝图不匹配也不会被破坏。
      */
-    private boolean isToleratedBlock(BlockState state) {
-        if (tolerateDirt.get() && state.isIn(BlockTags.DIRT)) return true;
+    // ==================== 泥土混淆 & 容忍辅助 ====================
+
+    /**
+     * 检查两个方块状态是否属于 dirt ↔ grass_block 等价对。
+     * 仅限泥土和草方块之间的互换，灰化土/菌丝/泥巴等不参与混淆。
+     */
+    private boolean isDirtGrassEquivalent(BlockState a, BlockState b) {
+        Block ba = a.getBlock(), bb = b.getBlock();
+        return (ba == Blocks.DIRT && bb == Blocks.GRASS_BLOCK)
+            || (ba == Blocks.GRASS_BLOCK && bb == Blocks.DIRT);
+    }
+
+    /** dirt 或 grass_block（用于空气位容忍判定） */
+    private static boolean isDirtOrGrass(BlockState state) {
+        Block b = state.getBlock();
+        return b == Blocks.DIRT || b == Blocks.GRASS_BLOCK;
+    }
+
+    /**
+     * 蓝图要求空气时，判断世界中的方块是否可以容忍保留。
+     * 仅在 breakMismatched 启用后有意义。
+     *
+     * @see #tolerateExtraDirt 容忍空气位多余的 dirt/grass
+     * @see #tolerateScaffolding 容忍空气位多余的脚手架
+     */
+    private boolean isToleratedInAir(BlockState state) {
+        if (tolerateExtraDirt.get() && isDirtOrGrass(state)) return true;
         if (tolerateScaffolding.get() && state.getBlock() == Blocks.SCAFFOLDING) return true;
         return false;
+    }
+
+    /**
+     * 对 dirt ↔ grass_block 进行放置替代：当背包缺少蓝图指定方块时，
+     * 尝试用 dirt/grass 对方替代。仅在 tolerateDirt 开启时生效。
+     *
+     * @return 替代后的 desiredState（如果无需或无法替代，返回原始值）
+     */
+    private BlockState resolveDirtSubstitute(BlockState desired) {
+        if (!tolerateDirt.get()) return desired;
+        Block b = desired.getBlock();
+        if (b == Blocks.GRASS_BLOCK
+            && !InvUtils.find(b.asItem()).found()
+            && InvUtils.find(Blocks.DIRT.asItem()).found()) {
+            return Blocks.DIRT.getDefaultState();
+        }
+        if (b == Blocks.DIRT
+            && !InvUtils.find(b.asItem()).found()
+            && InvUtils.find(Blocks.GRASS_BLOCK.asItem()).found()) {
+            return Blocks.GRASS_BLOCK.getDefaultState();
+        }
+        return desired;
     }
 
     /**
