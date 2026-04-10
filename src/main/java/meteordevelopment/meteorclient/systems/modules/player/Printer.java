@@ -19,6 +19,7 @@ import fi.dy.masa.litematica.world.SchematicWorldHandler;
 import fi.dy.masa.litematica.world.WorldSchematic;
 import meteordevelopment.meteorclient.renderer.GL;
 import meteordevelopment.meteorclient.events.entity.player.SendMovementPacketsEvent;
+import meteordevelopment.meteorclient.events.game.OpenScreenEvent;
 import meteordevelopment.meteorclient.events.packets.InventoryEvent;
 import meteordevelopment.meteorclient.events.render.Render2DEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
@@ -948,6 +949,18 @@ public class Printer extends Module {
     }
 
     /**
+     * 容器屏幕抑制：ContainerFillManager 打开容器期间，阻止容器 GUI 弹出。
+     * <p>ScreenHandler 在 setScreen 之前已由 ClientPlayNetworkHandler 设置完毕，
+     * 取消 setScreen 不影响后续 clickSlot 操作。
+     */
+    @EventHandler
+    private void onOpenScreen(OpenScreenEvent event) {
+        if (fillContainers.get() && containerFillManager.shouldSuppressScreen()) {
+            event.cancel();
+        }
+    }
+
+    /**
      * 验证动作计划在执行时是否仍然有效
      * 使用当前 eyePos 重新验证几何条件，防止 movement 后 plan 过期
      */
@@ -1476,11 +1489,7 @@ public class Printer extends Module {
 
     /**
      * 在屏幕左上角渲染容器填充状态覆盖层。
-     * <p>包含两部分：
-     * <ol>
-     *   <li>每种容器类型的 icon + 已满足/总计 数量</li>
-     *   <li>所有未满足容器中缺失物品的 icon + 持有/需要 数量</li>
-     * </ol>
+     * <p>布局：状态行 → 容器类型行 → 分隔 → 物品需求行
      */
     @EventHandler
     private void onRender2D(Render2DEvent event) {
@@ -1488,65 +1497,56 @@ public class Printer extends Module {
         if (containerFillManager.getSchematicContainerCount() == 0) return;
 
         net.minecraft.client.gui.DrawContext ctx = event.drawContext;
-        net.minecraft.client.font.TextRenderer textRenderer = mc.textRenderer;
+        net.minecraft.client.font.TextRenderer tr = mc.textRenderer;
 
-        int startX = 6;
-        int startY = 6;
-        int rowH = 18;
-        int iconSize = 16;
-        int curY = startY;
+        int x = 6, y = 6, rowH = 18, iconW = 16;
 
-        // ── 标题 ──
-        int totalContainers = containerFillManager.getSchematicContainerCount();
-        int satisfiedContainers = containerFillManager.getSatisfiedCount();
-        String title = "Containers: " + satisfiedContainers + "/" + totalContainers;
-        int titleColor = satisfiedContainers == totalContainers ? 0xFF55FF55 : 0xFFFFAA00;
+        // 预收集数据
+        Map<Item, int[]> types = containerFillManager.getTypeSummaries();
+        Map<Item, Integer> itemNeeds = containerFillManager.getAllUnsatisfiedItemNeeds();
+        int totalC = containerFillManager.getSchematicContainerCount();
+        int doneC = containerFillManager.getSatisfiedCount();
 
         // 背景
-        Map<Item, int[]> typeSummaries = containerFillManager.getTypeSummaries();
-        Map<Item, Integer> itemNeeds = containerFillManager.getAllUnsatisfiedItemNeeds();
-        int totalRows = 1 + typeSummaries.size() + (itemNeeds.isEmpty() ? 0 : 1 + itemNeeds.size());
-        int bgHeight = totalRows * rowH + 8;
-        int bgWidth = 140;
-        ctx.fill(startX - 3, startY - 3, startX + bgWidth, startY + bgHeight, 0x90000000);
+        int rows = 1 + types.size() + (itemNeeds.isEmpty() ? 0 : 1 + itemNeeds.size());
+        ctx.fill(x - 3, y - 3, x + 140, y + rows * rowH + 5, 0x90000000);
 
-        ctx.drawText(textRenderer, title, startX, curY + 4, titleColor, true);
-        curY += rowH;
+        // 标题行：进度 + 状态机状态
+        ContainerFillManager.State st = containerFillManager.getState();
+        String stTag = switch (st) {
+            case IDLE      -> "";
+            case PREPARING -> " §e⏳";
+            case OPENING   -> " §6⟳";
+            case COOLDOWN  -> " §7…";
+        };
+        String title = "§fC: " + doneC + "/" + totalC + stTag;
+        int titleColor = doneC == totalC ? 0xFF55FF55 : 0xFFFFAA00;
+        ctx.drawText(tr, title, x, y + 4, titleColor, true);
+        y += rowH;
 
-        // ── 容器类型行 ──
-        for (var entry : typeSummaries.entrySet()) {
-            Item icon = entry.getKey();
-            int[] counts = entry.getValue();
-            ItemStack iconStack = new ItemStack(icon);
-
-            RenderUtils.drawItem(ctx, iconStack, startX, curY, 1.0f, false);
-
-            String label = counts[0] + "/" + counts[1];
-            int labelColor = counts[0] == counts[1] ? 0xFF55FF55 : 0xFFFF5555;
-            ctx.drawText(textRenderer, label, startX + iconSize + 4, curY + 4, labelColor, true);
-            curY += rowH;
+        // 容器类型行
+        for (var entry : types.entrySet()) {
+            RenderUtils.drawItem(ctx, new ItemStack(entry.getKey()), x, y, 1f, false);
+            int[] c = entry.getValue();
+            int color = c[0] == c[1] ? 0xFF55FF55 : 0xFFFF5555;
+            ctx.drawText(tr, c[0] + "/" + c[1], x + iconW + 4, y + 4, color, true);
+            y += rowH;
         }
 
-        // ── 物品需求行 ──
+        // 物品需求行
         if (!itemNeeds.isEmpty()) {
-            ctx.drawText(textRenderer, "§7─── Items ───", startX, curY + 4, 0xFF999999, true);
-            curY += rowH;
+            ctx.drawText(tr, "§8── Items ──", x, y + 4, 0xFF999999, true);
+            y += rowH;
 
             for (var entry : itemNeeds.entrySet()) {
                 Item item = entry.getKey();
                 int need = entry.getValue();
-                ItemStack iconStack = new ItemStack(item);
+                int have = InvUtils.find(item).count();
 
-                RenderUtils.drawItem(ctx, iconStack, startX, curY, 1.0f, false);
-
-                // 玩家背包中持有量
-                FindItemResult findResult = InvUtils.find(item);
-                int have = findResult.found() ? findResult.count() : 0;
-
-                String label = have + "/" + need;
-                int labelColor = have >= need ? 0xFF55FF55 : 0xFFFFAA00;
-                ctx.drawText(textRenderer, label, startX + iconSize + 4, curY + 4, labelColor, true);
-                curY += rowH;
+                RenderUtils.drawItem(ctx, new ItemStack(item), x, y, 1f, false);
+                int color = have >= need ? 0xFF55FF55 : 0xFFFFAA00;
+                ctx.drawText(tr, have + "/" + need, x + iconW + 4, y + 4, color, true);
+                y += rowH;
             }
         }
     }
