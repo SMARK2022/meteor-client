@@ -1140,6 +1140,9 @@ public class Printer extends Module {
                 if (currentState.isAir() || currentState.isReplaceable()) continue;
                 // 破坏未启用 → 无法处理多余方块，跳过
                 if (!breakMismatched.get()) continue;
+                // 投影边界检查：位置不在任何已启用 Placement 的边界内 → 非蓝图管辖区域，跳过
+                // WorldSchematic 对未覆盖的位置也返回 AIR，必须通过 Placement 边界区分
+                if (!isWithinAnyPlacement(pos)) continue;
                 // 空气位容忍：多余的 dirt/grass 或脚手架允许保留
                 if (isToleratedInAir(currentState)) continue;
                 // 走 behavior pipeline（BlockBreakBehavior 捕获）
@@ -1362,6 +1365,40 @@ public class Printer extends Module {
             // 剩下的通常是：玩家(Player)、生物(Mobs)、船(Boats) -> 这些应该视为阻挡
             return true;
         }).isEmpty(); // 如果列表不为空，说明存在阻挡实体
+    }
+
+    /**
+     * 检查给定位置是否在任何已启用的 Litematica SchematicPlacement 的边界框内。
+     *
+     * <p>WorldSchematic 对蓝图未覆盖的位置也返回 AIR，因此无法通过
+     * {@code worldSchematic.getBlockState(pos).isAir()} 区分"蓝图内的空气"和"蓝图外"。
+     * 此方法通过 Placement 的 enclosingBox 做精确边界判断。
+     *
+     * @param pos 待检查的世界坐标
+     * @return true 表示该位置在至少一个已启用 Placement 的 enclosing box 内
+     */
+    private boolean isWithinAnyPlacement(BlockPos pos) {
+        var manager = DataManager.getSchematicPlacementManager();
+        for (var placement : manager.getAllSchematicsPlacements()) {
+            if (!placement.isEnabled()) continue;
+            fi.dy.masa.litematica.selection.Box box = placement.getEclosingBox();
+            if (box == null) continue;
+            BlockPos p1 = box.getPos1();
+            BlockPos p2 = box.getPos2();
+            if (p1 == null || p2 == null) continue;
+            int minX = Math.min(p1.getX(), p2.getX());
+            int maxX = Math.max(p1.getX(), p2.getX());
+            int minY = Math.min(p1.getY(), p2.getY());
+            int maxY = Math.max(p1.getY(), p2.getY());
+            int minZ = Math.min(p1.getZ(), p2.getZ());
+            int maxZ = Math.max(p1.getZ(), p2.getZ());
+            if (pos.getX() >= minX && pos.getX() <= maxX
+                && pos.getY() >= minY && pos.getY() <= maxY
+                && pos.getZ() >= minZ && pos.getZ() <= maxZ) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
