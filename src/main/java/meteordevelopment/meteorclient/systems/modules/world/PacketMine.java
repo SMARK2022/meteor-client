@@ -633,6 +633,39 @@ public class PacketMine extends Module {
     }
 
     /**
+     * 外部模块（如 Printer）调用：将指定方块加入挖掘队列。
+     * 自动解析最佳面，跳过不可破坏或已在队列中的方块。
+     */
+    public void addBreakTarget(BlockPos pos) {
+        if (mc.world == null || mc.player == null) return;
+        if (!BlockUtils.canBreak(pos)) return;
+        if (isMiningBlock(pos)) return;
+
+        Direction face = resolveBestFace(pos);
+        if (face == null) face = Direction.UP;
+
+        MyBlock b = blockPool.get();
+        b.blockPos = pos;
+        b.direction = face;
+        b.currentFace = face;
+        b.blockState = mc.world.getBlockState(pos);
+        b.block = b.blockState.getBlock();
+        b.phase = Phase.PENDING_START;
+        b.mining = false;
+        b.progress = 0;
+        b.lockedToolSlot = -1;
+        b.heartbeatTimer = 0;
+        b.rotationQueued = false;
+        b.rotationPhaseToken = null;
+        b.startMs = 0;
+        b.readyMs = 0;
+        b.maxDelta = 0;
+        b.pendingSinceMs = System.currentTimeMillis();
+        b.activated = false;
+        blocks.add(b);
+    }
+
+    /**
      * 为指定方块状态找到热栏中的最佳工具槽位。
      *
      * <p>当 AutoTool 模块启用时，委托其评分系统（附魔偏好、精准/时运、

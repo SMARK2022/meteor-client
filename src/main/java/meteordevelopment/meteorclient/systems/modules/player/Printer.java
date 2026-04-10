@@ -38,6 +38,7 @@ import meteordevelopment.meteorclient.utils.printer.behavior.*;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.*;
 import net.minecraft.block.enums.SlabType;
+import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.ExperienceOrbEntity;
@@ -225,6 +226,28 @@ public class Printer extends Module {
             .description("Add water to waterloggable blocks.")
             .defaultValue(true)
             .visible(placeFluid::get)
+            .build());
+
+    // Break group toggle
+    private final Setting<Boolean> breakMismatched = sgBehavior.add(new BoolSetting.Builder()
+            .name("break-mismatched")
+            .description("Break blocks that don't match the schematic (requires PacketMine active). Fallback when no behavior can fix the mismatch.")
+            .defaultValue(false)
+            .build());
+
+    // Break sub-toggles (tolerance)
+    private final Setting<Boolean> tolerateDirt = sgBehavior.add(new BoolSetting.Builder()
+            .name("tolerate-dirt")
+            .description("Don't break dirt, grass, podzol, mycelium and other dirt-like blocks.")
+            .defaultValue(true)
+            .visible(breakMismatched::get)
+            .build());
+
+    private final Setting<Boolean> tolerateScaffolding = sgBehavior.add(new BoolSetting.Builder()
+            .name("tolerate-scaffolding")
+            .description("Don't break scaffolding blocks.")
+            .defaultValue(true)
+            .visible(breakMismatched::get)
             .build());
 
     // Key → sub-toggle mapping (populated in constructor)
@@ -454,6 +477,7 @@ public class Printer extends Module {
             case REDSTONE     -> fixRedstone.get();
             case INTERACTABLE -> fixInteractable.get();
             case FLUID        -> placeFluid.get();
+            case BREAK        -> breakMismatched.get();
         };
         if (!groupEnabled) return false;
 
@@ -981,11 +1005,20 @@ public class Printer extends Module {
             BlockState requiredState = worldSchematic.getBlockState(pos);
             BlockState currentState = mc.world.getBlockState(pos);
 
-            // 蓝图要求空气，跳过
-            if (requiredState.isAir()) continue;
+            // 蓝图要求空气
+            if (requiredState.isAir()) {
+                // 世界也是空气或可替换，一致
+                if (currentState.isAir() || currentState.isReplaceable()) continue;
+                // 破坏关闭 或 容忍名单内的方块 → 跳过
+                if (!breakMismatched.get() || isToleratedBlock(currentState)) continue;
+                // 走 behavior pipeline：BlockBreakBehavior 会捕获此 task
+            }
 
             // 完全一致，跳过
             if (requiredState == currentState) continue;
+
+            // 容忍名单：当前方块虽与蓝图不符，但属于用户可接受范围（不破坏也不替换）
+            if (breakMismatched.get() && !currentState.isAir() && isToleratedBlock(currentState)) continue;
 
             // UseBlock 等待服务端确认中，跳过（防止 toggle 类方块被反复交互）
             if (pendingUseBlocks.containsKey(pos)) continue;
@@ -1063,6 +1096,16 @@ public class Printer extends Module {
         }
 
         return list;
+    }
+
+    /**
+     * 检查方块是否属于容忍名单（不需要破坏的方块类型）。
+     * 容忍的方块即使与蓝图不匹配也不会被破坏。
+     */
+    private boolean isToleratedBlock(BlockState state) {
+        if (tolerateDirt.get() && state.isIn(BlockTags.DIRT)) return true;
+        if (tolerateScaffolding.get() && state.getBlock() == Blocks.SCAFFOLDING) return true;
+        return false;
     }
 
     /**

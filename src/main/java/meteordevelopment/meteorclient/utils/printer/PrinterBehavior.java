@@ -32,6 +32,8 @@ public interface PrinterBehavior {
         INTERACTABLE,
         /** 流体与含水（water/lava bucket, waterlog） */
         FLUID,
+        /** 破坏不匹配方块（委托 PacketMine） */
+        BREAK,
         /** 通用方块放置（fallback，始终启用） */
         PLACEMENT
     }
@@ -52,6 +54,7 @@ public interface PrinterBehavior {
         NOTE_BLOCK_NOTE("fix-note-block", "Fix note block note value."),
         FLUID_SOURCE("place-fluid-source", "Place water/lava source blocks from buckets."),
         WATERLOG("fix-waterlog", "Add water to waterloggable blocks."),
+        BREAK_MISMATCHED("break-mismatched", "Break blocks that don't match the schematic."),
         BLOCK_PLACEMENT("place-blocks", "Standard block placement.");
 
         public final String settingName;
@@ -134,6 +137,8 @@ public interface PrinterBehavior {
         new WaterBehavior(),
         // 方块含水
         new WaterlogBehavior(),
+        // 破坏兜底（委托 PacketMine 执行多 tick 挖掘，优先级低于所有放置/修正行为）
+        new BlockBreakBehavior(),
         // 通用放置（fallback，同时处理双箱子两阶段放置，ChestType 由 ResolverRegistry 安全解析）
         new BlockPlacementBehavior()
     );
