@@ -9,15 +9,18 @@ import net.minecraft.state.property.Properties;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 
 /**
- * WaterlogBehavior - 方块含水操作
+ * WaterlogBehavior — 方块含水操作
  *
- * 当蓝图要求含水方块（WATERLOGGED=true）但当前未含水时，
- * 手持水桶对其右键交互使其变为含水状态。
+ * <p>当蓝图要求含水方块（WATERLOGGED=true）但当前未含水时，
+ * 手持水桶对其自身 interactBlock 使其变为含水状态。
  *
- * 属性处理：
- * - WATERLOGGED: 可通过水桶交互修正（目标属性）
+ * <h2>Sneak 策略</h2>
+ * <p>大多数 waterloggable 方块（半砖/楼梯/墙/栅栏）不需要潜行；
+ * 只有 <b>有 GUI/onUse 交互</b> 的方块（如活板门、栅栏门）需要潜行绕过交互。
+ * 使用 {@link BlockUtilHelper#determineSneakPolicy} 按方块逐一判断，
+ * 避免对所有方块强制潜行导致多余的准备 tick。
  *
- * 注意：仅处理「加水」方向（将非含水变为含水），不处理排水。
+ * <p>注意：仅处理「加水」方向（将非含水变为含水），不处理排水。
  */
 public class WaterlogBehavior implements PrinterBehavior {
 
@@ -42,7 +45,6 @@ public class WaterlogBehavior implements PrinterBehavior {
         if (task.currentState().get(Properties.WATERLOGGED)) return false;
 
         // 方块类型必须一致（否则应由 BlockPlacementBehavior 处理）
-        // inventory 就绪性留给 plan() 检查，避免缺桶时任务消失
         return task.desiredState().getBlock() == task.currentState().getBlock();
     }
 
@@ -61,12 +63,15 @@ public class WaterlogBehavior implements PrinterBehavior {
             mc, task.pos(), strict, checkLos, maxReach);
         if (interaction == null) return null;
 
+        // 按方块类型动态判断：活板门/栅栏门等交互方块需要 sneak，普通半砖/楼梯不需要
+        ActionPlan.SneakPolicy sneak = BlockUtilHelper.determineSneakPolicy(task.currentState());
+
         return new ActionPlan.UseItemOnBlock(
             task.pos(),
             task.desiredState(),
             interaction,
             Items.WATER_BUCKET,
-            ActionPlan.SneakPolicy.REQUIRE_SNEAK, // 潜行避免触发方块交互（如箱子、按钮等）
+            sneak,
             ActionPlan.HandPolicy.ANY_HAND_WITH_ITEM,
             state -> state.contains(Properties.WATERLOGGED)
                 && !state.get(Properties.WATERLOGGED)

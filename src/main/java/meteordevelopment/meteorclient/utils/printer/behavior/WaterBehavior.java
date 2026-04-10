@@ -6,24 +6,32 @@ import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.FluidBlock;
+import net.minecraft.block.FluidFillable;
 import net.minecraft.client.MinecraftClient;
+import net.minecraft.fluid.Fluid;
+import net.minecraft.fluid.Fluids;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
-import net.minecraft.state.property.Properties;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 
+import java.util.List;
+
 /**
- * WaterBehavior - 流体放置行为
+ * WaterBehavior — 流体源方块放置行为
  *
- * 处理水桶/岩浆桶放置流体源方块。
- * 产出 {@link ActionPlan.UseItemOnBlock} 类型的动作计划。
+ * <p>手持水桶/岩浆桶对邻居表面 interactBlock，流体出现在 targetPos。
  *
- * 机制：手持桶对邻居表面 interactBlock，流体出现在 targetPos。
- * 与 PlaceBlock 共用几何解析（ResolverRegistry），但物品和验证逻辑不同。
+ * <h2>关键语义</h2>
+ * <p>水桶不是方块物品。它的 item-on-block 语义会<b>优先作用于被点击方块本身</b>：
+ * 如果被点击方块是 {@link FluidFillable}（半砖/楼梯/活板门等），
+ * 水桶会被该方块"消费"（变为 waterlogged），而非在 targetPos 释放流体。
+ *
+ * <p>因此 plan 阶段必须过滤掉这类"危险 support"，而非依赖 sneak 绕过
+ * （sneak 只能绕过 GUI/onUse 交互，不能阻止 FluidFillable 消费桶）。
  */
 public class WaterBehavior implements PrinterBehavior {
 
@@ -40,20 +48,15 @@ public class WaterBehavior implements PrinterBehavior {
     @Override
     public boolean supports(PrinterTask task) {
         Block desired = task.desiredState().getBlock();
-
-        // 只处理水和岩浆的源方块
         if (desired != Blocks.WATER && desired != Blocks.LAVA) return false;
         if (!task.desiredState().contains(FluidBlock.LEVEL)) return false;
-        if (task.desiredState().get(FluidBlock.LEVEL) != 0) return false; // 只放源方块
+        if (task.desiredState().get(FluidBlock.LEVEL) != 0) return false;
 
-        // 当前位置不能已经是目标流体源
         BlockState current = task.currentState();
         if (current.getBlock() == desired
             && current.contains(FluidBlock.LEVEL)
             && current.get(FluidBlock.LEVEL) == 0) return false;
 
-        // 桶类型必须可确定（inventory 就绪性留给 plan() 检查，
-        // 避免缺桶时任务从列表消失导致不可见）
         return getBucket(desired) != null;
     }
 
@@ -73,50 +76,75 @@ public class WaterBehavior implements PrinterBehavior {
         if (bucket == null) return null;
         if (!InvUtils.find(bucket).found()) return null;
 
-        // 复用 PlaceBlock 的几何解析：找到邻居表面来点击
+        Fluid fluid = (desired == Blocks.WATER) ? Fluids.WATER : Fluids.LAVA;
+
+        // resolveAll → 取全部几何合法选项 → 过滤掉会消费桶的危险 support
         PlacementContext ctx = PlacementContext.of(
             mc.world, task.pos(), task.desiredState(), mc.player, strict, checkLos, maxReach
         );
-        PlacementOption option = ResolverRegistry.resolve(ctx);
-        if (option == null || option.hitVec() == null) return null;
+        List<PlacementOption> all = ResolverRegistry.get(ctx.targetState()).resolveAll(ctx);
 
-        Vec3d hitVec = option.hitVec();
-        float yaw = (float) Rotations.getYaw(hitVec);
-        float pitch = (float) Rotations.getPitch(hitVec);
+        PlacementOption best = null;
+        ActionPlan.SneakPolicy bestSneak = null;
 
-        BlockPos interactPos = option.getInteractPos(task.pos());
-        boolean selfPlacement = interactPos.equals(task.pos());
+        for (PlacementOption opt : all) {
+            if (opt.hitVec() == null) continue;
 
-        // 潜行策略：
-        // 1. 邻居是交互类方块（箱子等）→ 潜行绕过交互
-        // 2. 邻居是可含水方块（台阶/楼梯等）→ 潜行防止水被吸收进邻居
-        var interactState = mc.world.getBlockState(interactPos);
-        ActionPlan.SneakPolicy sneakPolicy = BlockUtilHelper.determineSneakPolicy(interactState);
-        if (sneakPolicy == ActionPlan.SneakPolicy.KEEP_CURRENT
-            && !selfPlacement
-            && interactState.contains(Properties.WATERLOGGED)
-            && !interactState.get(Properties.WATERLOGGED)) {
-            sneakPolicy = ActionPlan.SneakPolicy.REQUIRE_SNEAK;
+            BlockPos interactPos = opt.getInteractPos(task.pos());
+            boolean self = interactPos.equals(task.pos());
+
+            // 核心过滤：邻居方块如果会吞掉桶（FluidFillable 且当前可接收该流体），拒绝
+            if (!self) {
+                BlockState interactState = mc.world.getBlockState(interactPos);
+                if (wouldConsumeFluid(interactState, interactPos, mc, fluid)) continue;
+            }
+
+            // sneak 策略：仅对有 GUI/onUse 交互的方块潜行
+            BlockState interactState = mc.world.getBlockState(opt.getInteractPos(task.pos()));
+            ActionPlan.SneakPolicy sneak = BlockUtilHelper.determineSneakPolicy(interactState);
+
+            // 选优：不需要 sneak 的优先
+            if (best == null || (bestSneak == ActionPlan.SneakPolicy.REQUIRE_SNEAK
+                && sneak == ActionPlan.SneakPolicy.KEEP_CURRENT)) {
+                best = opt;
+                bestSneak = sneak;
+            }
         }
+
+        if (best == null) return null;
+
+        Vec3d hitVec = best.hitVec();
+        BlockPos interactPos = best.getInteractPos(task.pos());
+        boolean selfPlacement = interactPos.equals(task.pos());
 
         return new ActionPlan.UseItemOnBlock(
             task.pos(),
             task.desiredState(),
             new ActionPlan.Interaction(
                 interactPos,
-                option.getClickedFace(),
+                best.getClickedFace(),
                 hitVec,
-                yaw,
-                pitch,
+                (float) Rotations.getYaw(hitVec),
+                (float) Rotations.getPitch(hitVec),
                 selfPlacement
             ),
             bucket,
-            sneakPolicy,
+            bestSneak,
             ActionPlan.HandPolicy.ANY_HAND_WITH_ITEM,
             state -> !(state.getBlock() == desired
                 && state.contains(FluidBlock.LEVEL)
                 && state.get(FluidBlock.LEVEL) == 0)
         );
+    }
+
+    /**
+     * 该方块是否会消费桶中的流体（而非让流体释放到 targetPos 去）。
+     * <p>判据：方块实现 {@link FluidFillable} 且 {@code canFillWithFluid} 返回 true。
+     */
+    private static boolean wouldConsumeFluid(BlockState state, BlockPos pos, MinecraftClient mc, Fluid fluid) {
+        Block block = state.getBlock();
+        return block instanceof FluidFillable fillable
+            && fillable.canFillWithFluid(mc.player, mc.world, pos, state, fluid);
     }
 
     private static Item getBucket(Block fluidBlock) {
