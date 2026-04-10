@@ -1,10 +1,9 @@
 package meteordevelopment.meteorclient.utils.printer.behavior;
 
-import meteordevelopment.meteorclient.utils.printer.*;
-
+import net.minecraft.block.Block;
 import net.minecraft.block.RepeaterBlock;
-import net.minecraft.client.MinecraftClient;
 import net.minecraft.state.property.Properties;
+import net.minecraft.state.property.Property;
 
 /**
  * RepeaterDelayBehavior - 中继器延迟修正行为
@@ -23,53 +22,14 @@ import net.minecraft.state.property.Properties;
  * - POWERED: 运行时属性，忽略
  * - LOCKED:  运行时属性，忽略
  */
-public class RepeaterDelayBehavior implements PrinterBehavior {
+public class RepeaterDelayBehavior extends PropertyToggleBehavior {
 
-    @Override
-    public Group group() {
-        return Group.REDSTONE;
-    }
+    @Override public Group group() { return Group.REDSTONE; }
+    @Override public Key key() { return Key.REPEATER_DELAY; }
 
-    @Override
-    public Key key() {
-        return Key.REPEATER_DELAY;
-    }
+    @Override protected boolean isTargetBlock(Block b) { return b instanceof RepeaterBlock; }
+    @Override protected Property<?> targetProperty() { return Properties.DELAY; }
 
-    @Override
-    public boolean supports(PrinterTask task) {
-        if (!(task.desiredState().getBlock() instanceof RepeaterBlock)) return false;
-        if (!(task.currentState().getBlock() instanceof RepeaterBlock)) return false;
-
-        // 朝向必须一致
-        if (!BlockUtilHelper.propertiesMatch(task, Properties.HORIZONTAL_FACING)) return false;
-
-        // DELAY 必须不一致
-        return !BlockUtilHelper.propertiesMatch(task, Properties.DELAY);
-    }
-
-    @Override
-    public boolean isSatisfied(PrinterTask task) {
-        if (!(task.currentState().getBlock() instanceof RepeaterBlock)) return false;
-        return BlockUtilHelper.propertiesMatch(task, Properties.DELAY);
-    }
-
-    @Override
-    public ActionPlan plan(PrinterTask task, MinecraftClient mc, boolean strict, boolean checkLos, double maxReach) {
-        ActionPlan.Interaction interaction = InteractionPlanner.planSelfInteraction(
-            mc, task.pos(), strict, checkLos, maxReach);
-        if (interaction == null) return null;
-
-        int desiredDelay = task.desiredState().get(Properties.DELAY);
-
-        return new ActionPlan.UseBlock(
-            task.pos(),
-            task.desiredState(),
-            interaction,
-            null,
-            ActionPlan.SneakPolicy.REQUIRE_NOT_SNEAK,
-            ActionPlan.HandPolicy.PREFER_MAIN_NO_SWITCH,
-            state -> state.contains(Properties.DELAY)
-                && !state.get(Properties.DELAY).equals(desiredDelay)
-        );
-    }
+    private static final Property<?>[] INVARIANTS = { Properties.HORIZONTAL_FACING };
+    @Override protected Property<?>[] invariantProperties() { return INVARIANTS; }
 }

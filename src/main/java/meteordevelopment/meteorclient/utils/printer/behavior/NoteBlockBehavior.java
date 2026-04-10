@@ -1,11 +1,12 @@
 package meteordevelopment.meteorclient.utils.printer.behavior;
 
-import meteordevelopment.meteorclient.utils.printer.*;
+import meteordevelopment.meteorclient.utils.printer.PrinterTask;
 
+import net.minecraft.block.Block;
 import net.minecraft.block.NoteBlock;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.state.property.Properties;
-import net.minecraft.util.math.BlockPos;
+import net.minecraft.state.property.Property;
 
 /**
  * NoteBlockBehavior - 音符盒音高修正行为
@@ -26,54 +27,17 @@ import net.minecraft.util.math.BlockPos;
  * - INSTRUMENT: 由下方方块决定，运行时属性，忽略
  * - POWERED:    红石信号，运行时属性，忽略
  */
-public class NoteBlockBehavior implements PrinterBehavior {
+public class NoteBlockBehavior extends PropertyToggleBehavior {
 
+    @Override public Group group() { return Group.REDSTONE; }
+    @Override public Key key() { return Key.NOTE_BLOCK_NOTE; }
+
+    @Override protected boolean isTargetBlock(Block b) { return b instanceof NoteBlock; }
+    @Override protected Property<?> targetProperty() { return Properties.NOTE; }
+
+    // 音符盒上方有实体方块时右键无法改变音高（Minecraft 硬编码行为）
     @Override
-    public Group group() {
-        return Group.REDSTONE;
-    }
-
-    @Override
-    public Key key() {
-        return Key.NOTE_BLOCK_NOTE;
-    }
-
-    @Override
-    public boolean supports(PrinterTask task) {
-        if (!(task.desiredState().getBlock() instanceof NoteBlock)) return false;
-        if (!(task.currentState().getBlock() instanceof NoteBlock)) return false;
-
-        // NOTE 必须不一致
-        return !BlockUtilHelper.propertiesMatch(task, Properties.NOTE);
-    }
-
-    @Override
-    public boolean isSatisfied(PrinterTask task) {
-        if (!(task.currentState().getBlock() instanceof NoteBlock)) return false;
-        return BlockUtilHelper.propertiesMatch(task, Properties.NOTE);
-    }
-
-    @Override
-    public ActionPlan plan(PrinterTask task, MinecraftClient mc, boolean strict, boolean checkLos, double maxReach) {
-        // 音符盒上方有实体方块时右键无法改变音高（Minecraft 硬编码行为）
-        BlockPos above = task.pos().up();
-        if (!mc.world.getBlockState(above).isAir()) return null;
-
-        ActionPlan.Interaction interaction = InteractionPlanner.planSelfInteraction(
-            mc, task.pos(), strict, checkLos, maxReach);
-        if (interaction == null) return null;
-
-        int desiredNote = task.desiredState().get(Properties.NOTE);
-
-        return new ActionPlan.UseBlock(
-            task.pos(),
-            task.desiredState(),
-            interaction,
-            null,
-            ActionPlan.SneakPolicy.REQUIRE_NOT_SNEAK,
-            ActionPlan.HandPolicy.PREFER_MAIN_NO_SWITCH,
-            state -> state.contains(Properties.NOTE)
-                && !state.get(Properties.NOTE).equals(desiredNote)
-        );
+    protected boolean canInteract(PrinterTask task, MinecraftClient mc) {
+        return mc.world.getBlockState(task.pos().up()).isAir();
     }
 }

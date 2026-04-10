@@ -1,11 +1,9 @@
 package meteordevelopment.meteorclient.utils.printer.behavior;
 
-import meteordevelopment.meteorclient.utils.printer.*;
-
+import net.minecraft.block.Block;
 import net.minecraft.block.ComparatorBlock;
-import net.minecraft.block.enums.ComparatorMode;
-import net.minecraft.client.MinecraftClient;
 import net.minecraft.state.property.Properties;
+import net.minecraft.state.property.Property;
 
 /**
  * ComparatorModeBehavior - 比较器模式修正行为
@@ -18,53 +16,14 @@ import net.minecraft.state.property.Properties;
  * - HORIZONTAL_FACING: 不可在位修改（必须方向一致才处理）
  * - POWERED: 运行时属性，忽略
  */
-public class ComparatorModeBehavior implements PrinterBehavior {
+public class ComparatorModeBehavior extends PropertyToggleBehavior {
 
-    @Override
-    public Group group() {
-        return Group.REDSTONE;
-    }
+    @Override public Group group() { return Group.REDSTONE; }
+    @Override public Key key() { return Key.COMPARATOR_MODE; }
 
-    @Override
-    public Key key() {
-        return Key.COMPARATOR_MODE;
-    }
+    @Override protected boolean isTargetBlock(Block b) { return b instanceof ComparatorBlock; }
+    @Override protected Property<?> targetProperty() { return Properties.COMPARATOR_MODE; }
 
-    @Override
-    public boolean supports(PrinterTask task) {
-        if (!(task.desiredState().getBlock() instanceof ComparatorBlock)) return false;
-        if (!(task.currentState().getBlock() instanceof ComparatorBlock)) return false;
-
-        // 朝向必须一致
-        if (!BlockUtilHelper.propertiesMatch(task, Properties.HORIZONTAL_FACING)) return false;
-
-        // 模式必须不一致
-        return !BlockUtilHelper.propertiesMatch(task, Properties.COMPARATOR_MODE);
-    }
-
-    @Override
-    public boolean isSatisfied(PrinterTask task) {
-        if (!(task.currentState().getBlock() instanceof ComparatorBlock)) return false;
-        return BlockUtilHelper.propertiesMatch(task, Properties.COMPARATOR_MODE);
-    }
-
-    @Override
-    public ActionPlan plan(PrinterTask task, MinecraftClient mc, boolean strict, boolean checkLos, double maxReach) {
-        ActionPlan.Interaction interaction = InteractionPlanner.planSelfInteraction(
-            mc, task.pos(), strict, checkLos, maxReach);
-        if (interaction == null) return null;
-
-        ComparatorMode desiredMode = task.desiredState().get(Properties.COMPARATOR_MODE);
-
-        return new ActionPlan.UseBlock(
-            task.pos(),
-            task.desiredState(),
-            interaction,
-            null,
-            ActionPlan.SneakPolicy.REQUIRE_NOT_SNEAK,
-            ActionPlan.HandPolicy.PREFER_MAIN_NO_SWITCH,
-            state -> state.contains(Properties.COMPARATOR_MODE)
-                && state.get(Properties.COMPARATOR_MODE) != desiredMode
-        );
-    }
+    private static final Property<?>[] INVARIANTS = { Properties.HORIZONTAL_FACING };
+    @Override protected Property<?>[] invariantProperties() { return INVARIANTS; }
 }

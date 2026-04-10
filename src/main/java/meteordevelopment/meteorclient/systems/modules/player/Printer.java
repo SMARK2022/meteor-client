@@ -363,6 +363,19 @@ public class Printer extends Module {
      */
     private enum SneakReadiness { READY, PREPARING, BLOCKED }
 
+    /**
+     * 选拔结果：明确区分"已就绪"/"等待准备同步"/"无匹配"三态。
+     * 替代原先 ArmedAction + preparingInputThisTick 布尔标记的隐式通信。
+     */
+    private sealed interface SelectionResult {
+        /** 已就绪，plan 和 hand 可直接执行 */
+        record Ready(ArmedAction armed) implements SelectionResult {}
+        /** 本 tick 触发了 sneak/物品切换，等下一 tick 同步后再执行 */
+        record AwaitingPrep() implements SelectionResult {}
+        /** 无匹配候选或全部 BLOCKED */
+        record None() implements SelectionResult {}
+    }
+
     // ==================== 内部状态 ====================
 
     /**
@@ -390,9 +403,6 @@ public class Printer extends Module {
 
     /** 记录当前潜行状态是否由打印机强制触发 */
     private boolean didPrinterForceSneak = false;
-
-    /** 本 tick 是否因某个候选真正进入了 sneak/物品准备态 */
-    private boolean preparingInputThisTick = false;
 
     // 渲染态（与逻辑态分离，确保 hit 点稳定显示 1~2 tick）
     private ActionPlan lastPlan = null;
@@ -436,29 +446,25 @@ public class Printer extends Module {
 
     @Override
     public void onActivate() {
-        tickDelay = 0;
-        tickCounter = 0;
-        tasks.clear();
-        unsupportedTasks.clear();
-        disabledTasks.clear();
-        previewCandidates.clear();
-        preparingInputThisTick = false;
-        pendingUseBlocks.clear();
-        clearArmed();
+        resetState();
     }
 
     @Override
     public void onDeactivate() {
+        resetState();
+        resetSneakState();
+    }
+
+    /** 初始化/重置所有内部状态（activate/deactivate 共用） */
+    private void resetState() {
         tickDelay = 0;
         tickCounter = 0;
         tasks.clear();
         unsupportedTasks.clear();
         disabledTasks.clear();
         previewCandidates.clear();
-        preparingInputThisTick = false;
         pendingUseBlocks.clear();
         clearArmed();
-        resetSneakState();
     }
 
     /**
@@ -525,9 +531,11 @@ public class Printer extends Module {
 
     /** 每 tick 衰减渲染态倒计时，归零后清空，避免残影 */
     private void tickRenderState() {
-        if (lastHitVecTicks > 0 && --lastHitVecTicks <= 0) {
-            lastPlan = null;
-            lastHitVec = null;
+        if (lastHitVecTicks > 0) {
+            if (--lastHitVecTicks == 0) {
+                lastPlan = null;
+                lastHitVec = null;
+            }
         }
     }
 
@@ -591,15 +599,12 @@ public class Printer extends Module {
         // 构建预览候选：纯函数式，无副作用
         buildPreviewCandidates();
 
-        // 重置本 tick 的准备态标记
-        preparingInputThisTick = false;
-
-        // 尝试为最佳候选生成动作计划（副作用仅作用于最终选中的那一个）
-        armed = selectAndPrepare();
-
-        // 如果本 tick 既没有 armed、也没有进入准备态，释放潜行
-        if (armed == null && !preparingInputThisTick) {
-            resetSneakState();
+        // 选拔最优候选并执行必要准备（物品切换 / sneak）
+        SelectionResult result = selectAndPrepare();
+        switch (result) {
+            case SelectionResult.Ready r -> armed = r.armed();
+            case SelectionResult.AwaitingPrep ignored -> {} // 等下一 tick 同步
+            case SelectionResult.None ignored -> resetSneakState();
         }
 
         if (armed != null) {
@@ -613,6 +618,18 @@ public class Printer extends Module {
             }
         }
     }
+
+    // ==================== 候选评分权重 ====================
+    // 综合评分 = dist² × W_DIST + yawDelta × W_YAW + sneakCost + itemSwitchCost + reachEdgeCost
+    // 越低越优先。调参时只需修改此处常量。
+
+    private static final double W_DISTANCE        = 1.0;   // 距离（平方）权重
+    private static final double W_YAW_DELTA       = 0.08;  // 视角偏转惩罚
+    private static final double COST_SNEAK        = 1.5;   // 需要潜行的额外成本
+    private static final double COST_UNSNEAK      = 0.3;   // 需要取消潜行的微小成本
+    private static final double COST_ITEM_SWITCH  = 1.0;   // 需要切换物品的额外成本
+    private static final double COST_REACH_EDGE   = 1.2;   // 接近 reach 上限的风险成本
+    private static final double REACH_EDGE_RATIO  = 0.85;  // 超过 maxReach 此比例视为边界
 
     /**
      * 构建预览候选列表（纯函数式，无任何副作用）
@@ -665,8 +682,8 @@ public class Printer extends Module {
             // sneak / 物品切换成本
             double sneakCost = switch (plan.sneakPolicy()) {
                 case KEEP_CURRENT -> 0.0;
-                case REQUIRE_SNEAK -> 1.5;
-                case REQUIRE_NOT_SNEAK -> 0.3;
+                case REQUIRE_SNEAK -> COST_SNEAK;
+                case REQUIRE_NOT_SNEAK -> COST_UNSNEAK;
             };
 
             boolean needsItemSwitch = plan.requiredItem() != null
@@ -676,14 +693,14 @@ public class Printer extends Module {
 
             // reach 边界风险
             double reachDist = eyePos.distanceTo(hitVec);
-            boolean nearReachEdge = reachDist > maxReach * 0.85;
+            boolean nearReachEdge = reachDist > maxReach * REACH_EDGE_RATIO;
 
             // 综合评分 (越低越好)
-            double score = dist2 * 1.0
-                + yawDelta * 0.08
+            double score = dist2 * W_DISTANCE
+                + yawDelta * W_YAW_DELTA
                 + sneakCost
-                + (needsItemSwitch ? 1.0 : 0.0)
-                + (nearReachEdge ? 1.2 : 0.0);
+                + (needsItemSwitch ? COST_ITEM_SWITCH : 0.0)
+                + (nearReachEdge ? COST_REACH_EDGE : 0.0);
 
             previewCandidates.add(new PreviewCandidate(pt, plan, score));
         }
@@ -702,13 +719,15 @@ public class Printer extends Module {
      *
      * <p>副作用（切物品、切 sneak）仅作用于最终选中的那一个候选，
      * 不再在遍历途中对多个候选产生泄漏。
+     *
+     * @return Ready / AwaitingPrep / None 三态结果
      */
-    private ArmedAction selectAndPrepare() {
+    private SelectionResult selectAndPrepare() {
         // Phase 1: 找已就绪的候选（无副作用）
         for (PreviewCandidate c : previewCandidates) {
             Hand hand = getReadyHand(c.plan);
             if (hand != null && isSneakStateOk(c.plan.sneakPolicy())) {
-                return new ArmedAction(c.plan, hand);
+                return new SelectionResult.Ready(new ArmedAction(c.plan, hand));
             }
         }
 
@@ -718,15 +737,16 @@ public class Printer extends Module {
             if (hand == null) continue;
 
             SneakReadiness sr = prepareSneakState(c.plan.sneakPolicy());
-            if (sr == SneakReadiness.READY) return new ArmedAction(c.plan, hand);
+            if (sr == SneakReadiness.READY) {
+                return new SelectionResult.Ready(new ArmedAction(c.plan, hand));
+            }
             if (sr == SneakReadiness.PREPARING) {
-                preparingInputThisTick = true;
-                return null; // 等下一 tick 同步
+                return new SelectionResult.AwaitingPrep();
             }
             // BLOCKED: 用户手动潜行，跳过这个候选，尝试下一个
         }
 
-        return null;
+        return new SelectionResult.None();
     }
 
     // ==================== 手部与潜行就绪检查 ====================

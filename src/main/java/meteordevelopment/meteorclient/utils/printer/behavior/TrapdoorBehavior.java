@@ -1,11 +1,10 @@
 package meteordevelopment.meteorclient.utils.printer.behavior;
 
-import meteordevelopment.meteorclient.utils.printer.*;
-
+import net.minecraft.block.Block;
 import net.minecraft.block.Blocks;
 import net.minecraft.block.TrapdoorBlock;
-import net.minecraft.client.MinecraftClient;
 import net.minecraft.state.property.Properties;
+import net.minecraft.state.property.Property;
 
 /**
  * TrapdoorBehavior - 活板门开关状态修正
@@ -20,57 +19,17 @@ import net.minecraft.state.property.Properties;
  * - WATERLOGGED: 由环境决定，忽略
  * - POWERED:     运行时属性，忽略
  */
-public class TrapdoorBehavior implements PrinterBehavior {
+public class TrapdoorBehavior extends PropertyToggleBehavior {
 
-    @Override
-    public Group group() {
-        return Group.INTERACTABLE;
-    }
+    @Override public Group group() { return Group.INTERACTABLE; }
+    @Override public Key key() { return Key.TRAPDOOR_OPEN; }
 
-    @Override
-    public Key key() {
-        return Key.TRAPDOOR_OPEN;
-    }
+    @Override protected boolean isTargetBlock(Block b) { return b instanceof TrapdoorBlock; }
+    @Override protected Property<?> targetProperty() { return Properties.OPEN; }
 
-    @Override
-    public boolean supports(PrinterTask task) {
-        if (!(task.desiredState().getBlock() instanceof TrapdoorBlock)) return false;
-        if (!(task.currentState().getBlock() instanceof TrapdoorBlock)) return false;
+    // 铁活板门不可手动切换
+    @Override protected boolean isExcluded(Block b) { return b == Blocks.IRON_TRAPDOOR; }
 
-        // 铁活板门不可手动切换
-        if (task.currentState().getBlock() == Blocks.IRON_TRAPDOOR) return false;
-
-        // 朝向和半部必须一致
-        if (!BlockUtilHelper.propertiesMatch(task, Properties.HORIZONTAL_FACING)) return false;
-        if (!BlockUtilHelper.propertiesMatch(task, Properties.BLOCK_HALF)) return false;
-
-        // OPEN 必须不一致
-        return !BlockUtilHelper.propertiesMatch(task, Properties.OPEN);
-    }
-
-    @Override
-    public boolean isSatisfied(PrinterTask task) {
-        if (!(task.currentState().getBlock() instanceof TrapdoorBlock)) return false;
-        return BlockUtilHelper.propertiesMatch(task, Properties.OPEN);
-    }
-
-    @Override
-    public ActionPlan plan(PrinterTask task, MinecraftClient mc, boolean strict, boolean checkLos, double maxReach) {
-        ActionPlan.Interaction interaction = InteractionPlanner.planSelfInteraction(
-            mc, task.pos(), strict, checkLos, maxReach);
-        if (interaction == null) return null;
-
-        boolean desiredOpen = task.desiredState().get(Properties.OPEN);
-
-        return new ActionPlan.UseBlock(
-            task.pos(),
-            task.desiredState(),
-            interaction,
-            null,
-            ActionPlan.SneakPolicy.REQUIRE_NOT_SNEAK,
-            ActionPlan.HandPolicy.PREFER_MAIN_NO_SWITCH,
-            state -> state.contains(Properties.OPEN) && state.get(Properties.OPEN) != desiredOpen
-        );
-    }
-
+    private static final Property<?>[] INVARIANTS = { Properties.HORIZONTAL_FACING, Properties.BLOCK_HALF };
+    @Override protected Property<?>[] invariantProperties() { return INVARIANTS; }
 }
