@@ -19,33 +19,44 @@ import fi.dy.masa.litematica.world.SchematicWorldHandler;
 import fi.dy.masa.litematica.world.WorldSchematic;
 import meteordevelopment.meteorclient.renderer.GL;
 import meteordevelopment.meteorclient.events.entity.player.SendMovementPacketsEvent;
+import meteordevelopment.meteorclient.events.packets.InventoryEvent;
+import meteordevelopment.meteorclient.events.render.Render2DEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
+import meteordevelopment.meteorclient.gui.GuiThemes;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.utils.misc.Keybind;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
+import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.ItemSwitchHelper;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
+import meteordevelopment.meteorclient.utils.render.RenderUtils;
 import meteordevelopment.meteorclient.utils.printer.ActionPlan;
 import meteordevelopment.meteorclient.utils.printer.ActionPlan.SneakPolicy;
 import meteordevelopment.meteorclient.utils.printer.ActionPlan.HandPolicy;
 import meteordevelopment.meteorclient.utils.printer.BlockUtilHelper;
+import meteordevelopment.meteorclient.utils.printer.ContainerFillManager;
 import meteordevelopment.meteorclient.utils.printer.PrinterBehavior;
 import meteordevelopment.meteorclient.utils.printer.PrinterTask;
 import meteordevelopment.meteorclient.utils.printer.behavior.*;
+import meteordevelopment.meteorclient.utils.printer.ContainerFillScreen;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.*;
+import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.enums.SlabType;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.ExperienceOrbEntity;
+import net.minecraft.inventory.Inventory;
+import net.minecraft.item.Item;
+import net.minecraft.item.ItemStack;
 import net.minecraft.entity.decoration.ArmorStandEntity;
 import net.minecraft.entity.decoration.EndCrystalEntity;
 import net.minecraft.entity.decoration.ItemFrameEntity;
-import net.minecraft.item.Item;
 import net.minecraft.network.packet.c2s.play.HandSwingC2SPacket;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
@@ -265,6 +276,13 @@ public class Printer extends Module {
             .visible(breakMismatched::get)
             .build());
 
+    // ── 容器物品填充 ──
+    private final Setting<Boolean> fillContainers = sgBehavior.add(new BoolSetting.Builder()
+            .name("fill-containers")
+            .description("Automatically fill container contents (dispenser / dropper / hopper / barrel) to match schematic. Opens container, transfers items via shift-click, then closes. Grim-safe.")
+            .defaultValue(false)
+            .build());
+
     // Key → sub-toggle mapping (populated in constructor)
     private final Map<PrinterBehavior.Key, Setting<Boolean>> subToggles = new EnumMap<>(PrinterBehavior.Key.class);
 
@@ -349,6 +367,53 @@ public class Printer extends Module {
             .visible(renderUnsupported::get)
             .build());
 
+    // ── 容器填充显示 ──
+
+    private final Setting<Boolean> containerHighlight = sgRender.add(new BoolSetting.Builder()
+            .name("container-highlight")
+            .description("Highlight unsatisfied schematic containers in the world.")
+            .defaultValue(true)
+            .visible(fillContainers::get)
+            .build());
+
+    private final Setting<SettingColor> containerSideColor = sgRender.add(new ColorSetting.Builder()
+            .name("container-side-color")
+            .description("The side color of unsatisfied container highlights.")
+            .defaultValue(new SettingColor(255, 100, 50, 40))
+            .visible(() -> fillContainers.get() && containerHighlight.get())
+            .build());
+
+    private final Setting<SettingColor> containerLineColor = sgRender.add(new ColorSetting.Builder()
+            .name("container-line-color")
+            .description("The line color of unsatisfied container highlights.")
+            .defaultValue(new SettingColor(255, 100, 50, 200))
+            .visible(() -> fillContainers.get() && containerHighlight.get())
+            .build());
+
+    private final Setting<Boolean> containerOverlay = sgRender.add(new BoolSetting.Builder()
+            .name("container-overlay")
+            .description("Show on-screen HUD overlay with container type counts and item needs.")
+            .defaultValue(true)
+            .visible(fillContainers::get)
+            .build());
+
+    private final Setting<Integer> containerInfoRange = sgRender.add(new IntSetting.Builder()
+            .name("container-info-range")
+            .description("Range for the container detail screen (blocks).")
+            .defaultValue(64)
+            .min(8)
+            .sliderRange(8, 128)
+            .visible(fillContainers::get)
+            .build());
+
+    private final Setting<Keybind> containerScreenKey = sgRender.add(new KeybindSetting.Builder()
+            .name("container-details-key")
+            .description("Press to open a detailed container fill status screen.")
+            .defaultValue(Keybind.none())
+            .visible(fillContainers::get)
+            .action(this::openContainerFillScreen)
+            .build());
+
     // ==================== 动作计划快照 ====================
 
     /**
@@ -419,6 +484,9 @@ public class Printer extends Module {
     /** 全局 tick 计数器（用于 pendingUseBlocks 超时） */
     private int tickCounter;
 
+    /** 容器物品填充子系统（多 tick 有状态，独立于标准行为管线） */
+    private final ContainerFillManager containerFillManager = new ContainerFillManager();
+
     /**
      * UseBlock 执行后等待服务端确认的方块集合。
      *
@@ -450,6 +518,7 @@ public class Printer extends Module {
         subToggles.put(PrinterBehavior.Key.LEVER_POWERED, fixLever);
         subToggles.put(PrinterBehavior.Key.CAMPFIRE_LIT, fixCampfire);
         subToggles.put(PrinterBehavior.Key.NOTE_BLOCK_NOTE, fixNoteBlock);
+        subToggles.put(PrinterBehavior.Key.CONTAINER_FILL, fillContainers);
     }
 
     @Override
@@ -473,6 +542,7 @@ public class Printer extends Module {
         previewCandidates.clear();
         pendingUseBlocks.clear();
         clearArmed();
+        containerFillManager.reset();
     }
 
     /**
@@ -500,6 +570,7 @@ public class Printer extends Module {
             case INTERACTABLE -> fixInteractable.get();
             case FLUID        -> placeFluid.get();
             case BREAK        -> breakMismatched.get();
+            case CONTAINER    -> fillContainers.get();
         };
         if (!groupEnabled) return false;
 
@@ -624,6 +695,14 @@ public class Printer extends Module {
                 ActionPlan.Interaction inter = armed.plan().interaction();
                 Rotations.requestPreMovement(inter.yaw(), inter.pitch(), 50, null);
             }
+        }
+
+        // ── 容器物品填充子系统 ──
+        // 仅在标准管线未 arm 动作、且容器填充已启用时运行。
+        // 容器填充正在进行时（isBusy），标准管线在下一 tick 的 armed != null 检查中不会被跳过，
+        // 而是通过 containerFillManager.isBusy() 在此处阻断。
+        if (armed == null && fillContainers.get()) {
+            containerFillManager.tick(tickCounter, placeRange.get());
         }
     }
 
@@ -859,6 +938,16 @@ public class Printer extends Module {
     }
 
     /**
+     * 容器内容同步事件：服务端发送 WINDOW_ITEMS 时，转发给 ContainerFillManager 执行填充操作。
+     */
+    @EventHandler
+    private void onInventorySync(InventoryEvent event) {
+        if (fillContainers.get() && containerFillManager.isBusy()) {
+            containerFillManager.onInventorySync(event);
+        }
+    }
+
+    /**
      * 验证动作计划在执行时是否仍然有效
      * 使用当前 eyePos 重新验证几何条件，防止 movement 后 plan 过期
      */
@@ -1035,6 +1124,11 @@ public class Printer extends Module {
 
         List<BlockPos> sphere = getSphere(preSelectionRange, playerPos);
 
+        // 容器填充扫描：标记本 tick 开始
+        if (fillContainers.get()) {
+            containerFillManager.beginScan();
+        }
+
         for (BlockPos pos : sphere) {
             if (!DataManager.getRenderLayerRange().isPositionWithinRange(pos)) continue;
 
@@ -1051,8 +1145,14 @@ public class Printer extends Module {
                 // 走 behavior pipeline（BlockBreakBehavior 捕获）
             }
 
-            // 完全一致，跳过
-            if (requiredState == currentState) continue;
+            // 完全一致，跳过（但仍需检查容器内容）
+            if (requiredState == currentState) {
+                // 容器内容填充：方块状态一致时，检查蓝图容器是否有物品需要填入
+                if (fillContainers.get()) {
+                    scanSchematicContainer(worldSchematic, pos);
+                }
+                continue;
+            }
 
             // 泥土混淆等价：dirt ↔ grass_block 视为相同，无需修正
             if (tolerateDirt.get() && isDirtGrassEquivalent(requiredState, currentState)) continue;
@@ -1105,6 +1205,35 @@ public class Printer extends Module {
         tasks.sort(Comparator.comparingDouble(
             pt -> eyePos.squaredDistanceTo(
                 pt.task().pos().getX() + 0.5, pt.task().pos().getY() + 0.5, pt.task().pos().getZ() + 0.5)));
+
+        // 容器填充扫描：清理不再存在于蓝图扫描范围内的过期条目
+        if (fillContainers.get()) {
+            containerFillManager.pruneStaleEntries();
+        }
+    }
+
+    /**
+     * 扫描蓝图容器的物品内容并注册到 ContainerFillManager。
+     * <p>在 updateTasks 循环中，对每个方块状态一致的位置调用。
+     * 仅处理 MVP 支持的简单容器（发射器/投掷器/漏斗/木桶）。
+     */
+    private void scanSchematicContainer(WorldSchematic worldSchematic, BlockPos pos) {
+        BlockEntity be = worldSchematic.getBlockEntity(pos);
+        if (!ContainerFillManager.isSupportedContainer(be)) return;
+
+        Inventory inv = (Inventory) be;
+        List<ItemStack> items = new ArrayList<>();
+        boolean hasContent = false;
+
+        for (int i = 0; i < inv.size(); i++) {
+            ItemStack stack = inv.getStack(i);
+            items.add(stack.copy());
+            if (!stack.isEmpty()) hasContent = true;
+        }
+
+        if (hasContent) {
+            containerFillManager.registerSchematicContainer(pos.toImmutable(), items);
+        }
     }
 
     /**
@@ -1276,6 +1405,13 @@ public class Printer extends Module {
         if (renderHitVec.get() && lastHitVec != null && lastHitVecTicks > 0) {
             renderHitVecCube(event);
         }
+
+        // 容器高亮：未满足的蓝图容器（橙红色半透明高亮）
+        if (fillContainers.get() && containerHighlight.get()) {
+            for (BlockPos pos : containerFillManager.getUnsatisfiedPositions()) {
+                event.renderer.box(pos, containerSideColor.get(), containerLineColor.get(), shapeMode.get(), 0);
+            }
+        }
     }
 
     /**
@@ -1299,6 +1435,93 @@ public class Printer extends Module {
         GL.enableDepth();
     }
 
+    // ==================== 容器填充 HUD 覆盖层 ====================
+
+    /**
+     * 在屏幕左上角渲染容器填充状态覆盖层。
+     * <p>包含两部分：
+     * <ol>
+     *   <li>每种容器类型的 icon + 已满足/总计 数量</li>
+     *   <li>所有未满足容器中缺失物品的 icon + 持有/需要 数量</li>
+     * </ol>
+     */
+    @EventHandler
+    private void onRender2D(Render2DEvent event) {
+        if (!isActive() || !fillContainers.get() || !containerOverlay.get()) return;
+        if (containerFillManager.getSchematicContainerCount() == 0) return;
+
+        net.minecraft.client.gui.DrawContext ctx = event.drawContext;
+        net.minecraft.client.font.TextRenderer textRenderer = mc.textRenderer;
+
+        int startX = 6;
+        int startY = 6;
+        int rowH = 18;
+        int iconSize = 16;
+        int curY = startY;
+
+        // ── 标题 ──
+        int totalContainers = containerFillManager.getSchematicContainerCount();
+        int satisfiedContainers = containerFillManager.getSatisfiedCount();
+        String title = "Containers: " + satisfiedContainers + "/" + totalContainers;
+        int titleColor = satisfiedContainers == totalContainers ? 0xFF55FF55 : 0xFFFFAA00;
+
+        // 背景
+        Map<Item, int[]> typeSummaries = containerFillManager.getTypeSummaries();
+        Map<Item, Integer> itemNeeds = containerFillManager.getAllUnsatisfiedItemNeeds();
+        int totalRows = 1 + typeSummaries.size() + (itemNeeds.isEmpty() ? 0 : 1 + itemNeeds.size());
+        int bgHeight = totalRows * rowH + 8;
+        int bgWidth = 140;
+        ctx.fill(startX - 3, startY - 3, startX + bgWidth, startY + bgHeight, 0x90000000);
+
+        ctx.drawText(textRenderer, title, startX, curY + 4, titleColor, true);
+        curY += rowH;
+
+        // ── 容器类型行 ──
+        for (var entry : typeSummaries.entrySet()) {
+            Item icon = entry.getKey();
+            int[] counts = entry.getValue();
+            ItemStack iconStack = new ItemStack(icon);
+
+            RenderUtils.drawItem(ctx, iconStack, startX, curY, 1.0f, false);
+
+            String label = counts[0] + "/" + counts[1];
+            int labelColor = counts[0] == counts[1] ? 0xFF55FF55 : 0xFFFF5555;
+            ctx.drawText(textRenderer, label, startX + iconSize + 4, curY + 4, labelColor, true);
+            curY += rowH;
+        }
+
+        // ── 物品需求行 ──
+        if (!itemNeeds.isEmpty()) {
+            ctx.drawText(textRenderer, "§7─── Items ───", startX, curY + 4, 0xFF999999, true);
+            curY += rowH;
+
+            for (var entry : itemNeeds.entrySet()) {
+                Item item = entry.getKey();
+                int need = entry.getValue();
+                ItemStack iconStack = new ItemStack(item);
+
+                RenderUtils.drawItem(ctx, iconStack, startX, curY, 1.0f, false);
+
+                // 玩家背包中持有量
+                FindItemResult findResult = InvUtils.find(item);
+                int have = findResult.found() ? findResult.count() : 0;
+
+                String label = have + "/" + need;
+                int labelColor = have >= need ? 0xFF55FF55 : 0xFFFFAA00;
+                ctx.drawText(textRenderer, label, startX + iconSize + 4, curY + 4, labelColor, true);
+                curY += rowH;
+            }
+        }
+    }
+
+    /**
+     * 打开容器填充详情屏幕。由 containerScreenKey 快捷键触发。
+     */
+    private void openContainerFillScreen() {
+        if (!isActive() || !fillContainers.get()) return;
+        mc.setScreen(new ContainerFillScreen(GuiThemes.get(), containerFillManager, containerInfoRange.get()));
+    }
+
     @Override
     public String getInfoString() {
         int preview = previewCandidates.size();
@@ -1311,6 +1534,11 @@ public class Printer extends Module {
         if (disabled > 0) sb.append(" ~").append(disabled);
         if (unsupported > 0) sb.append(" !").append(unsupported);
         if (armed != null) sb.append(")");
+        // 容器填充状态
+        if (fillContainers.get() && containerFillManager.getSchematicContainerCount() > 0) {
+            sb.append(" C:").append(containerFillManager.getSatisfiedCount())
+              .append("/").append(containerFillManager.getSchematicContainerCount());
+        }
         return sb.toString();
     }
 

@@ -34,6 +34,8 @@ public interface PrinterBehavior {
         FLUID,
         /** 破坏不匹配方块（委托 PacketMine） */
         BREAK,
+        /** 容器物品填充（多 tick 有状态，独立子系统） */
+        CONTAINER,
         /** 通用方块放置（fallback，始终启用） */
         PLACEMENT
     }
@@ -53,6 +55,7 @@ public interface PrinterBehavior {
         DAYLIGHT_DETECTOR("fix-daylight-detector", "Fix daylight detector inverted state."),
         NOTE_BLOCK_NOTE("fix-note-block", "Fix note block note value."),
         CAMPFIRE_LIT("fix-campfire-lit", "Fix campfire lit state."),
+        CONTAINER_FILL("fill-containers", "Fill container contents to match schematic."),
         FLUID_SOURCE("place-fluid-source", "Place water/lava source blocks from buckets."),
         WATERLOG("fix-waterlog", "Add water to waterloggable blocks."),
         BREAK_MISMATCHED("break-mismatched", "Break blocks that don't match the schematic."),
