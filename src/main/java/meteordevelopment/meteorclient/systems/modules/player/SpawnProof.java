@@ -42,68 +42,72 @@ public class SpawnProof extends Module {
     // ==================== 设置 ====================
 
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
-    private final SettingGroup sgAfk     = settings.createGroup("AFK / 分析");
     private final SettingGroup sgRender  = settings.createGroup("渲染");
 
     private final Setting<Mode> mode = sgGeneral.add(new EnumSetting.Builder<Mode>()
-        .name("mode")
+        .name("模式")
         .description("防刷模式。SLAB = 下半砖 / BUTTON = 按钮 / TORCH = 火把")
         .defaultValue(Mode.SLAB)
         .build());
 
     private final Setting<List<Block>> slabBlock = sgGeneral.add(new BlockListSetting.Builder()
-        .name("slab-block")
+        .name("  半砖方块")
         .description("SLAB 模式使用的半砖方块（取第一个）。")
         .defaultValue(List.of(Blocks.SMOOTH_STONE_SLAB))
         .visible(() -> mode.get() == Mode.SLAB)
         .build());
 
     private final Setting<List<Block>> buttonBlock = sgGeneral.add(new BlockListSetting.Builder()
-        .name("button-block")
+        .name("  按钮方块")
         .description("BUTTON 模式使用的按钮方块（取第一个）。")
         .defaultValue(List.of(Blocks.STONE_BUTTON))
         .visible(() -> mode.get() == Mode.BUTTON)
         .build());
 
     private final Setting<Integer> realtimeRange = sgGeneral.add(new IntSetting.Builder()
-        .name("realtime-range")
-        .description("实时扫描半径。")
+        .name("实时扫描范围")
+        .description("实时扫描半径（方块数）。")
         .defaultValue(6).min(4).sliderRange(4, 12)
         .build());
 
     private final Setting<Integer> scanInterval = sgGeneral.add(new IntSetting.Builder()
-        .name("scan-interval")
+        .name("扫描间隔")
         .description("实时扫描间隔（tick），1 = 每 tick，2 = 每 2 tick。")
         .defaultValue(2).min(1).sliderRange(1, 10)
         .build());
 
-    // ── AFK / 分析 ──
-
-    private final Setting<Integer> cacheRadius = sgAfk.add(new IntSetting.Builder()
-        .name("cache-radius")
-        .description("缓存半径（AFK 中心起算），全域分析的扫描范围。")
+    private final Setting<Integer> cacheRadius = sgGeneral.add(new IntSetting.Builder()
+        .name("缓存半径")
+        .description("AFK 中心起算的全域分析扫描范围。")
         .defaultValue(128).min(16).sliderRange(16, 200)
         .build());
 
     // ── 渲染 ──
 
     private final Setting<Boolean> renderOverlay = sgRender.add(new BoolSetting.Builder()
-        .name("render-overlay")
+        .name("显示渲染")
         .description("显示可刷怪面高亮标记。")
         .defaultValue(true)
         .build());
 
     private final Setting<Integer> maxHighlights = sgRender.add(new IntSetting.Builder()
-        .name("max-highlights")
+        .name("最大标记数")
         .description("同时显示的最大高亮标记数。")
         .defaultValue(25).min(1).sliderRange(1, 100)
         .visible(renderOverlay::get)
         .build());
 
-    private final Setting<SettingColor> markerColor = sgRender.add(new ColorSetting.Builder()
-        .name("marker-color")
+    private final Setting<SettingColor> faceColor = sgRender.add(new ColorSetting.Builder()
+        .name("标记面颜色")
         .description("标记填充色（穿透通道自动取半 alpha）。")
         .defaultValue(new SettingColor(255, 50, 50, 153))
+        .visible(renderOverlay::get)
+        .build());
+
+    private final Setting<SettingColor> lineColor = sgRender.add(new ColorSetting.Builder()
+        .name("标记线颜色")
+        .description("标记边框线颜色（仅正常深度通道绘制）。")
+        .defaultValue(new SettingColor(255, 50, 50, 200))
         .visible(renderOverlay::get)
         .build());
 
@@ -444,15 +448,16 @@ public class SpawnProof extends Module {
 
         renderHighlights = new ArrayList<>(pq);
 
-        SettingColor sc = markerColor.get();
-        ghostColor = new SettingColor(sc.r, sc.g, sc.b, sc.a / 2);
+        SettingColor fc = faceColor.get();
+        ghostColor = new SettingColor(fc.r, fc.g, fc.b, fc.a / 2);
     }
 
     @EventHandler
     private void onRender(Render3DEvent event) {
         if (!renderOverlay.get() || renderHighlights.isEmpty()) return;
 
-        SettingColor sc = markerColor.get();
+        SettingColor fc = faceColor.get();
+        SettingColor lc = lineColor.get();
 
         for (BlockPos pos : renderHighlights) {
             double y = pos.getY() + 0.005;
@@ -460,9 +465,9 @@ public class SpawnProof extends Module {
                 pos.getX() + 0.1, y, pos.getZ() + 0.1,
                 pos.getX() + 0.9, y + 0.01, pos.getZ() + 0.9);
 
-            event.renderer.box(box, sc, sc, ShapeMode.Both, 0);
+            event.renderer.box(box, fc, lc, ShapeMode.Both, 0);
             GL.disableDepth();
-            event.renderer.box(box, ghostColor, ghostColor, ShapeMode.Both, 0);
+            event.renderer.box(box, ghostColor, ghostColor, ShapeMode.Sides, 0);
             GL.enableDepth();
         }
     }
