@@ -56,57 +56,57 @@ import java.util.List;
  */
 public class PacketMine extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
-    private final SettingGroup sgGrimBypass = settings.createGroup("Grim Bypass");
-    private final SettingGroup sgRender = settings.createGroup("Render");
+    private final SettingGroup sgGrim    = settings.createGroup("Grim 合规");
+    private final SettingGroup sgRender  = settings.createGroup("渲染");
 
-    // ======================== General ========================
+    // ── 通用 ──
 
     private final Setting<Boolean> rotateOnStart = sgGeneral.add(new BoolSetting.Builder()
-        .name("rotate-on-start")
-        .description("Send a silent rotation when issuing START_DESTROY.")
+        .name("旋转-开始挖掘")
+        .description("发送 START_DESTROY 时静默旋转朝向目标方块")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<Boolean> rotateOnStop = sgGeneral.add(new BoolSetting.Builder()
-        .name("rotate-on-stop")
-        .description("Send a silent rotation when issuing STOP_DESTROY.")
+        .name("旋转-完成挖掘")
+        .description("发送 STOP_DESTROY 时静默旋转朝向目标方块")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<Boolean> rotateOnAbort = sgGeneral.add(new BoolSetting.Builder()
-        .name("rotate-on-abort")
-        .description("Send a silent rotation when issuing ABORT_DESTROY.")
+        .name("旋转-中止挖掘")
+        .description("中止挖掘时静默旋转朝向目标方块")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<Boolean> autoSwitch = sgGeneral.add(new BoolSetting.Builder()
-        .name("auto-switch")
-        .description("Locally switch to the best tool before START and keep it until finished.")
+        .name("自动切换工具")
+        .description("挖掘前自动切到热栏中的最佳工具，完成后恢复")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<Boolean> notOnUse = sgGeneral.add(new BoolSetting.Builder()
-        .name("not-on-use")
-        .description("Don't auto-switch while using an item.")
+        .name("　使用时跳过")
+        .description("使用物品期间不自动切换工具")
         .defaultValue(true)
         .visible(autoSwitch::get)
         .build()
     );
 
     private final Setting<Boolean> heartbeatSwing = sgGeneral.add(new BoolSetting.Builder()
-        .name("heartbeat-swing")
-        .description("Send HandSwing packets during mining to simulate continuous left-click.")
+        .name("心跳挥手")
+        .description("挖掘期间周期发送挥手包，模拟持续按住左键")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<Integer> heartbeatInterval = sgGeneral.add(new IntSetting.Builder()
-        .name("heartbeat-interval")
-        .description("Ticks between heartbeat swing packets.")
+        .name("　挥手间隔")
+        .description("心跳挥手的 tick 间隔")
         .defaultValue(1)
         .min(1)
         .sliderMax(5)
@@ -115,24 +115,24 @@ public class PacketMine extends Module {
     );
 
     private final Setting<Boolean> strictMargin = sgGeneral.add(new BoolSetting.Builder()
-        .name("strict-margin")
-        .description("Wait one additional tick before STOP for extra safety.")
+        .name("安全余量")
+        .description("发送 STOP 前额外等待一个 tick 增加安全裕度")
         .defaultValue(false)
         .build()
     );
 
-    // ======================== Grim Bypass ========================
+    // ── Grim 合规 ──
 
-    private final Setting<Boolean> grimBypass = sgGrimBypass.add(new BoolSetting.Builder()
-        .name("grim-bypass")
-        .description("Enable Grim-aware delay balance tracking and proactive drain. When off, uses simple 275ms fixed delay.")
+    private final Setting<Boolean> grimBypass = sgGrim.add(new BoolSetting.Builder()
+        .name("启用 Grim 合规")
+        .description("启用 Grim 感知的延迟预算调度。关闭时使用固定 275ms 块间延迟。")
         .defaultValue(true)
         .build()
     );
 
-    private final Setting<Integer> delayBudgetTarget = sgGrimBypass.add(new IntSetting.Builder()
-        .name("delay-budget-target")
-        .description("Maximum allowed Grim-style delay balance (ms). Lower = safer, higher = faster burst. Stable ~700, Edge ~900.")
+    private final Setting<Integer> delayBudgetTarget = sgGrim.add(new IntSetting.Builder()
+        .name("　延迟预算上限")
+        .description("允许的最大 blockDelayBalance（ms）。越低越安全，越高 burst 越快。稳定~700，激进~900。")
         .defaultValue(900)
         .min(0)
         .sliderMax(1000)
@@ -140,17 +140,17 @@ public class PacketMine extends Module {
         .build()
     );
 
-    private final Setting<Boolean> drainEnabled = sgGrimBypass.add(new BoolSetting.Builder()
-        .name("drain-enabled")
-        .description("Proactively drain delay balance via START+ABORT on nearby blocks when balance exceeds budget.")
+    private final Setting<Boolean> drainEnabled = sgGrim.add(new BoolSetting.Builder()
+        .name("　主动衰减")
+        .description("预算偏高时利用 START+ABORT 在周围方块上快速衰减 balance")
         .defaultValue(true)
         .visible(grimBypass::get)
         .build()
     );
 
-    private final Setting<Integer> drainTarget = sgGrimBypass.add(new IntSetting.Builder()
-        .name("drain-target")
-        .description("Drain balance down to this level (ms). Lower = more aggressive drain.")
+    private final Setting<Integer> drainTarget = sgGrim.add(new IntSetting.Builder()
+        .name("　　衰减目标")
+        .description("衰减至此 balance 水平（ms）。越低衰减越积极。")
         .defaultValue(100)
         .min(0)
         .sliderMax(800)
@@ -158,61 +158,61 @@ public class PacketMine extends Module {
         .build()
     );
 
-    // ======================== Render ========================
+    // ── 渲染 ──
 
     private final Setting<Boolean> render = sgRender.add(new BoolSetting.Builder()
-        .name("render")
-        .description("Whether or not to render the block being mined.")
+        .name("启用渲染")
+        .description("渲染正在挖掘的方块")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<ShapeMode> shapeMode = sgRender.add(new EnumSetting.Builder<ShapeMode>()
-        .name("shape-mode")
-        .description("How the shapes are rendered.")
+        .name("形状模式")
+        .description("渲染方式")
         .defaultValue(ShapeMode.Both)
         .build()
     );
 
     private final Setting<SettingColor> readySideColor = sgRender.add(new ColorSetting.Builder()
-        .name("ready-side-color")
-        .description("The color of the sides of the blocks that can be broken.")
+        .name("就绪-面颜色")
+        .description("可立即破坏的方块面颜色")
         .defaultValue(new SettingColor(0, 204, 0, 10))
         .build()
     );
 
     private final Setting<SettingColor> readyLineColor = sgRender.add(new ColorSetting.Builder()
-        .name("ready-line-color")
-        .description("The color of the lines of the blocks that can be broken.")
+        .name("就绪-线颜色")
+        .description("可立即破坏的方块线颜色")
         .defaultValue(new SettingColor(0, 204, 0, 255))
         .build()
     );
 
     private final Setting<SettingColor> sideColor = sgRender.add(new ColorSetting.Builder()
-        .name("side-color")
-        .description("The color of the sides of the blocks being rendered.")
+        .name("挖掘中-面颜色")
+        .description("正在挖掘的方块面颜色")
         .defaultValue(new SettingColor(204, 0, 0, 10))
         .build()
     );
 
     private final Setting<SettingColor> lineColor = sgRender.add(new ColorSetting.Builder()
-        .name("line-color")
-        .description("The color of the lines of the blocks being rendered.")
+        .name("挖掘中-线颜色")
+        .description("正在挖掘的方块线颜色")
         .defaultValue(new SettingColor(204, 0, 0, 255))
         .build()
     );
 
     private final Setting<SettingColor> drainSideColor = sgRender.add(new ColorSetting.Builder()
-        .name("drain-side-color")
-        .description("The color of the sides of the drain target block.")
+        .name("衰减目标-面颜色")
+        .description("衰减目标方块的面颜色")
         .defaultValue(new SettingColor(100, 50, 200, 10))
         .visible(() -> grimBypass.get() && drainEnabled.get())
         .build()
     );
 
     private final Setting<SettingColor> drainLineColor = sgRender.add(new ColorSetting.Builder()
-        .name("drain-line-color")
-        .description("The color of the lines of the drain target block.")
+        .name("衰减目标-线颜色")
+        .description("衰减目标方块的线颜色")
         .defaultValue(new SettingColor(100, 50, 200, 255))
         .visible(() -> grimBypass.get() && drainEnabled.get())
         .build()
@@ -245,7 +245,7 @@ public class PacketMine extends Module {
     private long drainRenderExpiry;
 
     public PacketMine() {
-        super(Categories.World, "packet-mine", "Sends packets to mine blocks without the mining animation.");
+        super(Categories.World, "packet-mine", "通过发包挖掘方块，无需播放挖掘动画。");
     }
 
     // ======================== Lifecycle ========================
@@ -277,7 +277,11 @@ public class PacketMine extends Module {
         event.cancel();
 
         if (!isMiningBlock(event.blockPos)) {
-            blocks.add(blockPool.get().set(event));
+            MyBlock b = blockPool.get().set(event);
+            blocks.add(b);
+
+            // 入队即驱动：若本块成为队首，标准 tick 流程立即处理
+            if (blocks.getFirst() == b) b.tick();
         }
     }
 
@@ -851,11 +855,18 @@ public class PacketMine extends Module {
         }
 
         /**
-         * 统一旋转分发：若 shouldRotate 为 true，排队 silent rotation 后执行 action；
-         * 否则直接执行。callback 会校验 phase 一致性，防止陈旧回调。
+         * 统一旋转分发。准星已对准目标方块时用准星命中面 + 直接执行；
+         * 否则按 shouldRotate 参数决定是否排队 silent rotation。
+         * callback 会校验 phase 一致性，防止陈旧回调。
          */
         private void dispatchWithRotation(boolean shouldRotate, Phase expectedPhase,
                                           BlockPos pos, Direction face, Runnable action) {
+            // 准星已对准目标 → 用准星命中面，直接执行（跳过不必要的旋转）
+            if (mc.crosshairTarget instanceof BlockHitResult bhr && bhr.getBlockPos().equals(pos)) {
+                currentFace = bhr.getSide();
+                action.run();
+                return;
+            }
             if (!shouldRotate) { action.run(); return; }
             if (rotationQueued) return;
             rotationQueued = true;
