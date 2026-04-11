@@ -193,13 +193,12 @@ public class ContainerFillManager {
         ContainerFillLogger.logScanRegistered(pos, items, !needs.isEmpty());
     }
 
-    /** 扫描循环结束后调用，移除超出扫描范围的过期条目。 */
+    /**
+     * 扫描循环结束后调用。
+     * schematicCache 和 containerSnapshots 持久化（不随 range 变化而清除），
+     * 仅在 reset() 时清空。这使 GUI 能显示蓝图内所有已发现的容器状态。
+     */
     public void pruneStaleEntries() {
-        int beforeCache = schematicCache.size();
-        int beforeSnapshots = containerSnapshots.size();
-        schematicCache.keySet().retainAll(thisTickScanned);
-        containerSnapshots.keySet().retainAll(thisTickScanned);
-        // [临时调试] 记录剪枝结果
         ContainerFillLogger.logScanCycle("PRUNE", schematicCache.size(), containerSnapshots.size());
     }
 
@@ -417,6 +416,19 @@ public class ContainerFillManager {
     /** 获取指定容器的快照（可能为 null — 尚未打开过）。 */
     public ContainerSnapshot getSnapshot(BlockPos pos) {
         return containerSnapshots.get(pos);
+    }
+
+    /**
+     * 玩家手动交互容器后调用（非自动填充流程）。
+     * 将该容器的快照移除，使其在下次进入 range 时被重新目标化和同步。
+     *
+     * @param pos 容器位置
+     */
+    public void invalidateSnapshot(BlockPos pos) {
+        if (containerSnapshots.remove(pos) != null) {
+            ContainerFillLogger.logStateChange(state, state,
+                "snapshot invalidated by player interaction: " + pos.toShortString());
+        }
     }
 
     public Set<BlockPos> getRegisteredPositions() {
