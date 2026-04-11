@@ -2,12 +2,15 @@ package meteordevelopment.meteorclient.systems.modules.player;
 
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
+import meteordevelopment.meteorclient.gui.GuiTheme;
+import meteordevelopment.meteorclient.gui.widgets.WWidget;
+import meteordevelopment.meteorclient.gui.widgets.containers.WTable;
+import meteordevelopment.meteorclient.gui.widgets.pressable.WButton;
 import meteordevelopment.meteorclient.renderer.GL;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
-import meteordevelopment.meteorclient.utils.misc.Keybind;
 import meteordevelopment.meteorclient.utils.printer.SpawnCheckHelper;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
@@ -76,40 +79,10 @@ public class SpawnProof extends Module {
 
     // ── AFK / 分析 ──
 
-    private final Setting<Keybind> setAfkCenterKey = sgAfk.add(new KeybindSetting.Builder()
-        .name("set-afk-center")
-        .description("按下设定 AFK 中心为当前位置。")
-        .defaultValue(Keybind.none())
-        .action(() -> {
-            if (mc.player != null) {
-                this.afkCenter = mc.player.getBlockPos().toImmutable();
-                info("AFK 中心 → %s", this.afkCenter.toShortString());
-            }
-        })
-        .build());
-
-    private final Setting<Keybind> clearAfkCenterKey = sgAfk.add(new KeybindSetting.Builder()
-        .name("clear-afk-center")
-        .description("按下清除 AFK 中心并清空全部缓存。")
-        .defaultValue(Keybind.none())
-        .action(() -> {
-            this.afkCenter = null;
-            cacheClear();
-            info("AFK 中心已清除，缓存已清空。");
-        })
-        .build());
-
     private final Setting<Integer> cacheRadius = sgAfk.add(new IntSetting.Builder()
         .name("cache-radius")
         .description("缓存半径（AFK 中心起算），全域分析的扫描范围。")
         .defaultValue(128).min(16).sliderRange(16, 200)
-        .build());
-
-    private final Setting<Keybind> analyzeKey = sgAfk.add(new KeybindSetting.Builder()
-        .name("analyze")
-        .description("按下运行全域刷怪面分析（结果缓存，报告输出到聊天）。")
-        .defaultValue(Keybind.none())
-        .action(this::startAnalysis)
         .build());
 
     // ── 渲染 ──
@@ -175,6 +148,35 @@ public class SpawnProof extends Module {
         // cellIndex/cachedSet 不清除 — 跨 toggle 保留
         analysisActive = false;
         renderHighlights = Collections.emptyList();
+    }
+
+    @Override
+    public WWidget getWidget(GuiTheme theme) {
+        WTable table = theme.table();
+
+        // AFK 中心行
+        table.add(theme.label(afkCenter != null ? "AFK: " + afkCenter.toShortString() : "AFK: (未设定)"));
+        WButton setBtn = table.add(theme.button("设定当前位置")).expandCellX().right().widget();
+        setBtn.action = () -> {
+            if (mc.player != null) {
+                afkCenter = mc.player.getBlockPos().toImmutable();
+                info("AFK 中心 → %s", afkCenter.toShortString());
+            }
+        };
+        WButton clearBtn = table.add(theme.button("清除")).right().widget();
+        clearBtn.action = () -> {
+            afkCenter = null;
+            cacheClear();
+            info("AFK 中心已清除，缓存已清空。");
+        };
+        table.row();
+
+        // 分析按钮
+        WButton analyzeBtn = table.add(theme.button("运行全域分析")).expandCellX().right().widget();
+        analyzeBtn.action = this::startAnalysis;
+        table.add(theme.label("r=" + cacheRadius.get()));
+
+        return table;
     }
 
     @Override
