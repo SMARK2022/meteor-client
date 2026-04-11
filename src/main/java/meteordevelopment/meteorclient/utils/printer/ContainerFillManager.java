@@ -81,6 +81,9 @@ public class ContainerFillManager {
     /** 服务端响应超时（40 tick ≈ 2s，覆盖高延迟场景） */
     private static final int OPEN_TIMEOUT = 40;
 
+    /** PREPARING 状态超时（60 tick ≈ 3s，防止卡住） */
+    private static final int PREPARING_TIMEOUT = 60;
+
     /** 容器窗口中玩家背包占的固定槽位数（main 27 + hotbar 9） */
     private static final int PLAYER_INV_SLOTS = 36;
 
@@ -89,6 +92,7 @@ public class ContainerFillManager {
     private State state = State.IDLE;
     private BlockPos targetPos;
     private int openTick;
+    private int preparingStartTick;
 
     /**
      * ARMED_OPEN 阶段的交互规划。
@@ -172,6 +176,12 @@ public class ContainerFillManager {
             case IDLE -> pickTarget(maxReach);
 
             case PREPARING -> {
+                // 超时保护：防止因持续蹲下或其他原因导致 PREPARING 无限自旋
+                if (mc.player.age - preparingStartTick > PREPARING_TIMEOUT) {
+                    state = State.COOLDOWN;
+                    return;
+                }
+
                 // 第一步：清除 Printer 遗留的强制潜行
                 if (sneakForced) {
                     sneakClearer.run();
@@ -183,7 +193,14 @@ public class ContainerFillManager {
                     return; // 等玩家松开 sneak
                 }
 
-                // 第三步：规划容器打开交互（真实几何面 + LOS + reach）
+                // 第三步：MultiActionsC 安全 — 等待玩家停止移动
+                // 1.21.2+ Grim 通过 knownInput.moving() 检测 CLICK_WINDOW 时是否有移动输入
+                // 必须确保从 PREPARING 到 fill+close 全过程无移动输入
+                if (isPlayerMovingInput()) {
+                    return; // 等玩家停止移动
+                }
+
+                // 第四步：规划容器打开交互（真实几何面 + LOS + reach）
                 armedInteraction = InteractionPlanner.planSelfInteraction(
                     mc, targetPos, strict, true, maxReach
                 );
@@ -258,14 +275,6 @@ public class ContainerFillManager {
         armedInteraction = null;
         state = State.OPENING;
         return true;
-    }
-
-    /**
-     * ARMED_OPEN 态的交互规划（Printer 用于提交 Rotations）。
-     * 非 ARMED_OPEN 态返回 null。
-     */
-    public ActionPlan.Interaction getArmedInteraction() {
-        return state == State.ARMED_OPEN ? armedInteraction : null;
     }
 
     // ==================== 事件回调 ====================
@@ -363,6 +372,7 @@ public class ContainerFillManager {
         state = State.IDLE;
         targetPos = null;
         openTick = 0;
+        preparingStartTick = 0;
         suppressScreen = false;
         armedInteraction = null;
         schematicCache.clear();
@@ -400,9 +410,13 @@ public class ContainerFillManager {
         Map<Item, Integer> needs = schematicCache.get(best);
         if (needs != null && !hasAnyNeededItem(needs)) return;
 
+        // MultiActionsC 安全：不要在玩家移动时启动容器操作
+        if (isPlayerMovingInput()) return;
+
         // 停止 sprint，进入 PREPARING
         if (mc.player.isSprinting()) mc.player.setSprinting(false);
         targetPos = best;
+        preparingStartTick = mc.player.age;
         state = State.PREPARING;
     }
 
@@ -534,5 +548,18 @@ public class ContainerFillManager {
             if (InvUtils.find(item).found()) return true;
         }
         return false;
+    }
+
+    /**
+     * 玩家是否有移动输入（WASD 按键）。
+     * <p>用于规避 Grim MultiActionsC (1.21.2+) 的 knownInput.moving() 检测：
+     * 容器 CLICK_WINDOW 到达服务端时如果 knownInput 仍报告移动 → 标记。
+     */
+    private static boolean isPlayerMovingInput() {
+        return mc.options != null
+            && (mc.options.forwardKey.isPressed()
+                || mc.options.backKey.isPressed()
+                || mc.options.leftKey.isPressed()
+                || mc.options.rightKey.isPressed());
     }
 }
