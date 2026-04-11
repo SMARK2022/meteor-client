@@ -50,6 +50,8 @@ import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.*;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.enums.SlabType;
+import net.minecraft.fluid.Fluids;
+import net.minecraft.state.property.Properties;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.ItemEntity;
 import net.minecraft.entity.ExperienceOrbEntity;
@@ -1180,6 +1182,9 @@ public class Printer extends Module {
             BlockState requiredState = worldSchematic.getBlockState(pos);
             BlockState currentState = mc.world.getBlockState(pos);
 
+            // 流体归一化：蓝图要求水 + 当前方块可含水 → 归一化为含水版本走 WaterlogBehavior
+            requiredState = normalizeFluidDesired(requiredState, currentState, pos);
+
             // ── 蓝图要求空气 ──
             if (requiredState.isAir()) {
                 if (currentState.isAir() || currentState.isReplaceable()) continue;
@@ -1360,6 +1365,34 @@ public class Printer extends Module {
         if (tolerateExtraDirt.get() && isDirtOrGrass(state)) return true;
         if (tolerateScaffolding.get() && state.getBlock() == Blocks.SCAFFOLDING) return true;
         return false;
+    }
+
+    /**
+     * 流体目标归一化：当蓝图要求水源且当前方块可含水（waterloggable）时，
+     * 将 {@code Blocks.WATER} 目标归一化为"当前方块 + WATERLOGGED=true"。
+     *
+     * <p>这解决了"蓝图水落在树叶/半砖/楼梯等位置"时被 {@code WaterBehavior} 错误认领的问题。
+     * 归一化后任务自然匹配 {@code WaterlogBehavior}，一次 waterlog 即完成。
+     *
+     * @param required 蓝图要求的方块状态
+     * @param current  世界当前方块状态
+     * @param pos      方块位置
+     * @return 归一化后的目标状态（如果不适用则原样返回）
+     */
+    private BlockState normalizeFluidDesired(BlockState required, BlockState current, BlockPos pos) {
+        if (required.getBlock() != Blocks.WATER) return required;
+        if (!current.contains(Properties.WATERLOGGED)) return required;
+
+        // 已经含水 → 目标就是当前状态
+        if (current.get(Properties.WATERLOGGED)) return current;
+
+        // 当前方块能接受水 → 归一化为含水版本
+        if (current.getBlock() instanceof FluidFillable fillable
+            && fillable.canFillWithFluid(mc.player, mc.world, pos, current, Fluids.WATER)) {
+            return current.with(Properties.WATERLOGGED, true);
+        }
+
+        return required;
     }
 
     /**

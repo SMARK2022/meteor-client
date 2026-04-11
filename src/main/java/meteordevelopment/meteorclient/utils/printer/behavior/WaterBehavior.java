@@ -12,6 +12,7 @@ import net.minecraft.fluid.Fluid;
 import net.minecraft.fluid.Fluids;
 import net.minecraft.item.Item;
 import net.minecraft.item.Items;
+import net.minecraft.state.property.Properties;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Vec3d;
 
@@ -51,6 +52,15 @@ public class WaterBehavior implements PrinterBehavior {
         if (desired != Blocks.WATER && desired != Blocks.LAVA) return false;
         if (!task.desiredState().contains(FluidBlock.LEVEL)) return false;
         if (task.desiredState().get(FluidBlock.LEVEL) != 0) return false;
+
+        // 第二道防线：当前方块可含水 → 应由 WaterlogBehavior 处理
+        // （正常路径已被 Printer.normalizeFluidDesired 在任务生成阶段拦截，
+        //   此处防止其他入口遗漏导致错误认领 waterloggable target）
+        if (desired == Blocks.WATER
+            && task.currentState().contains(Properties.WATERLOGGED)
+            && task.currentState().getBlock() instanceof FluidFillable) {
+            return false;
+        }
 
         BlockState current = task.currentState();
         if (current.getBlock() == desired
