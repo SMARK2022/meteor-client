@@ -566,11 +566,13 @@ public final class Rules {
     /**
      * 计算玩家看向目标时的 3D 朝向 (含 UP/DOWN)
      * 用于 6 轴方块 (Piston, Observer, Dropper)
+     *
+     * <p>Pitch 优先从 opt.hitVec() 计算——这与 Rotations 系统实际发送的
+     * 角度一致。若 hitVec 不可用则回退到 targetCenter。
      */
-    private static Direction getTheoreticalPlayerLookDirection(PlacementContext ctx) {
-        // 1. 计算 Pitch 和 Yaw
+    private static Direction getTheoreticalPlayerLookDirection(PlacementContext ctx, PlacementOption opt) {
         Vec3d eye = ctx.eyePos();
-        Vec3d target = ctx.targetCenter();
+        Vec3d target = (opt != null && opt.hitVec() != null) ? opt.hitVec() : ctx.targetCenter();
 
         double dX = target.x - eye.x;
         double dY = target.y - eye.y;
@@ -755,7 +757,7 @@ public final class Rules {
         if (!ctx.hasProperty(Properties.FACING))
             return true;
         Direction target = ctx.getProperty(Properties.FACING);
-        Direction playerLook = getTheoreticalPlayerLookDirection(ctx);
+        Direction playerLook = getTheoreticalPlayerLookDirection(ctx, opt);
         return target == playerLook;
     };
 
@@ -769,7 +771,7 @@ public final class Rules {
         if (!ctx.hasProperty(Properties.FACING))
             return true;
         Direction target = ctx.getProperty(Properties.FACING);
-        Direction playerLook = getTheoreticalPlayerLookDirection(ctx);
+        Direction playerLook = getTheoreticalPlayerLookDirection(ctx, opt);
         return target == playerLook.getOpposite();
     };
 
@@ -848,7 +850,7 @@ public final class Rules {
 
         // 2. 检查主朝向 (Facing) - 必须背对玩家视线
         // 例如：目标朝 UP，玩家必须看 DOWN
-        Direction playerLook3D = getTheoreticalPlayerLookDirection(ctx);
+        Direction playerLook3D = getTheoreticalPlayerLookDirection(ctx, opt);
         if (targetFacing != playerLook3D.getOpposite()) {
             return false;
         }
