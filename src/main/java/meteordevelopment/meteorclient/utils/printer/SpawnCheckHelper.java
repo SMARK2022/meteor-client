@@ -56,12 +56,17 @@ public final class SpawnCheckHelper {
         BlockState body = world.getBlockState(pos);
         FluidState bodyFluid = body.getFluidState();
         if (!SpawnHelper.isClearForSpawn(world, pos, body, bodyFluid, EntityType.ZOMBIE)) return false;
+        // 额外碰撞检查：非完整方块（下半砖/箱子/台阶等）仍有碰撞体积，阻止实际生成
+        if (!body.getCollisionShape(world, pos).isEmpty()) return false;
 
         // ── 3. 头部空间：y+1 必须可通行 ──
         BlockPos above = pos.up();
         BlockState head = world.getBlockState(above);
         FluidState headFluid = head.getFluidState();
-        return SpawnHelper.isClearForSpawn(world, above, head, headFluid, EntityType.ZOMBIE);
+        if (!SpawnHelper.isClearForSpawn(world, above, head, headFluid, EntityType.ZOMBIE)) return false;
+        if (!head.getCollisionShape(world, above).isEmpty()) return false;
+
+        return true;
     }
 
     /**
