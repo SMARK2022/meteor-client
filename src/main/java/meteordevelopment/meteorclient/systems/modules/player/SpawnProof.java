@@ -64,8 +64,14 @@ public class SpawnProof extends Module {
 
     private final Setting<Integer> realtimeRange = sgGeneral.add(new IntSetting.Builder()
         .name("realtime-range")
-        .description("实时扫描半径，每 tick 全量扫描此范围。")
+        .description("实时扫描半径。")
         .defaultValue(6).min(4).sliderRange(4, 12)
+        .build());
+
+    private final Setting<Integer> scanInterval = sgGeneral.add(new IntSetting.Builder()
+        .name("scan-interval")
+        .description("实时扫描间隔（tick），1 = 每 tick，2 = 每 2 tick。")
+        .defaultValue(2).min(1).sliderRange(1, 10)
         .build());
 
     // ── AFK / 分析 ──
@@ -148,6 +154,7 @@ public class SpawnProof extends Module {
     private List<BlockPos> renderHighlights = Collections.emptyList();
     private SettingColor ghostColor;
     private int hlTick;
+    private int scanTick;
 
     private static final int TORCH_GRID = 7;
     private static final int HL_INTERVAL = 5;
@@ -185,7 +192,11 @@ public class SpawnProof extends Module {
         if (mc.world == null || mc.player == null) return;
 
         if (analysisActive) tickAnalysis();
-        scanRealtime();
+
+        if (++scanTick >= scanInterval.get()) {
+            scanTick = 0;
+            scanRealtime();
+        }
 
         if (++hlTick >= HL_INTERVAL) {
             hlTick = 0;
@@ -391,9 +402,8 @@ public class SpawnProof extends Module {
         int ecx = (int) Math.floor(eye.x) >> CELL_BITS;
         int ecy = (int) Math.floor(eye.y) >> CELL_BITS;
         int ecz = (int) Math.floor(eye.z) >> CELL_BITS;
-        int searchRange = realtimeRange.get() + 8;
-        int maxR = (searchRange + (1 << CELL_BITS) - 1) >> CELL_BITS;
-        double maxDist2 = searchRange * (double) searchRange;
+        // 搜索覆盖整个缓存半径（无渲染距离限制，稀疏跳空支撑高效扩展）
+        int maxR = (cacheRadius.get() >> CELL_BITS) + 1;
 
         PriorityQueue<BlockPos> pq = new PriorityQueue<>(max + 1,
             Comparator.comparingDouble((BlockPos p) ->
@@ -409,8 +419,6 @@ public class SpawnProof extends Module {
                         List<BlockPos> cell = cellIndex.get(cellKeyDirect(ecx + dx, ecy + dy, ecz + dz));
                         if (cell == null) continue;
                         for (BlockPos pos : cell) {
-                            double d2 = eye.squaredDistanceTo(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
-                            if (d2 > maxDist2) continue;
                             pq.add(pos);
                             if (pq.size() > max) pq.poll();
                         }
@@ -424,12 +432,8 @@ public class SpawnProof extends Module {
         }
 
         // 2) 补充 spawnablePositions（可能在缓存范围外）
-        int ex = (int) eye.x, ey = (int) eye.y, ez = (int) eye.z;
         for (BlockPos pos : spawnablePositions) {
             if (cachedSet.contains(pos)) continue;
-            if (Math.abs(pos.getX() - ex) > searchRange
-                || Math.abs(pos.getY() - ey) > searchRange
-                || Math.abs(pos.getZ() - ez) > searchRange) continue;
             pq.add(pos);
             if (pq.size() > max) pq.poll();
         }
