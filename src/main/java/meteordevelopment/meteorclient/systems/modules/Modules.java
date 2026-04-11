@@ -461,6 +461,7 @@ public class Modules extends System<Modules> {
         add(new Printer());
         add(new Reach());
         add(new Rotation());
+        add(new SpawnProof());
         add(new SpeedMine());
     }
 

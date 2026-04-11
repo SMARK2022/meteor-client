@@ -44,7 +44,9 @@ import meteordevelopment.meteorclient.utils.printer.ContainerFillLogger;
 import meteordevelopment.meteorclient.utils.printer.ContainerFillManager;
 import meteordevelopment.meteorclient.utils.printer.PrinterBehavior;
 import meteordevelopment.meteorclient.utils.printer.PrinterTask;
+import meteordevelopment.meteorclient.utils.printer.SpawnCheckHelper;
 import meteordevelopment.meteorclient.utils.printer.behavior.*;
+import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.utils.printer.ContainerFillScreen;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.*;
@@ -292,6 +294,13 @@ public class Printer extends Module {
             .description("FAST: shift-click all matching stacks (fastest, may overfill). PRECISE: precisely places the exact count needed using pickup + right-click placement (Grim-safe, no overfill).")
             .defaultValue(ContainerFillManager.OverfillPolicy.PRECISE)
             .visible(fillContainers::get)
+            .build());
+
+    // ── 防刷怪覆盖层 ──
+    private final Setting<Boolean> enableSpawnProof = sgBehavior.add(new BoolSetting.Builder()
+            .name("spawn-proof")
+            .description("Auto-place spawn-proof blocks from SpawnProof module overlay. Requires SpawnProof module active.")
+            .defaultValue(false)
             .build());
 
     // Key → sub-toggle mapping (populated in constructor)
@@ -1262,6 +1271,11 @@ public class Printer extends Module {
             tasks.add(new PlannedTask(task, behavior));
         }
 
+        // ── SpawnProof 覆盖层任务：蓝图外的可刷怪位置 ──
+        if (enableSpawnProof.get()) {
+            appendSpawnProofTasks(worldSchematic);
+        }
+
         // 按距离排序（最近的优先）
         Vec3d eyePos = mc.player.getEyePos();
         tasks.sort(Comparator.comparingDouble(
@@ -1302,6 +1316,48 @@ public class Printer extends Module {
         } else {
             // [临时调试] 蓝图容器无内容
             ContainerFillLogger.logScanRegistered(pos, items, false);
+        }
+    }
+
+    /**
+     * 追加 SpawnProof 覆盖层任务到 tasks 列表。
+     *
+     * <p>遍历 SpawnProof 模块维护的可刷怪坐标集，为蓝图未覆盖且仍需防护的位置
+     * 生成放置任务。满足条件用 SpawnCheckHelper 的实时刷怪检查，而非精确状态匹配：
+     * 只要该位置不再可刷怪（无论放了什么方块），即视为已满足。
+     *
+     * <p>蓝图边界内的位置始终由蓝图管辖，不会被 overlay 覆盖。
+     */
+    private void appendSpawnProofTasks(WorldSchematic worldSchematic) {
+        SpawnProof spawnProof = Modules.get().get(SpawnProof.class);
+        if (spawnProof == null || !spawnProof.isActive()) return;
+
+        BlockState desired = spawnProof.getDesiredState();
+        double range = placeRange.get();
+        double maxDist2 = (range + 1.0) * (range + 1.0);
+        Vec3d eye = mc.player.getEyePos();
+
+        for (BlockPos pos : spawnProof.getSpawnablePositions()) {
+            // 距离检查（仅处理 Printer 可达范围内的位置）
+            double dist2 = eye.squaredDistanceTo(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
+            if (dist2 > maxDist2) continue;
+
+            // 蓝图优先：蓝图有非空气方块或位置在蓝图边界内 → 蓝图管辖，跳过
+            BlockState schState = worldSchematic.getBlockState(pos);
+            if (!schState.isAir() || isWithinAnyPlacement(pos)) continue;
+
+            // 实时安全检查：即使扫描缓存说可刷，若世界已安全则跳过
+            // 这覆盖了"扫描尚未更新但方块已被放置"的窗口期
+            if (SpawnCheckHelper.isSpawnSafe(mc.world, pos)) continue;
+
+            BlockState current = mc.world.getBlockState(pos);
+            PrinterTask task = new PrinterTask(pos, desired, current);
+
+            PrinterBehavior behavior = findEnabledBehavior(task);
+            if (behavior == null || behavior.isSatisfied(task)) continue;
+            if (behavior instanceof BlockPlacementBehavior && hasBlockingEntity(pos)) continue;
+
+            tasks.add(new PlannedTask(task, behavior));
         }
     }
 
