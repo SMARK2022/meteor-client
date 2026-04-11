@@ -127,6 +127,8 @@ public class ContainerFillManager {
     /** 扫描循环开始前调用，清除上一 tick 的扫描记录。 */
     public void beginScan() {
         thisTickScanned.clear();
+        // [临时调试] 记录扫描开始
+        ContainerFillLogger.logScanCycle("BEGIN", schematicCache.size(), satisfiedPositions.size());
     }
 
     /**
@@ -141,12 +143,18 @@ public class ContainerFillManager {
             schematicCache.put(pos, needs);
         }
         thisTickScanned.add(pos);
+        // [临时调试] 记录注册结果
+        ContainerFillLogger.logScanRegistered(pos, items, !needs.isEmpty());
     }
 
     /** 扫描循环结束后调用，移除超出扫描范围的过期条目。 */
     public void pruneStaleEntries() {
+        int beforeCache = schematicCache.size();
+        int beforeSatisfied = satisfiedPositions.size();
         schematicCache.keySet().retainAll(thisTickScanned);
         satisfiedPositions.retainAll(thisTickScanned);
+        // [临时调试] 记录剪枝结果
+        ContainerFillLogger.logScanCycle("PRUNE", schematicCache.size(), satisfiedPositions.size());
     }
 
     // ==================== 主循环 ====================
@@ -169,7 +177,11 @@ public class ContainerFillManager {
 
         // 处于激活状态时持续压制 sprint（MultiActionsC/D 要求全程 !sprinting）
         if (state == State.PREPARING || state == State.ARMED_OPEN || state == State.OPENING) {
-            if (mc.player.isSprinting()) mc.player.setSprinting(false);
+            if (mc.player.isSprinting()) {
+                mc.player.setSprinting(false);
+                // [临时调试]
+                ContainerFillLogger.logInputSuppression("sprint suppressed in " + state);
+            }
         }
 
         switch (state) {
@@ -178,6 +190,8 @@ public class ContainerFillManager {
             case PREPARING -> {
                 // 超时保护：防止因持续蹲下或其他原因导致 PREPARING 无限自旋
                 if (mc.player.age - preparingStartTick > PREPARING_TIMEOUT) {
+                    // [临时调试]
+                    ContainerFillLogger.logStateChange(State.PREPARING, State.COOLDOWN, "PREPARING timeout");
                     state = State.COOLDOWN;
                     return;
                 }
@@ -185,11 +199,15 @@ public class ContainerFillManager {
                 // 第一步：清除 Printer 遗留的强制潜行
                 if (sneakForced) {
                     sneakClearer.run();
+                    // [临时调试]
+                    ContainerFillLogger.logPreparingWait("sneakForced — clearing");
                     return; // 等下一 tick sneak 状态生效
                 }
 
                 // 第二步：确保玩家当前不处于潜行（用户手动潜行也要等）
                 if (mc.player.isSneaking()) {
+                    // [临时调试]
+                    ContainerFillLogger.logPreparingWait("player is sneaking");
                     return; // 等玩家松开 sneak
                 }
 
@@ -197,6 +215,8 @@ public class ContainerFillManager {
                 // 1.21.2+ Grim 通过 knownInput.moving() 检测 CLICK_WINDOW 时是否有移动输入
                 // 必须确保从 PREPARING 到 fill+close 全过程无移动输入
                 if (isPlayerMovingInput()) {
+                    // [临时调试]
+                    ContainerFillLogger.logPreparingWait("player has movement input");
                     return; // 等玩家停止移动
                 }
 
@@ -204,14 +224,20 @@ public class ContainerFillManager {
                 armedInteraction = InteractionPlanner.planSelfInteraction(
                     mc, targetPos, strict, true, maxReach
                 );
+                // [临时调试]
+                ContainerFillLogger.logInteractionPlan(armedInteraction != null, targetPos);
 
                 if (armedInteraction == null) {
                     // 当前无法找到有效交互面（被遮挡/超出 reach）
+                    // [临时调试]
+                    ContainerFillLogger.logStateChange(State.PREPARING, State.COOLDOWN, "planSelfInteraction returned null");
                     state = State.COOLDOWN;
                     return;
                 }
 
                 // 成功规划 → 进入 ARMED_OPEN
+                // [临时调试]
+                ContainerFillLogger.logStateChange(State.PREPARING, State.ARMED_OPEN, "interaction planned ok");
                 state = State.ARMED_OPEN;
 
                 // 提交旋转请求（如果启用），本 tick movement 会包含正确的 yaw/pitch
@@ -229,6 +255,8 @@ public class ContainerFillManager {
 
             case OPENING -> {
                 if (mc.player.age - openTick > OPEN_TIMEOUT) {
+                    // [临时调试]
+                    ContainerFillLogger.logStateChange(State.OPENING, State.COOLDOWN, "OPEN_TIMEOUT");
                     closeContainerSilently();
                     state = State.COOLDOWN;
                 }
@@ -236,6 +264,8 @@ public class ContainerFillManager {
 
             case COOLDOWN -> {
                 // sprint 恢复由玩家移动输入自然触发，此处仅清除标志
+                // [临时调试]
+                ContainerFillLogger.logStateChange(State.COOLDOWN, State.IDLE, "cooldown done");
                 suppressScreen = false;
                 armedInteraction = null;
                 state = State.IDLE;
@@ -262,6 +292,8 @@ public class ContainerFillManager {
         // 最终距离检查（移动后可能超出 reach）
         double distSq = mc.player.getEyePos().squaredDistanceTo(inter.hitVec());
         if (distSq > maxReach * maxReach) {
+            // [临时调试]
+            ContainerFillLogger.logExecuteOpen(false, pos, distSq, maxReach * maxReach);
             armedInteraction = null;
             state = State.COOLDOWN;
             return false;
@@ -273,6 +305,9 @@ public class ContainerFillManager {
             new BlockHitResult(inter.hitVec(), inter.clickedFace(), pos, false));
         openTick = mc.player.age;
         armedInteraction = null;
+        // [临时调试]
+        ContainerFillLogger.logExecuteOpen(true, pos, distSq, maxReach * maxReach);
+        ContainerFillLogger.logStateChange(State.ARMED_OPEN, State.OPENING, "interactBlock sent");
         state = State.OPENING;
         return true;
     }
@@ -295,6 +330,9 @@ public class ContainerFillManager {
         // 解析容器当前内容（前 N 个槽位为容器自身，后 36 个为玩家背包）
         List<ItemStack> allSlots = event.packet.getContents();
         int containerSlotCount = Math.max(0, allSlots.size() - PLAYER_INV_SLOTS);
+
+        // [临时调试]
+        ContainerFillLogger.logInventorySync(syncId, allSlots.size(), containerSlotCount);
 
         fillAndClose(containerSlotCount);
     }
@@ -393,31 +431,54 @@ public class ContainerFillManager {
         BlockPos best = null;
         double bestSq = Double.MAX_VALUE;
 
+        // [临时调试] 候选统计
+        int satisfiedSkipped = 0, outOfRange = 0, notContainer = 0;
+
         for (BlockPos pos : schematicCache.keySet()) {
-            if (satisfiedPositions.contains(pos)) continue;
+            if (satisfiedPositions.contains(pos)) { satisfiedSkipped++; continue; }
 
             double dSq = eye.squaredDistanceTo(Vec3d.ofCenter(pos));
-            if (dSq > maxSq || dSq >= bestSq) continue;
-            if (!isWorldBlockSimpleContainer(pos)) continue;
+            if (dSq > maxSq || dSq >= bestSq) { outOfRange++; continue; }
+            if (!isWorldBlockSimpleContainer(pos)) { notContainer++; continue; }
 
             bestSq = dSq;
             best = pos;
         }
 
-        if (best == null) return;
+        if (best == null) {
+            // [临时调试] 没找到任何候选
+            ContainerFillLogger.logPickTarget(schematicCache.size(), satisfiedSkipped,
+                outOfRange, notContainer, 0, 0, null);
+            return;
+        }
 
         // 预检查：玩家背包中是否有任何所需物品（避免无意义打开）
         Map<Item, Integer> needs = schematicCache.get(best);
-        if (needs != null && !hasAnyNeededItem(needs)) return;
+        if (needs != null && !hasAnyNeededItem(needs)) {
+            // [临时调试]
+            ContainerFillLogger.logPickTarget(schematicCache.size(), satisfiedSkipped,
+                outOfRange, notContainer, 1, 0, best);
+            return;
+        }
 
         // MultiActionsC 安全：不要在玩家移动时启动容器操作
-        if (isPlayerMovingInput()) return;
+        if (isPlayerMovingInput()) {
+            // [临时调试]
+            ContainerFillLogger.logPickTarget(schematicCache.size(), satisfiedSkipped,
+                outOfRange, notContainer, 0, 1, best);
+            return;
+        }
 
         // 停止 sprint，进入 PREPARING
         if (mc.player.isSprinting()) mc.player.setSprinting(false);
         targetPos = best;
         preparingStartTick = mc.player.age;
         state = State.PREPARING;
+
+        // [临时调试]
+        ContainerFillLogger.logPickTarget(schematicCache.size(), satisfiedSkipped,
+            outOfRange, notContainer, 0, 0, best);
+        ContainerFillLogger.logStateChange(State.IDLE, State.PREPARING, "target picked: " + best.toShortString());
     }
 
     // ==================== 内部：填充 + 关闭 ====================
@@ -436,12 +497,16 @@ public class ContainerFillManager {
         ScreenHandler handler = mc.player.currentScreenHandler;
 
         if (needs == null || handler == null || handler.syncId == 0) {
+            // [临时调试]
+            ContainerFillLogger.logFillResult(targetPos, needs, false);
             closeContainerSilently();
             state = State.COOLDOWN;
             return;
         }
 
         int totalSlots = handler.slots.size();
+        // [临时调试]
+        ContainerFillLogger.logInventorySync(handler.syncId, totalSlots, containerSlotCount);
 
         // ── 按物品逐类填充 ──
         for (var entry : needs.entrySet()) {
@@ -457,6 +522,8 @@ public class ContainerFillManager {
                 if (stack.isEmpty() || stack.getItem() != item) continue;
 
                 InvUtils.shiftClick().slotId(slot);
+                // [临时调试]
+                ContainerFillLogger.logFillStep(item, required, existing, slot);
 
                 // 重读容器区，用真实数量判断 deficit（而非纸面 -= stack.getCount()）
                 existing = countItemInContainer(handler, item, containerSlotCount);
@@ -475,6 +542,10 @@ public class ContainerFillManager {
         }
 
         if (allSatisfied) satisfiedPositions.add(targetPos);
+
+        // [临时调试]
+        ContainerFillLogger.logFillResult(targetPos, needs, allSatisfied);
+        ContainerFillLogger.logStateChange(State.OPENING, State.COOLDOWN, allSatisfied ? "fill complete — satisfied" : "fill complete — partial");
 
         closeContainerSilently();
         state = State.COOLDOWN;
