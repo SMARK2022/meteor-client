@@ -40,7 +40,6 @@ import meteordevelopment.meteorclient.utils.printer.ActionPlan;
 import meteordevelopment.meteorclient.utils.printer.ActionPlan.SneakPolicy;
 import meteordevelopment.meteorclient.utils.printer.ActionPlan.HandPolicy;
 import meteordevelopment.meteorclient.utils.printer.BlockUtilHelper;
-import meteordevelopment.meteorclient.utils.printer.ContainerFillLogger;
 import meteordevelopment.meteorclient.utils.printer.ContainerFillManager;
 import meteordevelopment.meteorclient.utils.printer.PrinterBehavior;
 import meteordevelopment.meteorclient.utils.printer.PrinterTask;
@@ -434,15 +433,6 @@ public class Printer extends Module {
             .action(this::openContainerFillScreen)
             .build());
 
-    // [临时调试] 容器填充文件日志开关
-    private final Setting<Boolean> debugContainerFillLog = sgRender.add(new BoolSetting.Builder()
-            .name("debug-container-fill-log")
-            .description("[TEMP DEBUG] Write container fill debug log to run/logs/printer-container-fill.log")
-            .defaultValue(false)
-            .visible(fillContainers::get)
-            .onChanged(v -> ContainerFillLogger.enabled = v)
-            .build());
-
     // ==================== 动作计划快照 ====================
 
     /**
@@ -552,9 +542,6 @@ public class Printer extends Module {
 
     @Override
     public void onActivate() {
-        // [临时调试] 同步开关状态 + 打开日志
-        ContainerFillLogger.enabled = debugContainerFillLog.get();
-        ContainerFillLogger.open();
         resetState();
     }
 
@@ -562,8 +549,6 @@ public class Printer extends Module {
     public void onDeactivate() {
         resetState();
         resetSneakState();
-        // [临时调试] 关闭日志
-        ContainerFillLogger.close();
     }
 
     /** 初始化/重置所有内部状态（activate/deactivate 共用） */
@@ -734,9 +719,6 @@ public class Printer extends Module {
      */
     private void tickContainerFill() {
         if (!fillContainers.get()) return;
-        // [临时调试] 门控日志：记录容器 tick 被调用时的上下文
-        ContainerFillLogger.logPrinterGate(
-            tasks.size(), armed != null, true, containerFillManager.getState());
         boolean strict = placeMode.get() == PlaceMode.STRICT;
         containerFillManager.tick(tickCounter, placeRange.get(), strict,
             rotate.get(), didPrinterForceSneak, this::resetSneakState,
@@ -997,8 +979,6 @@ public class Printer extends Module {
     @EventHandler
     private void onOpenScreen(OpenScreenEvent event) {
         if (fillContainers.get() && containerFillManager.shouldSuppressScreen()) {
-            // [临时调试] 记录屏幕抑制
-            ContainerFillLogger.logScreenSuppress(true);
             event.cancel();
             return;
         }
@@ -1234,15 +1214,6 @@ public class Printer extends Module {
                 continue;
             }
 
-            // [临时调试] 容器方块状态不匹配时记录差异（帮助定位"放置了但不被扫描"问题）
-            if (fillContainers.get() && ContainerFillLogger.enabled) {
-                BlockEntity schBe = worldSchematic.getBlockEntity(pos);
-                if (ContainerFillManager.isSupportedContainer(schBe)) {
-                    ContainerFillLogger.logScanAttempt(pos,
-                        "STATE_MISMATCH: required=" + requiredState + " current=" + currentState, false);
-                }
-            }
-
             // 泥土混淆等价：dirt ↔ grass_block 视为相同，无需修正
             if (tolerateDirt.get() && isDirtGrassEquivalent(requiredState, currentState)) continue;
 
@@ -1313,10 +1284,6 @@ public class Printer extends Module {
      */
     private void scanSchematicContainer(WorldSchematic worldSchematic, BlockPos pos) {
         BlockEntity be = worldSchematic.getBlockEntity(pos);
-        // [临时调试] 记录扫描尝试
-        ContainerFillLogger.logScanAttempt(pos,
-            be != null ? be.getClass().getSimpleName() : "null",
-            ContainerFillManager.isSupportedContainer(be));
         if (!ContainerFillManager.isSupportedContainer(be)) return;
 
         Inventory inv = (Inventory) be;
@@ -1331,9 +1298,6 @@ public class Printer extends Module {
 
         if (hasContent) {
             containerFillManager.registerSchematicContainer(pos.toImmutable(), items);
-        } else {
-            // [临时调试] 蓝图容器无内容
-            ContainerFillLogger.logScanRegistered(pos, items, false);
         }
     }
 
