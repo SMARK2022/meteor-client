@@ -362,9 +362,9 @@ public class SpawnProof extends Module {
         return cellKeyDirect(pos.getX() >> CELL_BITS, pos.getY() >> CELL_BITS, pos.getZ() >> CELL_BITS);
     }
 
-    /** AFK 中心 + cacheRadius 范围内才缓存；无 AFK 中心时不限 */
+    /** AFK 中心 + cacheRadius 范围内才缓存；无 AFK 中心时不缓存 */
     private boolean isWithinCacheBounds(BlockPos pos) {
-        if (afkCenter == null) return true;
+        if (afkCenter == null) return false;
         int dx = pos.getX() - afkCenter.getX(), dz = pos.getZ() - afkCenter.getZ();
         int r = cacheRadius.get();
         return dx * dx + dz * dz <= r * r;
@@ -390,8 +390,8 @@ public class SpawnProof extends Module {
     // ==================== 渲染 ====================
 
     /**
-     * 空间索引扩展搜索（缓存）+ spawnablePositions 补充（实时），
-     * 取并集中最近 N 个坐标。
+     * 空间索引扩展搜索（缓存 ∪ 实时），取并集中最近 N 个坐标。
+     * 无 AFK 中心时仅用 spawnablePositions；有缓存时 Chebyshev shell 扩展。
      */
     private void updateRenderHighlights() {
         if (!renderOverlay.get() || mc.player == null) {
@@ -401,39 +401,41 @@ public class SpawnProof extends Module {
 
         Vec3d eye = mc.player.getEyePos();
         int max = maxHighlights.get();
-        int ecx = (int) Math.floor(eye.x) >> CELL_BITS;
-        int ecy = (int) Math.floor(eye.y) >> CELL_BITS;
-        int ecz = (int) Math.floor(eye.z) >> CELL_BITS;
-        // 搜索覆盖整个缓存半径（无渲染距离限制，稀疏跳空支撑高效扩展）
-        int maxR = (cacheRadius.get() >> CELL_BITS) + 1;
 
         PriorityQueue<BlockPos> pq = new PriorityQueue<>(max + 1,
             Comparator.comparingDouble((BlockPos p) ->
                 -eye.squaredDistanceTo(p.getX() + 0.5, p.getY() + 0.5, p.getZ() + 0.5)));
 
-        // 1) 空间索引 Chebyshev shell 扩展
-        outer:
-        for (int r = 0; r <= maxR; r++) {
-            for (int dx = -r; dx <= r; dx++)
-                for (int dy = -r; dy <= r; dy++)
-                    for (int dz = -r; dz <= r; dz++) {
-                        if (Math.max(Math.max(Math.abs(dx), Math.abs(dy)), Math.abs(dz)) != r) continue;
-                        List<BlockPos> cell = cellIndex.get(cellKeyDirect(ecx + dx, ecy + dy, ecz + dz));
-                        if (cell == null) continue;
-                        for (BlockPos pos : cell) {
-                            pq.add(pos);
-                            if (pq.size() > max) pq.poll();
+        // 1) 缓存存在时：空间索引 Chebyshev shell 扩展
+        if (!cellIndex.isEmpty()) {
+            int ecx = (int) Math.floor(eye.x) >> CELL_BITS;
+            int ecy = (int) Math.floor(eye.y) >> CELL_BITS;
+            int ecz = (int) Math.floor(eye.z) >> CELL_BITS;
+            int maxR = (cacheRadius.get() >> CELL_BITS) + 1;
+
+            outer:
+            for (int r = 0; r <= maxR; r++) {
+                for (int dx = -r; dx <= r; dx++)
+                    for (int dy = -r; dy <= r; dy++)
+                        for (int dz = -r; dz <= r; dz++) {
+                            if (Math.max(Math.max(Math.abs(dx), Math.abs(dy)), Math.abs(dz)) != r) continue;
+                            List<BlockPos> cell = cellIndex.get(cellKeyDirect(ecx + dx, ecy + dy, ecz + dz));
+                            if (cell == null) continue;
+                            for (BlockPos pos : cell) {
+                                pq.add(pos);
+                                if (pq.size() > max) pq.poll();
+                            }
                         }
-                    }
-            if (pq.size() >= max && !pq.isEmpty()) {
-                double nextMin = Math.max(0, (r + 1) * (1 << CELL_BITS) - ((1 << CELL_BITS) - 1));
-                double pqMax = eye.squaredDistanceTo(
-                    pq.peek().getX() + 0.5, pq.peek().getY() + 0.5, pq.peek().getZ() + 0.5);
-                if (pqMax < nextMin * nextMin) break outer;
+                if (pq.size() >= max && !pq.isEmpty()) {
+                    double nextMin = Math.max(0, (r + 1) * (1 << CELL_BITS) - ((1 << CELL_BITS) - 1));
+                    double pqMax = eye.squaredDistanceTo(
+                        pq.peek().getX() + 0.5, pq.peek().getY() + 0.5, pq.peek().getZ() + 0.5);
+                    if (pqMax < nextMin * nextMin) break outer;
+                }
             }
         }
 
-        // 2) 补充 spawnablePositions（可能在缓存范围外）
+        // 2) 补充实时 spawnablePositions（可能在缓存范围外，或无缓存时为唯一数据源）
         for (BlockPos pos : spawnablePositions) {
             if (cachedSet.contains(pos)) continue;
             pq.add(pos);
