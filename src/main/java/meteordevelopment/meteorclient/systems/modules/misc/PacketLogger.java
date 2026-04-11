@@ -6,6 +6,7 @@
 package meteordevelopment.meteorclient.systems.modules.misc;
 
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
+import meteordevelopment.meteorclient.mixin.CloseHandledScreenC2SPacketAccessor;
 import meteordevelopment.meteorclient.settings.BoolSetting;
 import meteordevelopment.meteorclient.settings.PacketListSetting;
 import meteordevelopment.meteorclient.settings.Setting;
@@ -14,9 +15,11 @@ import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.network.PacketUtils;
 import meteordevelopment.orbit.EventHandler;
+import net.minecraft.item.ItemStack;
 import net.minecraft.network.packet.Packet;
 import net.minecraft.network.packet.c2s.play.*;
 import net.minecraft.network.packet.s2c.play.*;
+import net.minecraft.util.hit.BlockHitResult;
 
 import java.io.BufferedWriter;
 import java.io.IOException;
@@ -26,6 +29,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.List;
 import java.util.Set;
 import java.util.StringJoiner;
 import java.util.concurrent.atomic.AtomicLong;
@@ -37,6 +41,7 @@ public class PacketLogger extends Module {
     private final SettingGroup sgInteraction = settings.createGroup("Interaction");
     private final SettingGroup sgSlots = settings.createGroup("Slots & Swing");
     private final SettingGroup sgS2C = settings.createGroup("S2C (Receive)");
+    private final SettingGroup sgContainerFill = settings.createGroup("Container Fill");
     private final SettingGroup sgAdvancedC2S = settings.createGroup("Advanced C2S");
 
     // ======================== General ========================
@@ -143,6 +148,78 @@ public class PacketLogger extends Module {
     private final Setting<Boolean> logHandSwing = sgSlots.add(new BoolSetting.Builder()
         .name("hand-swing")
         .description("Log HandSwingC2SPacket.")
+        .defaultValue(false)
+        .build()
+    );
+
+    // ======================== Container Fill ========================
+
+    private final Setting<Boolean> logClientCommand = sgContainerFill.add(new BoolSetting.Builder()
+        .name("client-command")
+        .description("Log ClientCommandC2SPacket (sprint/sneak toggle, fall flying).")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Boolean> logClickSlot = sgContainerFill.add(new BoolSetting.Builder()
+        .name("click-slot")
+        .description("Log ClickSlotC2SPacket (container slot operations).")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Boolean> logCloseHandledScreen = sgContainerFill.add(new BoolSetting.Builder()
+        .name("close-handled-screen")
+        .description("Log CloseHandledScreenC2SPacket (client closes container).")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Boolean> logInteractItem = sgContainerFill.add(new BoolSetting.Builder()
+        .name("interact-item")
+        .description("Log PlayerInteractItemC2SPacket (use item in air).")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Boolean> logPlayerInput = sgContainerFill.add(new BoolSetting.Builder()
+        .name("player-input")
+        .description("Log PlayerInputC2SPacket (movement/sneak/sprint input state).")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Boolean> logOpenScreen = sgContainerFill.add(new BoolSetting.Builder()
+        .name("open-screen")
+        .description("Log OpenScreenS2CPacket (server opens container GUI).")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Boolean> logInventorySync = sgContainerFill.add(new BoolSetting.Builder()
+        .name("inventory-sync")
+        .description("Log InventoryS2CPacket (server sends container contents).")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Boolean> logSlotUpdate = sgContainerFill.add(new BoolSetting.Builder()
+        .name("slot-update")
+        .description("Log ScreenHandlerSlotUpdateS2CPacket.")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Boolean> logCloseScreen = sgContainerFill.add(new BoolSetting.Builder()
+        .name("close-screen")
+        .description("Log CloseScreenS2CPacket (server closes container).")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Boolean> logBlockEntityUpdate = sgContainerFill.add(new BoolSetting.Builder()
+        .name("block-entity-update")
+        .description("Log BlockEntityUpdateS2CPacket.")
         .defaultValue(false)
         .build()
     );
@@ -264,6 +341,28 @@ public class PacketLogger extends Module {
             return;
         }
 
+        // Container Fill S2C toggles
+        if (packet instanceof OpenScreenS2CPacket) {
+            if (logOpenScreen.get()) logPacket("[S2C]", packet, packet.getClass());
+            return;
+        }
+        if (packet instanceof InventoryS2CPacket) {
+            if (logInventorySync.get()) logPacket("[S2C]", packet, packet.getClass());
+            return;
+        }
+        if (packet instanceof ScreenHandlerSlotUpdateS2CPacket) {
+            if (logSlotUpdate.get()) logPacket("[S2C]", packet, packet.getClass());
+            return;
+        }
+        if (packet instanceof CloseScreenS2CPacket) {
+            if (logCloseScreen.get()) logPacket("[S2C]", packet, packet.getClass());
+            return;
+        }
+        if (packet instanceof BlockEntityUpdateS2CPacket) {
+            if (logBlockEntityUpdate.get()) logPacket("[S2C]", packet, packet.getClass());
+            return;
+        }
+
         // Fallback: generic S2C list
         @SuppressWarnings("unchecked")
         Class<? extends Packet<?>> packetClass = (Class<? extends Packet<?>>) packet.getClass();
@@ -301,6 +400,28 @@ public class PacketLogger extends Module {
         }
         if (packet instanceof HandSwingC2SPacket) {
             if (logHandSwing.get()) logPacket("[C2S]", packet, packet.getClass());
+            return;
+        }
+
+        // Container Fill C2S toggles
+        if (packet instanceof ClientCommandC2SPacket) {
+            if (logClientCommand.get()) logPacket("[C2S]", packet, packet.getClass());
+            return;
+        }
+        if (packet instanceof ClickSlotC2SPacket) {
+            if (logClickSlot.get()) logPacket("[C2S]", packet, packet.getClass());
+            return;
+        }
+        if (packet instanceof CloseHandledScreenC2SPacket) {
+            if (logCloseHandledScreen.get()) logPacket("[C2S]", packet, packet.getClass());
+            return;
+        }
+        if (packet instanceof PlayerInteractItemC2SPacket) {
+            if (logInteractItem.get()) logPacket("[C2S]", packet, packet.getClass());
+            return;
+        }
+        if (packet instanceof PlayerInputC2SPacket) {
+            if (logPlayerInput.get()) logPacket("[C2S]", packet, packet.getClass());
             return;
         }
 
@@ -382,6 +503,66 @@ public class PacketLogger extends Module {
         if (packet instanceof HandSwingC2SPacket p) {
             return "hand=" + p.getHand();
         }
+        // 容器填充相关 C2S — 详细 formatter
+        if (packet instanceof PlayerInteractBlockC2SPacket p) {
+            BlockHitResult hit = p.getBlockHitResult();
+            StringBuilder sb = new StringBuilder();
+            sb.append("hand=").append(p.getHand());
+            sb.append(" pos=").append(hit.getBlockPos().toShortString());
+            sb.append(" face=").append(hit.getSide());
+            sb.append(" hitVec=(").append(fmt(hit.getPos().x)).append(", ").append(fmt(hit.getPos().y)).append(", ").append(fmt(hit.getPos().z)).append(")");
+            sb.append(" insideBlock=").append(hit.isInsideBlock());
+            sb.append(" seq=").append(p.getSequence());
+            // 附加本地玩家上下文
+            if (mc.player != null) {
+                sb.append(" | eyePos=(").append(fmt(mc.player.getEyePos().x)).append(", ").append(fmt(mc.player.getEyePos().y)).append(", ").append(fmt(mc.player.getEyePos().z)).append(")");
+                sb.append(" yaw=").append(fmt(mc.player.getYaw())).append(" pitch=").append(fmt(mc.player.getPitch()));
+                sb.append(" sneaking=").append(mc.player.isSneaking());
+                sb.append(" sprinting=").append(mc.player.isSprinting());
+                sb.append(" mainHand=").append(mc.player.getMainHandStack().getItem());
+            }
+            return sb.toString();
+        }
+        if (packet instanceof ClientCommandC2SPacket p) {
+            StringBuilder sb = new StringBuilder();
+            sb.append("mode=").append(p.getMode());
+            if (mc.player != null) {
+                sb.append(" | sneaking=").append(mc.player.isSneaking());
+                sb.append(" sprinting=").append(mc.player.isSprinting());
+            }
+            return sb.toString();
+        }
+        if (packet instanceof ClickSlotC2SPacket p) {
+            StringBuilder sb = new StringBuilder();
+            sb.append("syncId=").append(p.getSyncId());
+            sb.append(" revision=").append(p.getRevision());
+            sb.append(" slot=").append(p.getSlot());
+            sb.append(" button=").append(p.getButton());
+            sb.append(" actionType=").append(p.getActionType());
+            sb.append(" stack=").append(p.getStack().isEmpty() ? "<empty>" : p.getStack().getItem() + "x" + p.getStack().getCount());
+            sb.append(" modifiedSlots=").append(p.getModifiedStacks().size());
+            return sb.toString();
+        }
+        if (packet instanceof CloseHandledScreenC2SPacket p) {
+            return "syncId=" + ((CloseHandledScreenC2SPacketAccessor) p).getSyncId();
+        }
+        if (packet instanceof PlayerInteractItemC2SPacket p) {
+            StringBuilder sb = new StringBuilder();
+            sb.append("hand=").append(p.getHand());
+            sb.append(" seq=").append(p.getSequence());
+            if (mc.player != null) {
+                sb.append(" | mainHand=").append(mc.player.getMainHandStack().getItem());
+                sb.append(" yaw=").append(fmt(mc.player.getYaw())).append(" pitch=").append(fmt(mc.player.getPitch()));
+            }
+            return sb.toString();
+        }
+        if (packet instanceof PlayerInputC2SPacket p) {
+            var input = p.input();
+            return "forward=" + input.forward() + " backward=" + input.backward()
+                + " left=" + input.left() + " right=" + input.right()
+                + " jump=" + input.jump() + " sneak=" + input.sneak()
+                + " sprint=" + input.sprint();
+        }
         // S2C
         if (packet instanceof BlockUpdateS2CPacket p) {
             return "pos=" + p.getPos().toShortString() + " state=" + p.getState();
@@ -394,6 +575,41 @@ public class PacketLogger extends Module {
         }
         if (packet instanceof PlaySoundS2CPacket p) {
             return "sound=" + p.getSound().value().id() + " pos=(" + fmt(p.getX()) + ", " + fmt(p.getY()) + ", " + fmt(p.getZ()) + ") vol=" + fmt(p.getVolume()) + " pitch=" + fmt(p.getPitch());
+        }
+        // 容器填充相关 S2C — 详细 formatter
+        if (packet instanceof OpenScreenS2CPacket p) {
+            return "syncId=" + p.getSyncId() + " type=" + p.getScreenHandlerType() + " title=" + p.getName().getString();
+        }
+        if (packet instanceof InventoryS2CPacket p) {
+            List<ItemStack> contents = p.getContents();
+            int nonEmpty = 0;
+            for (ItemStack s : contents) { if (!s.isEmpty()) nonEmpty++; }
+            StringBuilder sb = new StringBuilder();
+            sb.append("syncId=").append(p.getSyncId());
+            sb.append(" revision=").append(p.getRevision());
+            sb.append(" totalSlots=").append(contents.size());
+            sb.append(" nonEmpty=").append(nonEmpty);
+            sb.append(" cursor=").append(p.getCursorStack().isEmpty() ? "<empty>" : p.getCursorStack().getItem() + "x" + p.getCursorStack().getCount());
+            // 前 9 格摘要
+            sb.append(" first9=[");
+            for (int i = 0; i < Math.min(9, contents.size()); i++) {
+                if (i > 0) sb.append(", ");
+                ItemStack s = contents.get(i);
+                sb.append(s.isEmpty() ? "_" : s.getItem() + "x" + s.getCount());
+            }
+            sb.append("]");
+            return sb.toString();
+        }
+        if (packet instanceof ScreenHandlerSlotUpdateS2CPacket p) {
+            ItemStack s = p.getStack();
+            return "syncId=" + p.getSyncId() + " revision=" + p.getRevision() + " slot=" + p.getSlot()
+                + " stack=" + (s.isEmpty() ? "<empty>" : s.getItem() + "x" + s.getCount());
+        }
+        if (packet instanceof CloseScreenS2CPacket p) {
+            return "syncId=" + p.getSyncId();
+        }
+        if (packet instanceof BlockEntityUpdateS2CPacket p) {
+            return "pos=" + p.getPos().toShortString() + " type=" + p.getBlockEntityType();
         }
         return null;
     }
