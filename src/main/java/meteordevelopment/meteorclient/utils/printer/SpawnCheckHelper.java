@@ -34,6 +34,19 @@ public final class SpawnCheckHelper {
      * @return true = 该位置可自然生成 hostile mob（需要防护）
      */
     public static boolean canHostileSpawnAt(World world, BlockPos pos) {
+        if (!isGeometricSpawnable(world, pos)) return false;
+        // 光照：block light == 0 → 夜间可刷怪 (1.18+)
+        return world.getLightLevel(LightType.BLOCK, pos) == 0;
+    }
+
+    /**
+     * 纯几何刷怪面判定（不考虑光照）。
+     *
+     * <p>仅检查地面/身体/头部的方块结构条件。
+     * 适用于 SLAB/BUTTON 等几何阻刷模式 — 即使当前有光照，
+     * 光源被移除后该位置仍会变为可刷怪面，所以必须预防。
+     */
+    public static boolean isGeometricSpawnable(World world, BlockPos pos) {
         // ── 1. 地面：y-1 必须允许生成（实心、非透明） ──
         BlockPos below = pos.down();
         BlockState ground = world.getBlockState(below);
@@ -48,10 +61,7 @@ public final class SpawnCheckHelper {
         BlockPos above = pos.up();
         BlockState head = world.getBlockState(above);
         FluidState headFluid = head.getFluidState();
-        if (!SpawnHelper.isClearForSpawn(world, above, head, headFluid, EntityType.ZOMBIE)) return false;
-
-        // ── 4. 光照：block light == 0 → 夜间可刷怪 (1.18+) ──
-        return world.getLightLevel(LightType.BLOCK, pos) == 0;
+        return SpawnHelper.isClearForSpawn(world, above, head, headFluid, EntityType.ZOMBIE);
     }
 
     /**

@@ -1322,9 +1322,12 @@ public class Printer extends Module {
     /**
      * 追加 SpawnProof 覆盖层任务到 tasks 列表。
      *
-     * <p>遍历 SpawnProof 模块维护的可刷怪坐标集，为蓝图未覆盖且仍需防护的位置
-     * 生成放置任务。满足条件用 SpawnCheckHelper 的实时刷怪检查，而非精确状态匹配：
-     * 只要该位置不再可刷怪（无论放了什么方块），即视为已满足。
+     * <p>遍历 SpawnProof 模块的放置候选集（TORCH 模式为 grid-NMS 后的稀疏最优点，
+     * SLAB/BUTTON 模式为全部可刷怪位置），为蓝图未覆盖且仍需防护的位置生成放置任务。
+     *
+     * <p>满足条件用模式级检查而非精确状态匹配：
+     * - SLAB/BUTTON: 几何判定（位置结构上仍可刷怪 → 需要覆盖）
+     * - TORCH: 完整判定（光照已足 → 不需要再插火把）
      *
      * <p>蓝图边界内的位置始终由蓝图管辖，不会被 overlay 覆盖。
      */
@@ -1336,8 +1339,9 @@ public class Printer extends Module {
         double range = placeRange.get();
         double maxDist2 = (range + 1.0) * (range + 1.0);
         Vec3d eye = mc.player.getEyePos();
+        boolean isTorch = spawnProof.getMode() == SpawnProof.Mode.TORCH;
 
-        for (BlockPos pos : spawnProof.getSpawnablePositions()) {
+        for (BlockPos pos : spawnProof.getPlacementPositions()) {
             // 距离检查（仅处理 Printer 可达范围内的位置）
             double dist2 = eye.squaredDistanceTo(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
             if (dist2 > maxDist2) continue;
@@ -1347,8 +1351,12 @@ public class Printer extends Module {
             if (!schState.isAir() || isWithinAnyPlacement(pos)) continue;
 
             // 实时安全检查：即使扫描缓存说可刷，若世界已安全则跳过
-            // 这覆盖了"扫描尚未更新但方块已被放置"的窗口期
-            if (SpawnCheckHelper.isSpawnSafe(mc.world, pos)) continue;
+            // SLAB/BUTTON → 几何检查（不看光，因为光源可被移除）
+            // TORCH       → 完整检查（已亮则不插）
+            boolean stillNeedsProtection = isTorch
+                ? !SpawnCheckHelper.isSpawnSafe(mc.world, pos)
+                : SpawnCheckHelper.isGeometricSpawnable(mc.world, pos);
+            if (!stillNeedsProtection) continue;
 
             BlockState current = mc.world.getBlockState(pos);
             PrinterTask task = new PrinterTask(pos, desired, current);

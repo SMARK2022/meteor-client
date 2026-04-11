@@ -134,13 +134,18 @@ public class SpawnProof extends Module {
 
     // ==================== 内部状态 ====================
 
-    /** 当前已确认的可刷怪坐标集（不可变位置） */
+    /** 当前已确认的可刷怪坐标集（渲染用，包含所有检测到的位置） */
     private final Set<BlockPos> spawnablePositions = new HashSet<>();
 
-    /** 增量扫描队列：按 (x,z) 圆柱形区域内所有 y 级别 */
-    private List<BlockPos> scanQueue = Collections.emptyList();
+    /**
+     * TORCH 模式的放置候选集：grid-NMS 后的最优火把位置。
+     * 每个 7×7×7 网格单元仅保留一个最接近单元中心的位置，
+     * 确保火把间距 ≥ 7 格（light level 14，覆盖半径 13 manhattan）。
+     */
+    private final Set<BlockPos> torchPlacementPositions = new HashSet<>();
 
-    /** 当前扫描游标（循环） */
+    /** 增量扫描队列 */
+    private List<BlockPos> scanQueue = Collections.emptyList();
     private int scanIndex = 0;
 
     /** 上次全量重建时的玩家位置 */
@@ -148,6 +153,9 @@ public class SpawnProof extends Module {
 
     /** 移动超过 4 格触发重建 */
     private static final double RESCAN_DIST_SQ = 4.0 * 4.0;
+
+    /** 火把 grid-NMS 网格大小（7 格间距确保 light level 14 的覆盖半径 13 完全重叠） */
+    private static final int TORCH_GRID = 7;
 
     // ==================== 生命周期 ====================
 
@@ -159,6 +167,7 @@ public class SpawnProof extends Module {
     @Override
     public void onActivate() {
         spawnablePositions.clear();
+        torchPlacementPositions.clear();
         scanQueue = Collections.emptyList();
         scanIndex = 0;
         lastCenter = null;
@@ -167,6 +176,7 @@ public class SpawnProof extends Module {
     @Override
     public void onDeactivate() {
         spawnablePositions.clear();
+        torchPlacementPositions.clear();
         scanQueue = Collections.emptyList();
     }
 
@@ -189,6 +199,8 @@ public class SpawnProof extends Module {
         int queueSize = scanQueue.size();
         if (queueSize == 0) return;
 
+        boolean isTorch = mode.get() == Mode.TORCH;
+
         for (int i = 0; i < budget && scanIndex < queueSize; i++, scanIndex++) {
             BlockPos pos = scanQueue.get(scanIndex);
 
@@ -198,22 +210,29 @@ public class SpawnProof extends Module {
                 continue;
             }
 
-            if (SpawnCheckHelper.canHostileSpawnAt(mc.world, pos)) {
+            // 模式分流：
+            // SLAB/BUTTON → 纯几何判定（不查光照，因为几何阻刷不依赖亮度）
+            // TORCH       → 完整判定（含光照，已亮的位置不需要再插火把）
+            boolean spawnable = isTorch
+                ? SpawnCheckHelper.canHostileSpawnAt(mc.world, pos)
+                : SpawnCheckHelper.isGeometricSpawnable(mc.world, pos);
+
+            if (spawnable) {
                 spawnablePositions.add(pos.toImmutable());
             } else {
                 spawnablePositions.remove(pos);
             }
         }
 
-        // 循环：扫描完一轮后从头开始持续巡检
-        if (scanIndex >= queueSize) scanIndex = 0;
+        // 循环巡检 + TORCH 模式下每轮结束时重算 NMS 放置点
+        if (scanIndex >= queueSize) {
+            scanIndex = 0;
+            if (isTorch) computeTorchPlacement();
+        }
     }
 
     /**
      * 重建扫描队列：圆柱形区域内所有候选位置。
-     *
-     * <p>按 (dx, dz) 圆形过滤 + 垂直范围裁剪。
-     * 队列生成后清空旧结果，从游标 0 开始全新扫描。
      */
     private void rebuildScanQueue(BlockPos center) {
         int hRange  = horizontalRange.get();
@@ -223,12 +242,11 @@ public class SpawnProof extends Module {
         int minY = Math.max(mc.world.getBottomY() + 1, center.getY() - vRange);
         int maxY = Math.min(mc.world.getTopYInclusive() - 1, center.getY() + vRange);
 
-        // 预估容量：π * hRange² * vRange*2，实际偏小（圆形裁剪）
         List<BlockPos> queue = new ArrayList<>((int) (Math.PI * hRange2 * (maxY - minY + 1)));
 
         for (int dx = -hRange; dx <= hRange; dx++) {
             for (int dz = -hRange; dz <= hRange; dz++) {
-                if (dx * dx + dz * dz > hRange2) continue; // 圆形
+                if (dx * dx + dz * dz > hRange2) continue;
                 int wx = center.getX() + dx;
                 int wz = center.getZ() + dz;
                 for (int y = minY; y <= maxY; y++) {
@@ -239,19 +257,73 @@ public class SpawnProof extends Module {
 
         scanQueue = queue;
         spawnablePositions.clear();
+        torchPlacementPositions.clear();
         scanIndex = 0;
+    }
+
+    // ==================== TORCH grid-NMS ====================
+
+    /**
+     * Grid-NMS（Non-Maximum Suppression）：每 TORCH_GRID³ 网格单元仅保留
+     * 一个最接近单元中心的可刷怪位置。这样火把间距 ≥ 7 格，
+     * 单根火把 (light 14) 覆盖半径 13 manhattan 可完全重叠。
+     *
+     * <p>O(n)，在扫描循环结束时调用一次。
+     */
+    private void computeTorchPlacement() {
+        torchPlacementPositions.clear();
+        if (spawnablePositions.isEmpty()) return;
+
+        int g = TORCH_GRID;
+        Map<Long, BlockPos> bestPerCell = new HashMap<>();
+        Map<Long, Double>   bestDist    = new HashMap<>();
+
+        for (BlockPos pos : spawnablePositions) {
+            long key = torchGridKey(pos, g);
+            // 选离网格中心最近的位置（= 黑暗区域的"几何中心"近似）
+            double cx = (Math.floorDiv(pos.getX(), g) + 0.5) * g;
+            double cz = (Math.floorDiv(pos.getZ(), g) + 0.5) * g;
+            double d  = (pos.getX() - cx) * (pos.getX() - cx)
+                      + (pos.getZ() - cz) * (pos.getZ() - cz);
+
+            if (d < bestDist.getOrDefault(key, Double.MAX_VALUE)) {
+                bestPerCell.put(key, pos);
+                bestDist.put(key, d);
+            }
+        }
+
+        torchPlacementPositions.addAll(bestPerCell.values());
+    }
+
+    /** 3D 网格键：将 (x, y, z) 映射到 (gx, gy, gz) 网格单元 */
+    private static long torchGridKey(BlockPos pos, int g) {
+        int gx = Math.floorDiv(pos.getX(), g);
+        int gy = Math.floorDiv(pos.getY(), g);
+        int gz = Math.floorDiv(pos.getZ(), g);
+        return ((long) gx << 40) | ((long) (gy & 0xFFFFF) << 20) | (gz & 0xFFFFF);
     }
 
     // ==================== 公共 API（Printer 消费） ====================
 
-    /** 返回当前检测到的可刷怪位置集合（只读视图） */
-    public Set<BlockPos> getSpawnablePositions() {
-        return Collections.unmodifiableSet(spawnablePositions);
+    /** 当前模式 */
+    public Mode getMode() { return mode.get(); }
+
+    /**
+     * 返回 Printer 应放置方块的位置集合。
+     *
+     * <p>TORCH 模式返回 grid-NMS 后的最优火把位置（稀疏、高覆盖）。
+     * SLAB/BUTTON 模式返回全部可刷怪位置（必须全覆盖，几何阻刷无覆盖半径）。
+     */
+    public Set<BlockPos> getPlacementPositions() {
+        return switch (mode.get()) {
+            case TORCH -> Collections.unmodifiableSet(torchPlacementPositions);
+            case SLAB, BUTTON -> Collections.unmodifiableSet(spawnablePositions);
+        };
     }
 
-    /** 快速判断指定位置是否在可刷怪集合中 */
-    public boolean isSpawnable(BlockPos pos) {
-        return spawnablePositions.contains(pos);
+    /** 返回当前检测到的所有可刷怪位置（渲染用，含 TORCH 模式的全部暗点） */
+    public Set<BlockPos> getSpawnablePositions() {
+        return Collections.unmodifiableSet(spawnablePositions);
     }
 
     /**
