@@ -1116,9 +1116,13 @@ public class Printer extends Module {
     }
 
     /**
-     * 执行动作计划
-     * PlaceBlock / UseBlock / UseItemOnBlock 走 interactBlock。
-     * UseItemInAir 走 interactItem（不同协议入口）。
+     * 执行动作计划 — 复刻 vanilla {@code doItemUse()} 右键链。
+     * <ul>
+     *   <li>PlaceBlock / UseBlock: interactBlock → swing</li>
+     *   <li>UseItemOnBlock: interactBlock → (PASS 时) → interactItem → swing
+     *       <br>水桶等物品的 useOnBlock 返回 PASS，实际放置由 item.use() 完成</li>
+     *   <li>UseItemInAir: interactItem → swing</li>
+     * </ul>
      */
     private void executePlan(ArmedAction armed) {
         ActionPlan plan = armed.plan();
@@ -1134,14 +1138,22 @@ public class Printer extends Module {
         BlockHitResult hitResult = new BlockHitResult(
             inter.hitVec(), inter.clickedFace(), inter.interactPos(), false);
 
-        if (mc.interactionManager.interactBlock(mc.player, armed.hand(), hitResult).isAccepted()) {
+        var blockResult = mc.interactionManager.interactBlock(mc.player, armed.hand(), hitResult);
+
+        if (blockResult.isAccepted()) {
             swingOrPacket(armed.hand());
 
-            // UseBlock 交互成功后，记录到等待确认集合
-            // 防止服务端回包之前扫描到旧状态而反复交互（toggle 类方块抽搐）
             if (plan instanceof ActionPlan.UseBlock ub) {
                 pendingUseBlocks.put(ub.targetPos().toImmutable(),
                     new PendingUse(mc.world.getBlockState(ub.targetPos()), tickCounter));
+            }
+            return;
+        }
+
+        // UseItemOnBlock: interactBlock 返回 PASS → fallthrough 到 interactItem（vanilla 右键链）
+        if (plan instanceof ActionPlan.UseItemOnBlock) {
+            if (mc.interactionManager.interactItem(mc.player, armed.hand()).isAccepted()) {
+                swingOrPacket(armed.hand());
             }
         }
     }

@@ -144,13 +144,12 @@ public sealed interface ActionPlan
     ) implements ActionPlan {}
 
     /**
-     * UseItemOnBlock - 对方块使用物品动作
+     * UseItemOnBlock - 手持物品右键方块（vanilla doItemUse 链）
      *
-     * 语义：手持特定物品，对邻居表面执行 interactBlock，目标是在 targetPos 产生效果。
-     * 例如：水桶放水、岩浆桶放岩浆。
+     * 语义：手持特定物品，对邻居表面执行 vanilla 右键链（interactBlock → interactItem）。
+     * 水桶/岩浆桶等物品的 useOnBlock 返回 PASS，实际放置由 item.use() 完成。
      *
-     * 与 PlaceBlock 的区别：物品不是方块物品，走物品的 useOnBlock 路径。
-     * 协议层面仍然是 interactBlock，但验证逻辑不同。
+     * 执行链：interactBlock → 若 ACCEPTED 则完成；若 PASS → interactItem → swing。
      * stillNeedsAction 判断目标位置是否仍需要该流体/效果。
      */
     record UseItemOnBlock(
