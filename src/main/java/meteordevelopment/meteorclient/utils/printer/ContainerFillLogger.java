@@ -313,6 +313,12 @@ public final class ContainerFillLogger {
         tagged("INPUT", "%s", action);
     }
 
+    /** [临时调试] Printer 主循环门控 — 记录容器 tick 是否有机会触发。 */
+    public static void logPrinterGate(int tasksSize, boolean armed, boolean fillEnabled, ContainerFillManager.State state) {
+        if (!enabled) return;
+        tagged("GATE", "tasks=%d armed=%s fillEnabled=%s containerState=%s", tasksSize, armed, fillEnabled, state);
+    }
+
     // ═══════════════════════════════════════════════
     //  内部：格式化工具
     // ═══════════════════════════════════════════════

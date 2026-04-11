@@ -701,6 +701,17 @@ public class Printer extends Module {
         if (tasks.isEmpty()) {
             previewCandidates.clear();
             resetSneakState();
+
+            // [临时调试] 门控日志：记录 tasks 为空时容器 tick 是否获得启动机会
+            ContainerFillLogger.logPrinterGate(0, armed != null, fillContainers.get(), containerFillManager.getState());
+
+            // 关键：普通任务为空时，正是容器填充从 IDLE 启动的最好时机。
+            // 不能直接 return，否则 ContainerFillManager 永远停在 IDLE。
+            if (fillContainers.get()) {
+                boolean strict = placeMode.get() == PlaceMode.STRICT;
+                containerFillManager.tick(tickCounter, placeRange.get(), strict,
+                    rotate.get(), didPrinterForceSneak, this::resetSneakState);
+            }
             return;
         }
 
