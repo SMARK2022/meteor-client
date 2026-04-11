@@ -656,94 +656,72 @@ public class Printer extends Module {
         if (!isActive() || mc.player == null || mc.world == null) return;
 
         tickCounter++;
-
-        // 每 tick 衰减渲染态倒计时
         tickRenderState();
 
-        // ── 容器物品填充子系统：busy 状态必须每 tick 推进 ──
-        // 状态机处于 PREPARING / OPENING / COOLDOWN 时，如果被 armed != null 饿死，
-        // 会卡在中间状态导致"明明有材料也不开始"。
-        // 因此 busy 时无条件推进状态机，标准打印管线让路。
+        // ── 容器填充 busy：状态机处于 PREPARING / OPENING / COOLDOWN，
+        //    必须无条件推进，标准打印管线让路 ──
         if (fillContainers.get() && containerFillManager.isBusy()) {
-            // 清除遗留的强制潜行（潜行右键 = item use，不是 open container）
             resetSneakState();
-            boolean strict = placeMode.get() == PlaceMode.STRICT;
-            containerFillManager.tick(tickCounter, placeRange.get(), strict,
-                rotate.get(), didPrinterForceSneak, this::resetSneakState);
+            tickContainerFill();
             return;
         }
 
-        // 如果已有未执行的 plan，跳过
-        if (armed != null) return;
+        // ── 前置守卫 ──
+        if (armed != null) return;                          // plan 待 Post 执行
+        if (moveStop.get() && isPlayerMoving()) return;     // 移动暂停
 
-        // 移动中暂停
-        if (moveStop.get() && isPlayerMoving()) return;
-
-        // 检查 Litematica 原理图
         WorldSchematic worldSchematic = SchematicWorldHandler.getSchematicWorld();
         if (worldSchematic == null) {
-            if (isActive()) {
-                error("Litematica schematic not loaded.");
-                toggle();
-            }
+            if (isActive()) { error("Litematica schematic not loaded."); toggle(); }
             return;
         }
 
-        // 处理延迟
-        if (tickDelay < placeDelay.get()) {
-            tickDelay++;
-            return;
-        }
+        if (tickDelay < placeDelay.get()) { tickDelay++; return; }
         tickDelay = 0;
 
-        // 更新任务列表
+        // ── 更新任务列表 ──
         updateTasks(worldSchematic);
-        if (tasks.isEmpty()) {
+
+        if (!tasks.isEmpty()) {
+            // 标准打印：构建候选 → 评分 → 准备
+            buildPreviewCandidates();
+            SelectionResult result = selectAndPrepare();
+            switch (result) {
+                case SelectionResult.Ready r -> armed = r.armed();
+                case SelectionResult.AwaitingPrep ignored -> {} // 等下一 tick 同步
+                case SelectionResult.None ignored -> resetSneakState();
+            }
+            if (armed != null) {
+                publishRenderPlan(armed.plan());
+                if (rotate.get()) {
+                    ActionPlan.Interaction inter = armed.plan().interaction();
+                    Rotations.requestPreMovement(inter.yaw(), inter.pitch(), 50, null);
+                }
+                return; // plan 已就绪，本 tick 不再启动容器
+            }
+            // armed == null：本轮无可用候选或等待切换，容器 IDLE 可趁隙启动
+        } else {
             previewCandidates.clear();
             resetSneakState();
-
-            // [临时调试] 门控日志：记录 tasks 为空时容器 tick 是否获得启动机会
-            ContainerFillLogger.logPrinterGate(0, armed != null, fillContainers.get(), containerFillManager.getState());
-
-            // 关键：普通任务为空时，正是容器填充从 IDLE 启动的最好时机。
-            // 不能直接 return，否则 ContainerFillManager 永远停在 IDLE。
-            if (fillContainers.get()) {
-                boolean strict = placeMode.get() == PlaceMode.STRICT;
-                containerFillManager.tick(tickCounter, placeRange.get(), strict,
-                    rotate.get(), didPrinterForceSneak, this::resetSneakState);
-            }
-            return;
         }
 
-        // 构建预览候选：纯函数式，无副作用
-        buildPreviewCandidates();
+        // ── 容器填充 IDLE：普通任务空或本轮无 armed 时，统一给容器子系统启动机会 ──
+        tickContainerFill();
+    }
 
-        // 选拔最优候选并执行必要准备（物品切换 / sneak）
-        SelectionResult result = selectAndPrepare();
-        switch (result) {
-            case SelectionResult.Ready r -> armed = r.armed();
-            case SelectionResult.AwaitingPrep ignored -> {} // 等下一 tick 同步
-            case SelectionResult.None ignored -> resetSneakState();
-        }
-
-        if (armed != null) {
-            // 发布渲染快照
-            publishRenderPlan(armed.plan());
-
-            // 通过 Rotations 协调器提交旋转请求
-            if (rotate.get()) {
-                ActionPlan.Interaction inter = armed.plan().interaction();
-                Rotations.requestPreMovement(inter.yaw(), inter.pitch(), 50, null);
-            }
-        }
-
-        // ── 容器物品填充子系统：IDLE 时尝试拾取新目标 ──
-        // busy 路径已在方法头部提前 return，此处仅处理 IDLE 状态的新目标搜索。
-        if (armed == null && fillContainers.get()) {
-            boolean strict = placeMode.get() == PlaceMode.STRICT;
-            containerFillManager.tick(tickCounter, placeRange.get(), strict,
-                rotate.get(), didPrinterForceSneak, this::resetSneakState);
-        }
+    /**
+     * 推进容器填充状态机（统一入口）。
+     * <p>将原先分散在 onTickPre 三处的 containerFillManager.tick() 调用
+     * 收敛为此单一方法，消除"某条路径提前 return 导致状态机被饿死"的风险。</p>
+     */
+    private void tickContainerFill() {
+        if (!fillContainers.get()) return;
+        // [临时调试] 门控日志：记录容器 tick 被调用时的上下文
+        ContainerFillLogger.logPrinterGate(
+            tasks.size(), armed != null, true, containerFillManager.getState());
+        boolean strict = placeMode.get() == PlaceMode.STRICT;
+        containerFillManager.tick(tickCounter, placeRange.get(), strict,
+            rotate.get(), didPrinterForceSneak, this::resetSneakState);
     }
 
     // ==================== 候选评分权重 ====================
