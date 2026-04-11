@@ -2,6 +2,7 @@ package meteordevelopment.meteorclient.utils.printer;
 
 import meteordevelopment.meteorclient.events.packets.InventoryEvent;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
+import meteordevelopment.meteorclient.utils.player.Rotations;
 import net.minecraft.block.entity.BarrelBlockEntity;
 import net.minecraft.block.entity.BlockEntity;
 import net.minecraft.block.entity.DispenserBlockEntity;
@@ -12,7 +13,6 @@ import net.minecraft.screen.ScreenHandler;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
-import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 
 import java.util.*;
@@ -20,28 +20,29 @@ import java.util.*;
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 /**
- * ContainerFillManager — 容器物品自动填充四态状态机
+ * ContainerFillManager — 容器物品自动填充五态状态机
  *
  * <p>与 Printer 标准行为管线并行运行的有状态子系统。
  * 标准行为处理<b>方块状态</b>差异（单 tick 无状态），
  * 本管理器处理<b>容器内容</b>差异（多 tick 有状态）。
  *
- * <h2>Grim 安全时序（严格遵循约束报告）</h2>
+ * <h2>架构核心：容器打开完全接入 Printer 的旋转/后发包体系</h2>
  * <pre>
- * Tick N     [PREPARING]  停止 sprint → ENTITY_ACTION(STOP_SPRINTING)
- * Tick N+1   [OPENING]    interactBlock → PLAYER_BLOCK_PLACEMENT
- *            ⏳ 等待服务端 OPEN_WINDOW + WINDOW_ITEMS（1~3 tick RTT）
- * Tick N+1+RTT [onInventorySync]  同 tick 内批量 CLICK_WINDOW + CLOSE_WINDOW
- * Tick N+2+RTT [COOLDOWN]  恢复 sprint → IDLE
+ * Tick N     [PREPARING]   清除 sneak + 停止 sprint → 规划交互面/点
+ * Tick N+1   [ARMED_OPEN]  Rotations.requestPreMovement → 等待 Post-movement
+ *            → Printer 在 SendMovementPacketsEvent.Post 里调用 executeOpen()
+ *            → interactBlock 发出，进入 OPENING
+ * Tick N+1+RTT [onInventorySync]  同 tick 内批量 QUICK_MOVE + CLOSE_WINDOW
+ * Tick N+2+RTT [COOLDOWN]  恢复 → IDLE
  * </pre>
  *
- * <h2>关键 Grim 约束对照</h2>
+ * <h2>关键 Grim 约束</h2>
  * <ul>
- *   <li><b>PacketOrderF</b>: sprint 切换与 interactBlock 分 tick → PREPARING 态隔离</li>
- *   <li><b>MultiActionsC</b>: CLICK_WINDOW 时 !sprinting → PREPARING/OPENING 持续压制 sprint</li>
- *   <li><b>MultiActionsD</b>: CLOSE_WINDOW 时 !sprinting → 同上</li>
+ *   <li><b>PacketOrderF</b>: sprint 切换与 interactBlock 分 tick → PREPARING 隔离</li>
+ *   <li><b>Sneak→Use 语义</b>: 潜行右键容器 = 绕过 onUse → 开不了容器 → 必须 REQUIRE_NOT_SNEAK</li>
+ *   <li><b>Movement 对齐</b>: interactBlock 与 look packet 同 tick → Rotations + Post-movement</li>
+ *   <li><b>MultiActionsC/D</b>: CLICK_WINDOW / CLOSE_WINDOW 时 !sprinting → 全程压制</li>
  *   <li><b>PacketOrderA</b>: 全部使用 QUICK_MOVE，不混用其他点击类型</li>
- *   <li><b>Post(1.13+)</b>: CLICK_WINDOW 免检 → 无数量限制</li>
  * </ul>
  *
  * <h2>支持的容器类型（MVP）</h2>
@@ -52,23 +53,26 @@ public class ContainerFillManager {
     // ==================== 状态枚举 ====================
 
     /**
-     * 四态状态机。
+     * 五态状态机。
      *
      * <pre>
-     * IDLE ──pickTarget──→ PREPARING ──(next tick)──→ OPENING ──onInventorySync──→ COOLDOWN ──→ IDLE
-     *                       (停sprint)    (interactBlock)     (fill+close)        (sprint恢复)
-     *                                                  │ timeout
-     *                                                  └──→ COOLDOWN
+     * IDLE ──pickTarget──→ PREPARING ──(plan ok)──→ ARMED_OPEN ──(post-movement)──→ OPENING
+     *                       (unsneak+停sprint)       (旋转提交)     (interactBlock)
+     *                                                                  │ inventorySync → fill+close
+     *                                                                  │ timeout
+     *                                                                  └──→ COOLDOWN ──→ IDLE
      * </pre>
      */
     public enum State {
         /** 空闲，搜索下一个目标 */
         IDLE,
-        /** 已选定目标并停止 sprint，等待下一 tick 发送 interactBlock（PacketOrderF 要求分 tick） */
+        /** 已选定目标，清理输入态（sneak→off, sprint→off），规划交互面 */
         PREPARING,
+        /** 交互已规划完成，旋转已提交，等待 Printer 在 Post-movement 中执行 */
+        ARMED_OPEN,
         /** 已发送 interactBlock，等待服务端 WINDOW_ITEMS 回包 */
         OPENING,
-        /** 操作完成或超时，等待一 tick 冷却后恢复 sprint */
+        /** 操作完成或超时/失败，清理后恢复 IDLE */
         COOLDOWN
     }
 
@@ -87,11 +91,21 @@ public class ContainerFillManager {
     private int openTick;
 
     /**
+     * ARMED_OPEN 阶段的交互规划。
+     * <p>由 {@link InteractionPlanner#planSelfInteraction} 生成，
+     * Printer 在 {@code SendMovementPacketsEvent.Post} 中读取并执行。
+     */
+    private ActionPlan.Interaction armedInteraction;
+
+    /**
      * 容器屏幕抑制标志。
      * <p>为 true 时，Printer 应拦截 OpenScreenEvent 阻止容器 GUI 弹出。
      * 操作完成后自动清除。
      */
     private boolean suppressScreen;
+
+    /** 最大交互距离（由 Printer 传入）。 */
+    private double maxReach;
 
     // ==================== 蓝图缓存 ====================
 
@@ -134,17 +148,23 @@ public class ContainerFillManager {
     // ==================== 主循环 ====================
 
     /**
-     * 每 tick 调用，驱动四态状态机。
-     * <p>PREPARING / OPENING 期间持续压制 sprint，防止玩家移动输入重新触发。
+     * 每 tick 调用，驱动五态状态机。
      *
-     * @param tickCounter Printer 全局 tick 计数器
-     * @param maxReach    最大交互距离
+     * @param tickCounter    Printer 全局 tick 计数器
+     * @param maxReach       最大交互距离
+     * @param strict         是否 strict 模式
+     * @param rotateEnabled  是否启用旋转
+     * @param sneakForced    Printer 是否正在强制潜行（需要先清除才能开容器）
+     * @param sneakClearer   清除 Printer 潜行状态的回调
      */
-    public void tick(int tickCounter, double maxReach) {
+    public void tick(int tickCounter, double maxReach, boolean strict,
+                     boolean rotateEnabled, boolean sneakForced, Runnable sneakClearer) {
         if (mc.player == null || mc.world == null) return;
 
+        this.maxReach = maxReach;
+
         // 处于激活状态时持续压制 sprint（MultiActionsC/D 要求全程 !sprinting）
-        if (state == State.PREPARING || state == State.OPENING) {
+        if (state == State.PREPARING || state == State.ARMED_OPEN || state == State.OPENING) {
             if (mc.player.isSprinting()) mc.player.setSprinting(false);
         }
 
@@ -152,11 +172,42 @@ public class ContainerFillManager {
             case IDLE -> pickTarget(maxReach);
 
             case PREPARING -> {
-                // 上一 tick 已停 sprint，本 tick 安全发送 interactBlock（PacketOrderF 安全）
-                sendOpenContainer(targetPos);
-                openTick = mc.player.age;
-                suppressScreen = true;
-                state = State.OPENING;
+                // 第一步：清除 Printer 遗留的强制潜行
+                if (sneakForced) {
+                    sneakClearer.run();
+                    return; // 等下一 tick sneak 状态生效
+                }
+
+                // 第二步：确保玩家当前不处于潜行（用户手动潜行也要等）
+                if (mc.player.isSneaking()) {
+                    return; // 等玩家松开 sneak
+                }
+
+                // 第三步：规划容器打开交互（真实几何面 + LOS + reach）
+                armedInteraction = InteractionPlanner.planSelfInteraction(
+                    mc, targetPos, strict, true, maxReach
+                );
+
+                if (armedInteraction == null) {
+                    // 当前无法找到有效交互面（被遮挡/超出 reach）
+                    state = State.COOLDOWN;
+                    return;
+                }
+
+                // 成功规划 → 进入 ARMED_OPEN
+                state = State.ARMED_OPEN;
+
+                // 提交旋转请求（如果启用），本 tick movement 会包含正确的 yaw/pitch
+                if (rotateEnabled) {
+                    Rotations.requestPreMovement(
+                        armedInteraction.yaw(), armedInteraction.pitch(), 50, null
+                    );
+                }
+            }
+
+            case ARMED_OPEN -> {
+                // 等待 Printer 在 SendMovementPacketsEvent.Post 中调用 executeOpen()。
+                // 正常情况下本态只存活 1 tick。
             }
 
             case OPENING -> {
@@ -169,9 +220,52 @@ public class ContainerFillManager {
             case COOLDOWN -> {
                 // sprint 恢复由玩家移动输入自然触发，此处仅清除标志
                 suppressScreen = false;
+                armedInteraction = null;
                 state = State.IDLE;
             }
         }
+    }
+
+    // ==================== Printer 执行钩子 ====================
+
+    /**
+     * 由 Printer 在 {@code SendMovementPacketsEvent.Post} 中调用。
+     *
+     * <p>此时 movement packet（含旋转）已经发出，可以安全发送 interactBlock。
+     * 交互使用 {@link #armedInteraction} 中规划好的面、命中点、方向。
+     *
+     * @return true 表示确实执行了容器打开（Printer 据此跳过其他操作）
+     */
+    public boolean executeOpen() {
+        if (state != State.ARMED_OPEN || armedInteraction == null) return false;
+
+        BlockPos pos = targetPos;
+        ActionPlan.Interaction inter = armedInteraction;
+
+        // 最终距离检查（移动后可能超出 reach）
+        double distSq = mc.player.getEyePos().squaredDistanceTo(inter.hitVec());
+        if (distSq > maxReach * maxReach) {
+            armedInteraction = null;
+            state = State.COOLDOWN;
+            return false;
+        }
+
+        // 发送 interactBlock — 使用规划好的面和命中点
+        suppressScreen = true;
+        mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND,
+            new BlockHitResult(inter.hitVec(), inter.clickedFace(), pos, false));
+        openTick = mc.player.age;
+        armedInteraction = null;
+        state = State.OPENING;
+        return true;
+    }
+
+    /**
+     * ARMED_OPEN 态的交互规划（Printer 用于提交 Rotations）。
+     * 非 ARMED_OPEN 态返回 null。
+     */
+    public ActionPlan.Interaction getArmedInteraction() {
+        return state == State.ARMED_OPEN ? armedInteraction : null;
     }
 
     // ==================== 事件回调 ====================
@@ -193,15 +287,7 @@ public class ContainerFillManager {
         List<ItemStack> allSlots = event.packet.getContents();
         int containerSlotCount = Math.max(0, allSlots.size() - PLAYER_INV_SLOTS);
 
-        Map<Item, Integer> containerContents = new HashMap<>();
-        for (int i = 0; i < containerSlotCount; i++) {
-            ItemStack stack = allSlots.get(i);
-            if (!stack.isEmpty()) {
-                containerContents.merge(stack.getItem(), stack.getCount(), Integer::sum);
-            }
-        }
-
-        fillAndClose(containerContents, containerSlotCount);
+        fillAndClose(containerSlotCount);
     }
 
     /** Printer 在 OpenScreenEvent 中检查此标志以决定是否抑制容器 GUI。 */
@@ -278,6 +364,7 @@ public class ContainerFillManager {
         targetPos = null;
         openTick = 0;
         suppressScreen = false;
+        armedInteraction = null;
         schematicCache.clear();
         satisfiedPositions.clear();
         thisTickScanned.clear();
@@ -287,7 +374,7 @@ public class ContainerFillManager {
 
     /**
      * 搜索 reach 内最近的可操作未满足容器。
-     * 找到后停止 sprint 并进入 PREPARING（PacketOrderF 要求 sprint 切换与 interact 分 tick）。
+     * 找到后停止 sprint 并进入 PREPARING。
      */
     private void pickTarget(double maxReach) {
         Vec3d eye = mc.player.getEyePos();
@@ -313,7 +400,7 @@ public class ContainerFillManager {
         Map<Item, Integer> needs = schematicCache.get(best);
         if (needs != null && !hasAnyNeededItem(needs)) return;
 
-        // 停止 sprint，进入 PREPARING（下一 tick 才发 interactBlock）
+        // 停止 sprint，进入 PREPARING
         if (mc.player.isSprinting()) mc.player.setSprinting(false);
         targetPos = best;
         state = State.PREPARING;
@@ -322,24 +409,15 @@ public class ContainerFillManager {
     // ==================== 内部：填充 + 关闭 ====================
 
     /**
-     * 计算差异 → 批量 QUICK_MOVE → 关闭容器。全部在 onInventorySync 同一 tick 完成。
+     * 读取当前 handler 的容器槽 → 计算差异 → 批量 QUICK_MOVE → 关闭容器。
+     * 全部在 onInventorySync 同一 tick 完成。
      *
-     * <p>Grim 安全保证：
-     * <ul>
-     *   <li>全部 QUICK_MOVE（PacketOrderA 安全，不混用 PICKUP）</li>
-     *   <li>1.13+ CLICK_WINDOW 免 Post 检查，无数量限制</li>
-     *   <li>serverOpenedInventoryThisTick 豁免 MultiActionsC</li>
-     * </ul>
+     * <p>每次 shift-click 后从 handler 重读容器实际数量，用真实增量驱动 deficit，
+     * 避免 QUICK_MOVE 整组搬运导致的过填/欠填。
      *
-     * <h3>修正要点</h3>
-     * <ul>
-     *   <li><b>实际观察</b>：每次 shift-click 后从 handler 重读容器区实际数量，
-     *       用真实增量而非纸面估算驱动 deficit，避免过填/欠填</li>
-     *   <li><b>post-fill 重算</b>：填充结束后重新扫描 handler，
-     *       判定是否满足蓝图需求 → 准确更新 satisfiedPositions</li>
-     * </ul>
+     * <p>填充结束后 post-fill 重算：从 handler 最终状态准确判定 satisfied。
      */
-    private void fillAndClose(Map<Item, Integer> containerContents, int containerSlotCount) {
+    private void fillAndClose(int containerSlotCount) {
         Map<Item, Integer> needs = schematicCache.get(targetPos);
         ScreenHandler handler = mc.player.currentScreenHandler;
 
@@ -403,14 +481,7 @@ public class ContainerFillManager {
         return count;
     }
 
-    // ==================== 内部：交互辅助 ====================
-
-    /** 发送 interactBlock 打开容器（点击顶面中心）。 */
-    private void sendOpenContainer(BlockPos pos) {
-        Vec3d hit = Vec3d.ofCenter(pos).add(0, 0.5, 0);
-        mc.interactionManager.interactBlock(mc.player, Hand.MAIN_HAND,
-            new BlockHitResult(hit, Direction.UP, pos, false));
-    }
+    // ==================== 内部：容器关闭 ====================
 
     /** 关闭当前容器窗口（走正规路径，Grim CompensatedInventory 同步）。 */
     private void closeContainerSilently() {

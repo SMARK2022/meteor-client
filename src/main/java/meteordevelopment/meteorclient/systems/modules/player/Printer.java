@@ -650,7 +650,11 @@ public class Printer extends Module {
         // 会卡在中间状态导致"明明有材料也不开始"。
         // 因此 busy 时无条件推进状态机，标准打印管线让路。
         if (fillContainers.get() && containerFillManager.isBusy()) {
-            containerFillManager.tick(tickCounter, placeRange.get());
+            // 清除遗留的强制潜行（潜行右键 = item use，不是 open container）
+            resetSneakState();
+            boolean strict = placeMode.get() == PlaceMode.STRICT;
+            containerFillManager.tick(tickCounter, placeRange.get(), strict,
+                rotate.get(), didPrinterForceSneak, this::resetSneakState);
             return;
         }
 
@@ -710,7 +714,9 @@ public class Printer extends Module {
         // ── 容器物品填充子系统：IDLE 时尝试拾取新目标 ──
         // busy 路径已在方法头部提前 return，此处仅处理 IDLE 状态的新目标搜索。
         if (armed == null && fillContainers.get()) {
-            containerFillManager.tick(tickCounter, placeRange.get());
+            boolean strict = placeMode.get() == PlaceMode.STRICT;
+            containerFillManager.tick(tickCounter, placeRange.get(), strict,
+                rotate.get(), didPrinterForceSneak, this::resetSneakState);
         }
     }
 
@@ -942,6 +948,11 @@ public class Printer extends Module {
                 executePlan(armed);
             }
             armed = null;
+        }
+
+        // 容器打开：ARMED_OPEN 态时，movement packet（含旋转）已发出，执行 interactBlock
+        if (fillContainers.get() && containerFillManager.executeOpen()) {
+            // interactBlock 已发送，无需额外操作
         }
     }
 
@@ -1523,6 +1534,7 @@ public class Printer extends Module {
         String stTag = switch (st) {
             case IDLE      -> "";
             case PREPARING -> " \u23f3";
+            case ARMED_OPEN -> " \u2b50";
             case OPENING   -> " \u27f3";
             case COOLDOWN  -> " \u2026";
         };

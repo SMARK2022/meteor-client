@@ -88,12 +88,13 @@ public class ContainerFillScreen extends WindowScreen {
         String stateText = switch (st) {
             case IDLE      -> "Idle";
             case PREPARING -> "Preparing...";
+            case ARMED_OPEN -> "Armed (open)";
             case OPENING   -> "Opening...";
             case COOLDOWN  -> "Cooldown";
         };
         Color stateColor = switch (st) {
             case IDLE      -> COLOR_GRAY;
-            case PREPARING, OPENING -> COLOR_YELLOW;
+            case PREPARING, ARMED_OPEN, OPENING -> COLOR_YELLOW;
             case COOLDOWN  -> COLOR_ORANGE;
         };
 
