@@ -7,6 +7,7 @@ import meteordevelopment.meteorclient.utils.printer.PrinterBehavior;
 import meteordevelopment.meteorclient.utils.printer.PrinterTask;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.SlabBlock;
+import net.minecraft.block.enums.SlabType;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.state.property.Properties;
 import net.minecraft.state.property.Property;
@@ -82,6 +83,14 @@ public class BlockBreakBehavior implements PrinterBehavior {
 
         // 方块类型不同 → 必须破坏重放
         if (current.getBlock() != desired.getBlock()) return true;
+
+        // 双层半砖补全：蓝图要求 DOUBLE、世界已有 TOP/BOTTOM → 放置完成即可，不破坏
+        if (current.getBlock() instanceof SlabBlock
+            && desired.contains(SlabBlock.TYPE) && current.contains(SlabBlock.TYPE)
+            && desired.get(SlabBlock.TYPE) == SlabType.DOUBLE
+            && current.get(SlabBlock.TYPE) != SlabType.DOUBLE) {
+            return false;
+        }
 
         // 同类型方块：仅在不可变属性不一致时破坏
         return hasImmutablePropertyDifference(desired, current);

@@ -69,7 +69,6 @@ public class ContainerFillScreen extends WindowScreen {
 
         for (BlockPos pos : manager.getRegisteredPositions()) {
             double dSq = eye.squaredDistanceTo(Vec3d.ofCenter(pos));
-            if (dSq > rangeSq) continue;
 
             Map<Item, Integer> needs = manager.getNeedsAt(pos);
             if (needs == null || needs.isEmpty()) continue;
@@ -80,8 +79,10 @@ public class ContainerFillScreen extends WindowScreen {
             if (ok) satisfied++;
 
             Item icon = null;
-            BlockEntity be = mc.world.getBlockEntity(pos);
-            if (be != null) icon = be.getCachedState().getBlock().asItem();
+            if (dSq <= rangeSq) {
+                BlockEntity be = mc.world.getBlockEntity(pos);
+                if (be != null) icon = be.getCachedState().getBlock().asItem();
+            }
 
             Entry entry = new Entry(pos, icon, snap, needs, dSq);
             (dSq <= reachSq ? nearby : cached).add(entry);
