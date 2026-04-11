@@ -1516,7 +1516,7 @@ public class Printer extends Module {
      * @param pos 待检查的世界坐标
      * @return true 表示该位置在至少一个已启用子区域的边界内
      */
-    private boolean isWithinAnyPlacement(BlockPos pos) {
+    static boolean isWithinAnyPlacement(BlockPos pos) {
         var manager = DataManager.getSchematicPlacementManager();
         for (var placement : manager.getAllSchematicsPlacements()) {
             if (!placement.isEnabled()) continue;

@@ -76,6 +76,18 @@ public class SpawnProof extends Module {
         .defaultValue(2).min(1).sliderRange(1, 10)
         .build());
 
+    private final Setting<List<Block>> excludeBlocks = sgGeneral.add(new BlockListSetting.Builder()
+        .name("排除方块")
+        .description("位于这些方块上方的位置不进行防刷怪标记（如灵魂沙）。")
+        .defaultValue(List.of(Blocks.SOUL_SAND))
+        .build());
+
+    private final Setting<Boolean> skipSchematic = sgGeneral.add(new BoolSetting.Builder()
+        .name("排除投影区域")
+        .description("跳过 Litematica 投影内的位置，避免干扰蓝图放置。")
+        .defaultValue(true)
+        .build());
+
     private final Setting<Integer> cacheRadius = sgGeneral.add(new IntSetting.Builder()
         .name("缓存半径")
         .description("AFK 中心起算的全域分析扫描范围。")
@@ -224,6 +236,8 @@ public class SpawnProof extends Module {
 
         spawnablePositions.clear();
         BlockPos.Mutable mpos = new BlockPos.Mutable();
+        List<Block> excluded = excludeBlocks.get();
+        boolean skipSch = skipSchematic.get();
 
         for (int dx = -hRange; dx <= hRange; dx++)
             for (int dz = -hRange; dz <= hRange; dz++) {
@@ -240,6 +254,13 @@ public class SpawnProof extends Module {
                     boolean spawnable = isTorch
                         ? SpawnCheckHelper.canHostileSpawnAt(mc.world, mpos)
                         : SpawnCheckHelper.isGeometricSpawnable(mc.world, mpos);
+
+                    if (spawnable && !excluded.isEmpty()) {
+                        mpos.setY(y - 1);
+                        if (excluded.contains(mc.world.getBlockState(mpos).getBlock())) spawnable = false;
+                        mpos.setY(y);
+                    }
+                    if (spawnable && skipSch && Printer.isWithinAnyPlacement(mpos)) spawnable = false;
 
                     if (spawnable) {
                         BlockPos imm = mpos.toImmutable();
@@ -303,6 +324,8 @@ public class SpawnProof extends Module {
     private void tickAnalysis() {
         int hRange2 = aHRange * aHRange;
         boolean isTorch = mode.get() == Mode.TORCH;
+        List<Block> excluded = excludeBlocks.get();
+        boolean skipSch = skipSchematic.get();
 
         for (int i = 0; i < ANALYSIS_BUDGET; ) {
             if (aDx > aHRange) { finishAnalysis(); return; }
@@ -318,6 +341,9 @@ public class SpawnProof extends Module {
                 boolean spawnable = isTorch
                     ? SpawnCheckHelper.canHostileSpawnAt(mc.world, pos)
                     : SpawnCheckHelper.isGeometricSpawnable(mc.world, pos);
+                if (spawnable && !excluded.isEmpty()
+                    && excluded.contains(mc.world.getBlockState(pos.down()).getBlock())) spawnable = false;
+                if (spawnable && skipSch && Printer.isWithinAnyPlacement(pos)) spawnable = false;
                 if (spawnable) { cacheAdd(pos.toImmutable()); aFound++; }
             }
 
