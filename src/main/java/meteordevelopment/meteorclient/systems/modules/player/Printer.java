@@ -285,6 +285,13 @@ public class Printer extends Module {
             .defaultValue(false)
             .build());
 
+    private final Setting<ContainerFillManager.OverfillPolicy> overfillPolicy = sgBehavior.add(new EnumSetting.Builder<ContainerFillManager.OverfillPolicy>()
+            .name("overfill-policy")
+            .description("FAST: shift-click all matching stacks (fastest, may overfill). PRECISE: precisely places the exact count needed using pickup + right-click placement (Grim-safe, no overfill).")
+            .defaultValue(ContainerFillManager.OverfillPolicy.PRECISE)
+            .visible(fillContainers::get)
+            .build());
+
     // Key → sub-toggle mapping (populated in constructor)
     private final Map<PrinterBehavior.Key, Setting<Boolean>> subToggles = new EnumMap<>(PrinterBehavior.Key.class);
 
@@ -721,7 +728,8 @@ public class Printer extends Module {
             tasks.size(), armed != null, true, containerFillManager.getState());
         boolean strict = placeMode.get() == PlaceMode.STRICT;
         containerFillManager.tick(tickCounter, placeRange.get(), strict,
-            rotate.get(), didPrinterForceSneak, this::resetSneakState);
+            rotate.get(), didPrinterForceSneak, this::resetSneakState,
+            overfillPolicy.get());
     }
 
     // ==================== 候选评分权重 ====================
@@ -1597,7 +1605,8 @@ public class Printer extends Module {
      */
     private void openContainerFillScreen() {
         if (!isActive() || !fillContainers.get()) return;
-        mc.setScreen(new ContainerFillScreen(GuiThemes.get(), containerFillManager, containerInfoRange.get()));
+        mc.setScreen(new ContainerFillScreen(GuiThemes.get(), containerFillManager,
+            containerInfoRange.get(), placeRange.get()));
     }
 
     @Override
