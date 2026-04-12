@@ -608,6 +608,7 @@ public class CrystalAura extends Module {
     private final LongSet validBasePosCache = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
     private boolean baseCacheDirty = true;
     private int baseCacheScanRange;
+    private int baseCacheCenterX, baseCacheCenterY, baseCacheCenterZ;
 
     public CrystalAura() {
         super(Categories.Combat, "crystal-aura", "Automatically places and attacks crystals.");
@@ -753,7 +754,8 @@ public class CrystalAura extends Module {
 
         // Spawn window: instant break with fresh damage evaluation
         // Own crystals skip age check; all others use standard validation
-        if (fastBreak.get() && !attackedThisTick && attacks < attackFrequency.get()) {
+        // Respects switchTimer for anti-cheat packet ordering
+        if (fastBreak.get() && !attackedThisTick && switchTimer <= 0 && attacks < attackFrequency.get()) {
             float damage = getBreakDamage(event.entity, !isOwnCrystal);
             if (damage > 0) doBreak(event.entity);
         }
@@ -929,10 +931,26 @@ public class CrystalAura extends Module {
 
     @EventHandler
     private void onBlockUpdate(BlockUpdateEvent event) {
-        // Invalidate base cache when blocks change within placement range
-        if (mc.player != null && mc.player.getBlockPos().isWithinDistance(event.pos, placeRange.get() + 2)) {
-            baseCacheDirty = true;
-        }
+        if (mc.player == null || baseCacheDirty) return;
+        BlockPos pos = event.pos;
+        int range = baseCacheScanRange;
+
+        // Skip positions outside cache coverage
+        if (Math.abs(pos.getX() - baseCacheCenterX) > range + 1
+            || Math.abs(pos.getY() - baseCacheCenterY) > range + 1
+            || Math.abs(pos.getZ() - baseCacheCenterZ) > range + 1) return;
+
+        // Incremental update: changed pos as potential air-above, and bases below
+        boolean se = support.get() != SupportMode.Disabled;
+        updateCacheAt(pos.getX(), pos.getY(), pos.getZ(), se);
+        updateCacheAt(pos.getX(), pos.getY() - 1, pos.getZ(), se);
+        if (placement112.get()) updateCacheAt(pos.getX(), pos.getY() - 2, pos.getZ(), se);
+    }
+
+    private void updateCacheAt(int x, int y, int z, boolean supportEnabled) {
+        long packed = BlockPos.asLong(x, y, z);
+        if (isValidBase(x, y, z, supportEnabled)) validBasePosCache.add(packed);
+        else validBasePosCache.remove(packed);
     }
 
     // Crystal state queries for renderers (no entity mixin needed)
@@ -946,38 +964,49 @@ public class CrystalAura extends Module {
         return System.currentTimeMillis() - crystalSpawnTimes.getOrDefault(entityId, 0L) <= 150;
     }
 
-    // Valid base position cache — refreshed on block change
+    // Valid base position cache — full rebuild on move/range change, incremental on block update
+
+    private boolean isValidBase(int x, int y, int z, boolean supportEnabled) {
+        blockPos.set(x, y, z);
+        net.minecraft.block.BlockState state = mc.world.getBlockState(blockPos);
+        boolean hasBlock = state.isOf(Blocks.BEDROCK) || state.isOf(Blocks.OBSIDIAN);
+        if (!hasBlock && !(supportEnabled && state.isReplaceable())) return false;
+
+        blockPos.set(x, y + 1, z);
+        if (!mc.world.getBlockState(blockPos).isAir()) return false;
+        if (placement112.get()) {
+            blockPos.set(x, y + 2, z);
+            if (!mc.world.getBlockState(blockPos).isAir()) return false;
+        }
+        return true;
+    }
 
     private void refreshBaseCacheIfNeeded() {
         int range = (int) Math.ceil(placeRange.get());
-        if (!baseCacheDirty && range == baseCacheScanRange) return;
+        BlockPos pp = mc.player.getBlockPos();
+
+        // Full rebuild when: dirty, range changed, or player moved >2 blocks from scan center
+        if (!baseCacheDirty && range == baseCacheScanRange
+            && Math.abs(pp.getX() - baseCacheCenterX) <= 2
+            && Math.abs(pp.getY() - baseCacheCenterY) <= 2
+            && Math.abs(pp.getZ() - baseCacheCenterZ) <= 2) return;
 
         validBasePosCache.clear();
-        BlockPos playerPos = mc.player.getBlockPos();
-        boolean supportEnabled = support.get() != SupportMode.Disabled;
+        boolean se = support.get() != SupportMode.Disabled;
 
         for (int dx = -range; dx <= range; dx++) {
             for (int dy = -range; dy <= range; dy++) {
                 for (int dz = -range; dz <= range; dz++) {
-                    int x = playerPos.getX() + dx, y = playerPos.getY() + dy, z = playerPos.getZ() + dz;
-                    blockPos.set(x, y, z);
-                    net.minecraft.block.BlockState state = mc.world.getBlockState(blockPos);
-                    boolean hasBlock = state.isOf(Blocks.BEDROCK) || state.isOf(Blocks.OBSIDIAN);
-                    if (hasBlock || (supportEnabled && state.isReplaceable())) {
-                        // Check air above
-                        blockPos.set(x, y + 1, z);
-                        if (!mc.world.getBlockState(blockPos).isAir()) continue;
-                        if (placement112.get()) {
-                            blockPos.set(x, y + 2, z);
-                            if (!mc.world.getBlockState(blockPos).isAir()) continue;
-                        }
-                        validBasePosCache.add(net.minecraft.util.math.BlockPos.asLong(x, y, z));
-                    }
+                    int x = pp.getX() + dx, y = pp.getY() + dy, z = pp.getZ() + dz;
+                    if (isValidBase(x, y, z, se)) validBasePosCache.add(BlockPos.asLong(x, y, z));
                 }
             }
         }
         baseCacheDirty = false;
         baseCacheScanRange = range;
+        baseCacheCenterX = pp.getX();
+        baseCacheCenterY = pp.getY();
+        baseCacheCenterZ = pp.getZ();
     }
 
     // Place
@@ -1063,6 +1092,10 @@ public class CrystalAura extends Module {
 
         // Place the crystal — choose between direct and support candidates
         BlockIterator.after(() -> {
+            // GrimAC MultiActionsF: entity interact + block place in same tick is flagged
+            // Skip placement on ticks where we already attacked a crystal
+            if (attackedThisTick) return;
+
             // Direct always preferred; support only when no direct or support damage significantly higher
             boolean useDirect = bestDirectDamage.get() > 0;
             boolean useSupport = supportEnabled && bestSupportDamage.get() > 0
