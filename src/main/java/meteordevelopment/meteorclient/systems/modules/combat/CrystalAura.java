@@ -10,6 +10,7 @@ import it.unimi.dsi.fastutil.ints.*;
 import it.unimi.dsi.fastutil.longs.LongSet;
 import meteordevelopment.meteorclient.events.entity.EntityAddedEvent;
 import meteordevelopment.meteorclient.events.entity.EntityRemovedEvent;
+import meteordevelopment.meteorclient.events.entity.player.InteractItemEvent;
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.render.Render2DEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
@@ -769,6 +770,10 @@ public class CrystalAura extends Module {
         // Respects switchTimer for anti-cheat packet ordering
         if (fastBreak.get() && !attackedThisTick && switchTimer <= 0 && attacks < attackFrequency.get()) {
             float damage = getBreakDamage(event.entity, !isOwnCrystal);
+            // 致命覆盖：新生水晶若能击杀目标，无视 smartDelay 限制
+            if (damage <= 0 && smartDelay.get()) {
+                damage = getBreakDamageLethalOverride(event.entity, !isOwnCrystal);
+            }
             if (damage > 0) doBreak(event.entity);
         }
     }
@@ -862,6 +867,33 @@ public class CrystalAura extends Module {
         return damage;
     }
 
+    /**
+     * 致命覆盖版 getBreakDamage —— 仅在新生窗口使用。
+     * 忽略 smartDelay（hurtTime）限制，但仅当伤害能击杀任一目标时才返回非零值。
+     * 其余检查（age、range、self-damage、anti-suicide）与标准版一致。
+     */
+    private float getBreakDamageLethalOverride(Entity entity, boolean checkCrystalAge) {
+        if (!(entity instanceof EndCrystalEntity)) return 0;
+        if (onlyBreakOwn.get() && !placedCrystals.contains(entity.getId())) return 0;
+        if (removed.contains(entity.getId())) return 0;
+        if (attemptedBreaks.get(entity.getId()) > breakAttempts.get()) return 0;
+        if (checkCrystalAge && entity.age < ticksExisted.get()) return 0;
+        if (isOutOfRange(entity.getPos(), entity.getBlockPos(), false)) return 0;
+
+        blockPos.set(entity.getBlockPos()).move(0, -1, 0);
+        float selfDamage = DamageUtils.crystalDamage(mc.player, entity.getPos(), predictMovement.get(), blockPos);
+        float effectiveMaxDmg = maxDamage.get().floatValue();
+        if (TickRate.INSTANCE.getTickRate() < 18) effectiveMaxDmg *= 0.85f;
+        if (selfDamage > effectiveMaxDmg || (antiSuicide.get() && selfDamage >= EntityUtils.getTotalHealth(mc.player))) return 0;
+
+        // 仅检查致命伤害（无视 hurtTime）
+        for (LivingEntity target : targets) {
+            float dmg = DamageUtils.crystalDamage(target, entity.getPos(), predictMovement.get(), blockPos);
+            if (dmg >= EntityUtils.getTotalHealth(target)) return dmg;
+        }
+        return 0;
+    }
+
     private void doBreak(Entity crystal) {
         // Anti weakness
         if (antiWeakness.get()) {
@@ -942,6 +974,35 @@ public class CrystalAura extends Module {
         if (event.packet instanceof UpdateSelectedSlotC2SPacket) {
             switchTimer = switchDelay.get();
         }
+    }
+
+    /**
+     * 玩家手动右键使用物品时，废弃旧的异步搜索结果和方案缓存。
+     * mio 宿主层协同：避免用户操作与 AC 过期结果冲突。
+     */
+    @EventHandler
+    private void onInteractItem(InteractItemEvent event) {
+        planner.clearResults();
+        hasProposal = false;
+    }
+
+    /**
+     * 智能 support 仲裁 —— 决定是否优先选择 support 方案而非 direct 方案。
+     * - support 伤害致命（>= 目标血量）→ 始终优先
+     * - 目标低血量（贴脸放置区间）→ 阈值降为 1.2x
+     * - 默认 → support 伤害需超过 direct 的 1.5x
+     */
+    private boolean shouldPreferSupport(double supportDmg, double directDmg) {
+        if (directDmg <= 0) return supportDmg > 0;
+        LivingEntity nearest = getNearestTarget();
+        if (nearest != null) {
+            float hp = EntityUtils.getTotalHealth(nearest);
+            // 致命 support 始终优先（能一击杀则不计代价补块）
+            if (supportDmg >= hp) return true;
+            // 低血量目标时降低阈值（补块延迟小于对手回血量）
+            if (hp <= facePlaceHealth.get()) return supportDmg > directDmg * 1.2;
+        }
+        return supportDmg > directDmg * 1.5;
     }
 
     @EventHandler
@@ -1138,11 +1199,11 @@ public class CrystalAura extends Module {
             if (yawStepMode.get() == YawStepMode.Break || doYawSteps(yaw, pitch)) {
                 setRotation(true, vec3d, 0, 0);
                 Rotations.rotate(yaw, pitch, 50, () -> placeCrystal(result, proposalDamage, supportBlock));
-                placeTimer += placeDelay.get();
+                placeTimer += getEffectivePlaceDelay();
             }
         } else {
             placeCrystal(result, proposalDamage, supportBlock);
-            placeTimer += placeDelay.get();
+            placeTimer += getEffectivePlaceDelay();
         }
     }
 
@@ -1185,6 +1246,11 @@ public class CrystalAura extends Module {
             boolean useSupport = supportEnabled && as != null
                 && (!useDirect || as.damage() > ad.damage() * 1.5);
 
+            // 智能仲裁：致命/低血量场景动态调整阈值
+            if (supportEnabled && as != null && ad != null) {
+                useSupport = shouldPreferSupport(as.damage(), ad.damage());
+            }
+
             CrystalPlanner.PlaceResult chosen = useSupport ? as : useDirect ? ad : null;
             if (chosen != null) {
                 BlockPos.Mutable bp = new BlockPos.Mutable(chosen.x(), chosen.y(), chosen.z());
@@ -1220,11 +1286,11 @@ public class CrystalAura extends Module {
                             if (yawStepMode.get() == YawStepMode.Break || doYawSteps(yaw, pitch)) {
                                 setRotation(true, vec3d, 0, 0);
                                 Rotations.rotate(yaw, pitch, 50, () -> placeCrystal(result, chosen.damage(), supportBlock));
-                                placeTimer += placeDelay.get();
+                                placeTimer += getEffectivePlaceDelay();
                             }
                         } else {
                             placeCrystal(result, chosen.damage(), supportBlock);
-                            placeTimer += placeDelay.get();
+                            placeTimer += getEffectivePlaceDelay();
                         }
 
                         // Submit next async scan for following ticks
@@ -1329,6 +1395,11 @@ public class CrystalAura extends Module {
             boolean useSupport = supportEnabled && bestSupportDamage.get() > 0
                 && (!useDirect || bestSupportDamage.get() > bestDirectDamage.get() * 1.5);
 
+            // 智能仲裁：致命/低血量场景动态调整阈值
+            if (supportEnabled && bestSupportDamage.get() > 0 && bestDirectDamage.get() > 0) {
+                useSupport = shouldPreferSupport(bestSupportDamage.get(), bestDirectDamage.get());
+            }
+
             double bestDamage;
             BlockPos.Mutable bestBlockPos;
             BlockPos supportBlock;
@@ -1368,12 +1439,12 @@ public class CrystalAura extends Module {
                     setRotation(true, vec3d, 0, 0);
                     Rotations.rotate(yaw, pitch, 50, () -> placeCrystal(result, bestDamage, supportBlock));
 
-                    placeTimer += placeDelay.get();
+                    placeTimer += getEffectivePlaceDelay();
                 }
             }
             else {
                 placeCrystal(result, bestDamage, supportBlock);
-                placeTimer += placeDelay.get();
+                placeTimer += getEffectivePlaceDelay();
             }
         });
     }
@@ -1449,6 +1520,10 @@ public class CrystalAura extends Module {
             BlockUtils.place(supportBlock, item, false, 0, swingMode.get().client(), true, false);
             placeTimer += supportDelay.get();
 
+            // 乐观更新：立即将快照中该位置标记为黑曜石（不等服务端回包）
+            // 这样后台线程下一轮扫描会把此位置视为有效基座
+            planner.updateBlock(supportBlock.getX(), supportBlock.getY(), supportBlock.getZ(), 1200.0f);
+
             if (supportDelay.get() == 0) placeCrystal(result, damage, null);
         }
 
@@ -1518,6 +1593,20 @@ public class CrystalAura extends Module {
     }
 
     // 其他工具方法
+
+    /**
+     * TPS 自适应放置延迟 —— 低 TPS 时增加间隔避免重复放置包。
+     * 正常 TPS (>=16): 原始延迟
+     * 低 TPS (12-16): +1 tick
+     * 极低 TPS (<12): +2 tick
+     */
+    private int getEffectivePlaceDelay() {
+        int base = placeDelay.get();
+        float tps = TickRate.INSTANCE.getTickRate();
+        if (tps < 12) return base + 2;
+        if (tps < 16) return base + 1;
+        return base;
+    }
 
     private boolean shouldPause(PauseMode process) {
         if (mc.player.isUsingItem() || mc.options.useKey.isPressed()) {
