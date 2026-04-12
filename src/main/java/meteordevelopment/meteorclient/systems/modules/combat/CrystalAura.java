@@ -80,8 +80,8 @@ public class CrystalAura extends Module {
     // 通用
 
     private final Setting<Double> targetRange = sgGeneral.add(new DoubleSetting.Builder()
-        .name("target-range")
-        .description("搜索目标的范围（格）。")
+        .name("目标搜索范围")
+        .description("扫描敌对实体的最远距离（格）。目标超出此范围时不纳入伤害评估。")
         .defaultValue(10)
         .min(0)
         .sliderMax(16)
@@ -89,23 +89,23 @@ public class CrystalAura extends Module {
     );
 
     private final Setting<Boolean> predictMovement = sgGeneral.add(new BoolSetting.Builder()
-        .name("predict-movement")
-        .description("预测目标移动位置，提高对移动目标的命中率。")
+        .name("预测移动")
+        .description("将目标的速度向量叠加到当前位置上，预估下一 tick 的实际位置。对高速移动的目标可显著提高伤害计算精度。")
         .defaultValue(false)
         .build()
     );
 
     private final Setting<Double> minDamage = sgGeneral.add(new DoubleSetting.Builder()
-        .name("min-damage")
-        .description("水晶对目标造成的最低伤害阈值。")
+        .name("最低伤害")
+        .description("水晶对目标造成的最低伤害阈值。低于此值的放置位置将被跳过。贴脸放置时此阈值会自动降至 1.5。")
         .defaultValue(6)
         .min(0)
         .build()
     );
 
     private final Setting<Double> maxDamage = sgGeneral.add(new DoubleSetting.Builder()
-        .name("max-damage")
-        .description("水晶对自己造成的最大允许伤害。")
+        .name("自伤上限")
+        .description("水晶爆炸对自己造成的最大允许伤害。超过此值的位置不会被选中。低 TPS（<18）时自动放宽 15%。")
         .defaultValue(6)
         .range(0, 36)
         .sliderMax(36)
@@ -113,37 +113,37 @@ public class CrystalAura extends Module {
     );
 
     private final Setting<Boolean> antiSuicide = sgGeneral.add(new BoolSetting.Builder()
-        .name("anti-suicide")
-        .description("当水晶会杀死自己时不放置/破坏。")
+        .name("防自杀")
+        .description("当水晶爆炸伤害大于等于自身总血量（生命+吸收）时，跳过该位置的放置和破坏。")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<Boolean> ignoreNakeds = sgGeneral.add(new BoolSetting.Builder()
-        .name("ignore-nakeds")
-        .description("忽略没有穿戴任何物品的玩家。")
+        .name("忽略裸装")
+        .description("忽略没有穿戴任何护甲且双手为空的玩家，避免浪费水晶。")
         .defaultValue(false)
         .build()
     );
 
     private final Setting<Boolean> rotate = sgGeneral.add(new BoolSetting.Builder()
-        .name("rotate")
-        .description("服务端旋转朝向正在放置/破坏的水晶。")
+        .name("服务端旋转")
+        .description("发送视角旋转包使服务端认为玩家朝向水晶方向。关闭后放置/破坏不发送旋转包，可能被反作弊检测。")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<YawStepMode> yawStepMode = sgGeneral.add(new EnumSetting.Builder<YawStepMode>()
-        .name("yaw-steps-mode")
-        .description("何时执行偏航步进检查。")
+        .name("偏航步进模式")
+        .description("控制偏航步进（每 tick 限制旋转角度）的生效时机。Break=仅破坏时检查，Both=放置和破坏都检查。")
         .defaultValue(YawStepMode.Break)
         .visible(rotate::get)
         .build()
     );
 
     private final Setting<Double> yawSteps = sgGeneral.add(new DoubleSetting.Builder()
-        .name("yaw-steps")
-        .description("每 tick 允许的最大旋转角度。")
+        .name("偏航步长")
+        .description("每 tick 允许的最大偏航旋转角度（度）。180°=无限制；较低值可绕过部分反作弊的转头速度检测。")
         .defaultValue(180)
         .range(1, 180)
         .visible(rotate::get)
@@ -151,8 +151,8 @@ public class CrystalAura extends Module {
     );
 
     private final Setting<Set<EntityType<?>>> entities = sgGeneral.add(new EntityTypeListSetting.Builder()
-        .name("entities")
-        .description("要攻击的实体类型。")
+        .name("目标实体")
+        .description("选择要作为水晶攻击目标的实体类型。仅对此列表中的实体计算伤害并尝试击杀。")
         .onlyAttackable()
         .defaultValue(EntityType.PLAYER, EntityType.WARDEN, EntityType.WITHER)
         .build()
@@ -161,38 +161,38 @@ public class CrystalAura extends Module {
     // Switch
 
     private final Setting<AutoSwitchMode> autoSwitch = sgSwitch.add(new EnumSetting.Builder<AutoSwitchMode>()
-        .name("auto-switch")
-        .description("发现目标时自动切换到快捷栏上的水晶。")
+        .name("自动切换")
+        .description("发现目标时自动切换到快捷栏上的末地水晶。Normal=普通切换，Silent=服务器端静默切换，None=不自动切换。")
         .defaultValue(AutoSwitchMode.Normal)
         .build()
     );
 
     private final Setting<Integer> switchDelay = sgSwitch.add(new IntSetting.Builder()
-        .name("switch-delay")
-        .description("切换快捷栏槽位后等待多少 tick 再破坏水晶。")
+        .name("切换延迟")
+        .description("切换快捷栏槽位后等待多少 tick 再破坏水晶。用于避免部分反作弊的切槽后立即攻击检测。")
         .defaultValue(0)
         .min(0)
         .build()
     );
 
     private final Setting<Boolean> noGapSwitch = sgSwitch.add(new BoolSetting.Builder()
-        .name("no-gap-switch")
-        .description("手持金苹果时不自动切换。")
+        .name("持金苹果不切")
+        .description("主手或副手持有金苹果/附魔金苹果时不自动切换，避免打断回血节奏。")
         .defaultValue(true)
         .visible(() -> autoSwitch.get() == AutoSwitchMode.Normal)
         .build()
     );
 
     private final Setting<Boolean> noBowSwitch = sgSwitch.add(new BoolSetting.Builder()
-        .name("no-bow-switch")
-        .description("手持弓时不自动切换。")
+        .name("持弓不切")
+        .description("主手或副手持有弓时不自动切换，避免打断拉弓蓄力。")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<Boolean> antiWeakness = sgSwitch.add(new BoolSetting.Builder()
-        .name("anti-weakness")
-        .description("有虚弱效果时自动切换到工具以破坏水晶。")
+        .name("反虚弱")
+        .description("有虚弱状态效果时自动切换到工具以破坏水晶。虚弱会导致空手攻击无法破坏水晶。")
         .defaultValue(true)
         .build()
     );
@@ -200,15 +200,15 @@ public class CrystalAura extends Module {
     // 放置
 
     private final Setting<Boolean> doPlace = sgPlace.add(new BoolSetting.Builder()
-        .name("place")
-        .description("是否自动放置水晶。")
+        .name("启用放置")
+        .description("是否自动放置末地水晶。关闭后仅保留破坏流程。")
         .defaultValue(true)
         .build()
     );
 
     public final Setting<Integer> placeDelay = sgPlace.add(new IntSetting.Builder()
-        .name("place-delay")
-        .description("水晶爆炸后等待多少 tick 再放置下一个。")
+        .name("放置延迟")
+        .description("上一次放置后等待多少 tick 再放置下一个水晶。值越大放置节奏越慢，低 TPS 时会自动额外加 1-2 tick。")
         .defaultValue(0)
         .min(0)
         .sliderMax(20)
@@ -216,8 +216,8 @@ public class CrystalAura extends Module {
     );
 
     private final Setting<Double> placeRange = sgPlace.add(new DoubleSetting.Builder()
-        .name("place-range")
-        .description("放置水晶的范围（格）。")
+        .name("放置范围")
+        .description("放置水晶的最远距离（格）。超出此范围的基座位置不会被扫描。")
         .defaultValue(4.5)
         .min(0)
         .sliderMax(6)
@@ -225,8 +225,8 @@ public class CrystalAura extends Module {
     );
 
     private final Setting<Double> placeWallsRange = sgPlace.add(new DoubleSetting.Builder()
-        .name("walls-range")
-        .description("穿墙放置水晶的范围（格）。")
+        .name("穿墙放置范围")
+        .description("透过墙壁放置水晶的最远距离（格）。视线被阵挡时使用此范围而非普通放置范围。")
         .defaultValue(4.5)
         .min(0)
         .sliderMax(6)
@@ -234,22 +234,22 @@ public class CrystalAura extends Module {
     );
 
     private final Setting<Boolean> placement112 = sgPlace.add(new BoolSetting.Builder()
-        .name("1.12-placement")
-        .description("使用 1.12 版放置规则（基座上方 2 格空间）。")
+        .name("1.12放置规则")
+        .description("使用 1.12 版放置规则：基座上方需要 2 格空间。适用于部分服务器的兼容模式。")
         .defaultValue(false)
         .build()
     );
 
     private final Setting<SupportMode> support = sgPlace.add(new EnumSetting.Builder<SupportMode>()
-        .name("support")
-        .description("找不到其他位置时，在空中放置支撑方块。")
+        .name("支撑放置")
+        .description("找不到直接基座时，在空中先放置黑曜石作为支撑方块。Disabled=关闭，Fast=仅对第一目标计算伤害，Normal=对所有目标计算。")
         .defaultValue(SupportMode.Disabled)
         .build()
     );
 
     private final Setting<Integer> supportDelay = sgPlace.add(new IntSetting.Builder()
-        .name("support-delay")
-        .description("放置支撑方块后等待的 tick 数。")
+        .name("支撑延迟")
+        .description("放置支撑黑曜石后等待多少 tick 再放置水晶。用于等待服务器确认方块放置。")
         .defaultValue(1)
         .min(0)
         .visible(() -> support.get() != SupportMode.Disabled)
@@ -257,16 +257,16 @@ public class CrystalAura extends Module {
     );
 
     private final Setting<Boolean> supportSafePlacement = sgPlace.add(new BoolSetting.Builder()
-        .name("support-safe-placement")
-        .description("使用打印机的 NCP/LOS 安全放置系统放置支撑方块，过反作弊。")
+        .name("支撑安全放置")
+        .description("使用打印机的 NCP/LOS 安全放置系统放置支撑方块。确保点击方向、点击坐标和视线等透过反作弊检测。")
         .defaultValue(true)
         .visible(() -> support.get() != SupportMode.Disabled)
         .build()
     );
 
     private final Setting<Double> supportDiscount = sgPlace.add(new DoubleSetting.Builder()
-        .name("support-discount")
-        .description("Support 方案的伤害折扣百分比。折扣后的伤害与 direct 比较，值越高越不倾向放黑曜石。")
+        .name("支撑折扣")
+        .description("支撑方案的伤害折扣系数。例如 0.3 表示支撑伤害打 7 折后再与直接放置比较。值越高越不倾向放黑曜石，0=无折扣。")
         .defaultValue(0.3)
         .min(0.0)
         .max(0.9)
@@ -278,15 +278,15 @@ public class CrystalAura extends Module {
     // 贴脸放置
 
     private final Setting<Boolean> facePlace = sgFacePlace.add(new BoolSetting.Builder()
-        .name("face-place")
-        .description("目标血量或护甲耐久低于阈值时启用贴脸放置。")
+        .name("启用贴脸")
+        .description("目标血量或护甲耐久低于阈值时自动启用贴脸放置。贴脸模式下最低伤害阈值降至 1.5，使难以伤害但紧贴的位置也被接受。")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<Double> facePlaceHealth = sgFacePlace.add(new DoubleSetting.Builder()
-        .name("face-place-health")
-        .description("启用贴脸放置的目标血量阈值。")
+        .name("血量阈值")
+        .description("目标总血量（生命+吸收）低于此值时触发贴脸放置。")
         .defaultValue(8)
         .min(1)
         .sliderMin(1)
@@ -296,8 +296,8 @@ public class CrystalAura extends Module {
     );
 
     private final Setting<Double> facePlaceDurability = sgFacePlace.add(new DoubleSetting.Builder()
-        .name("face-place-durability")
-        .description("启用贴脸放置的护甲耐久百分比阈值。")
+        .name("耐久阈值")
+        .description("目标任一护甲部件耐久度低于此百分比时触发贴脸放置。例如 2表示护甲耐久低于 2% 时触发。")
         .defaultValue(2)
         .min(1)
         .sliderMin(1)
@@ -307,16 +307,16 @@ public class CrystalAura extends Module {
     );
 
     private final Setting<Boolean> facePlaceArmor = sgFacePlace.add(new BoolSetting.Builder()
-        .name("face-place-missing-armor")
-        .description("目标缺少护甲部件时自动启用贴脸放置。")
+        .name("缺少护甲触发")
+        .description("目标缺少任一护甲部件（头盔/胸甲/护腿/靴子）时自动启用贴脸放置。")
         .defaultValue(false)
         .visible(facePlace::get)
         .build()
     );
 
     private final Setting<Keybind> forceFacePlace = sgFacePlace.add(new KeybindSetting.Builder()
-        .name("force-face-place")
-        .description("按下此键强制启用贴脸放置。")
+        .name("强制贴脸键")
+        .description("按住此键时强制启用贴脸放置，无视血量/耐久阈值。")
         .defaultValue(Keybind.none())
         .build()
     );
@@ -324,15 +324,15 @@ public class CrystalAura extends Module {
     // 破坏
 
     private final Setting<Boolean> doBreak = sgBreak.add(new BoolSetting.Builder()
-        .name("break")
-        .description("是否自动破坏水晶。")
+        .name("启用破坏")
+        .description("是否自动攻击破坏末地水晶。关闭后仅保留放置流程。")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<Integer> breakDelay = sgBreak.add(new IntSetting.Builder()
-        .name("break-delay")
-        .description("水晶放置后等待多少 tick 再破坏。")
+        .name("破坏延迟")
+        .description("水晶放置后等待多少 tick 再尝试破坏。可用于规避部分反作弊的交互节奏检测。")
         .defaultValue(0)
         .min(0)
         .sliderMax(20)
@@ -340,15 +340,15 @@ public class CrystalAura extends Module {
     );
 
     private final Setting<Boolean> smartDelay = sgBreak.add(new BoolSetting.Builder()
-        .name("smart-delay")
-        .description("仅在目标能受到伤害时才破坏水晶（无受伤 CD）。")
+        .name("智能延迟")
+        .description("仅在目标无受伤 CD（hurtTime=0）时才破坏水晶，除非爆炸能击杀目标。避免浪费水晶在目标无敌帧上。")
         .defaultValue(false)
         .build()
     );
 
     private final Setting<Double> breakRange = sgBreak.add(new DoubleSetting.Builder()
-        .name("break-range")
-        .description("破坏水晶的范围（格）。")
+        .name("破坏范围")
+        .description("破坏水晶的最远距离（格）。")
         .defaultValue(4.5)
         .min(0)
         .sliderMax(6)
@@ -356,8 +356,8 @@ public class CrystalAura extends Module {
     );
 
     private final Setting<Double> breakWallsRange = sgBreak.add(new DoubleSetting.Builder()
-        .name("walls-range")
-        .description("穿墙破坏水晶的范围（格）。")
+        .name("穿墙破坏范围")
+        .description("透过墙壁破坏水晶的最远距离（格）。视线被阵挡时使用此范围。")
         .defaultValue(4.5)
         .min(0)
         .sliderMax(6)
@@ -365,15 +365,15 @@ public class CrystalAura extends Module {
     );
 
     private final Setting<Boolean> onlyBreakOwn = sgBreak.add(new BoolSetting.Builder()
-        .name("only-own")
-        .description("仅破坏自己放置的水晶。")
+        .name("仅破自己的")
+        .description("仅破坏自己放置的水晶。避免触发别人的陷阱水晶。")
         .defaultValue(false)
         .build()
     );
 
     private final Setting<Integer> breakAttempts = sgBreak.add(new IntSetting.Builder()
-        .name("break-attempts")
-        .description("对同一颗水晶的最大攻击次数。")
+        .name("最大攻击次数")
+        .description("对同一颗水晶的最大攻击尝试次数。超过此数后放弃该水晶，避免对已经爆炸但未消失的水晶重复攻击。")
         .defaultValue(2)
         .sliderMin(1)
         .sliderMax(5)
@@ -381,16 +381,16 @@ public class CrystalAura extends Module {
     );
 
     private final Setting<Integer> ticksExisted = sgBreak.add(new IntSetting.Builder()
-        .name("ticks-existed")
-        .description("水晶需要存在多少 tick 后才能被攻击。")
+        .name("最小存在时间")
+        .description("水晶需要存在至少多少 tick 后才能被攻击。用于避免攻击刚生成但未被服务器确认的幽灵水晶。")
         .defaultValue(0)
         .min(0)
         .build()
     );
 
     private final Setting<Integer> attackFrequency = sgBreak.add(new IntSetting.Builder()
-        .name("attack-frequency")
-        .description("每秒最大攻击次数。")
+        .name("每秒攻击上限")
+        .description("每秒允许的最大水晶攻击次数。防止因过快攻击被反作弊检测。默认 25 次/秒。")
         .defaultValue(25)
         .min(1)
         .sliderRange(1, 30)
@@ -398,8 +398,8 @@ public class CrystalAura extends Module {
     );
 
     private final Setting<Boolean> fastBreak = sgBreak.add(new BoolSetting.Builder()
-        .name("fast-break")
-        .description("忽略破坏延迟，水晶生成后立即尝试破坏。")
+        .name("新生即破")
+        .description("水晶实体生成后立即尝试破坏，无视破坏延迟设置。在击杀型伤害时还会无视智能延迟。")
         .defaultValue(true)
         .build()
     );
@@ -407,36 +407,36 @@ public class CrystalAura extends Module {
     // 暂停
 
     public final Setting<PauseMode> pauseOnUse = sgPause.add(new EnumSetting.Builder<PauseMode>()
-        .name("pause-on-use")
-        .description("使用物品时暂停哪些流程。")
+        .name("使用物品时暂停")
+        .description("玩家使用物品（如吃金苹果、拉弓）时暂停哪些流程。Place=仅暂停放置，Both=放置+破坏，None=不暂停。")
         .defaultValue(PauseMode.Place)
         .build()
     );
 
     public final Setting<PauseMode> pauseOnMine = sgPause.add(new EnumSetting.Builder<PauseMode>()
-        .name("pause-on-mine")
-        .description("挖掘方块时暂停哪些流程。")
+        .name("挖掘时暂停")
+        .description("玩家挖掘方块时暂停哪些流程。配合 PacketMine 等模块使用时建议设为 None。")
         .defaultValue(PauseMode.None)
         .build()
     );
 
     private final Setting<Boolean> pauseOnLag = sgPause.add(new BoolSetting.Builder()
-        .name("pause-on-lag")
-        .description("服务器无响应时是否暂停。")
+        .name("卡顿时暂停")
+        .description("服务器无响应（TPS 极低）时暂停所有流程。避免在丢包环境下发送大量无效包。")
         .defaultValue(true)
         .build()
     );
 
     public final Setting<List<Module>> pauseModules = sgPause.add(new ModuleListSetting.Builder()
-        .name("pause-modules")
-        .description("任一已选模块激活时暂停。")
+        .name("暂停模块")
+        .description("任一已选模块处于激活状态时暂停水晶光环。默认包含 BedAura，避免两个战斗模块冲突。")
         .defaultValue(BedAura.class)
         .build()
     );
 
     public final Setting<Double> pauseHealth = sgPause.add(new DoubleSetting.Builder()
-        .name("pause-health")
-        .description("自身血量低于此值时暂停。")
+        .name("低血暂停")
+        .description("自身总血量低于此值时暂停所有流程。保命优先，避免低血时放置水晶自爆。")
         .defaultValue(5)
         .range(0,36)
         .sliderRange(0,36)
@@ -446,30 +446,30 @@ public class CrystalAura extends Module {
     // 渲染
 
     public final Setting<SwingMode> swingMode = sgRender.add(new EnumSetting.Builder<SwingMode>()
-        .name("swing-mode")
-        .description("放置时的挥手方式。")
+        .name("挥手方式")
+        .description("放置水晶时的挥手动画方式。Both=客户端+服务端，Client=仅客户端，Server=仅服务端，None=无。")
         .defaultValue(SwingMode.Both)
         .build()
     );
 
     private final Setting<RenderMode> renderMode = sgRender.add(new EnumSetting.Builder<RenderMode>()
-        .name("render-mode")
-        .description("渲染模式。")
+        .name("渲染模式")
+        .description("水晶放置/破坏位置的视觉反馈模式。Normal=标准方块高亮，Smooth=平滑过渡，Fading=淡入淡出，Gradient=渐变，None=关闭。")
         .defaultValue(RenderMode.Normal)
         .build()
     );
 
     private final Setting<Boolean> renderPlace = sgRender.add(new BoolSetting.Builder()
-        .name("render-place")
-        .description("在放置水晶的方块上渲染覆盖层。")
+        .name("渲染放置")
+        .description("在放置水晶的基座方块上渲染半透明覆盖层。")
         .defaultValue(true)
         .visible(() -> renderMode.get() == RenderMode.Normal)
         .build()
     );
 
     private final Setting<Integer> placeRenderTime = sgRender.add(new IntSetting.Builder()
-        .name("place-time")
-        .description("放置渲染持续时间（tick）。")
+        .name("放置渲染时长")
+        .description("放置覆盖层持续显示的 tick 数。")
         .defaultValue(10)
         .min(0)
         .sliderMax(20)
@@ -478,16 +478,16 @@ public class CrystalAura extends Module {
     );
 
     private final Setting<Boolean> renderBreak = sgRender.add(new BoolSetting.Builder()
-        .name("render-break")
-        .description("在破坏水晶的方块上渲染覆盖层。")
+        .name("渲染破坏")
+        .description("在破坏水晶的方块位置渲染半透明覆盖层。")
         .defaultValue(false)
         .visible(() -> renderMode.get() == RenderMode.Normal)
         .build()
     );
 
     private final Setting<Integer> breakRenderTime = sgRender.add(new IntSetting.Builder()
-        .name("break-time")
-        .description("破坏渲染持续时间（tick）。")
+        .name("破坏渲染时长")
+        .description("破坏覆盖层持续显示的 tick 数。")
         .defaultValue(13)
         .min(0)
         .sliderMax(20)
@@ -496,8 +496,8 @@ public class CrystalAura extends Module {
     );
 
     private final Setting<Integer> smoothness = sgRender.add(new IntSetting.Builder()
-        .name("smoothness")
-        .description("平滑渲染的平滑度。")
+        .name("平滑度")
+        .description("平滑渲染模式下的过渡平滑度。值越高过渡越柔和。")
         .defaultValue(10)
         .min(0)
         .sliderMax(20)
@@ -506,8 +506,8 @@ public class CrystalAura extends Module {
     );
 
     private final Setting<Double> height = sgRender.add(new DoubleSetting.Builder()
-        .name("height")
-        .description("渐变渲染的高度。")
+        .name("渐变高度")
+        .description("渐变渲染模式下覆盖层的高度。值越大覆盖层越高。")
         .defaultValue(0.7)
         .min(0)
         .sliderMax(1)
@@ -516,8 +516,8 @@ public class CrystalAura extends Module {
     );
 
     private final Setting<Integer> renderTime = sgRender.add(new IntSetting.Builder()
-        .name("render-time")
-        .description("渲染持续时间（tick）。")
+        .name("渲染时长")
+        .description("平滑/淡出渲染模式下覆盖层持续显示的 tick 数。")
         .defaultValue(10)
         .min(0)
         .sliderMax(20)
@@ -526,48 +526,48 @@ public class CrystalAura extends Module {
     );
 
     private final Setting<ShapeMode> shapeMode = sgRender.add(new EnumSetting.Builder<ShapeMode>()
-        .name("shape-mode")
-        .description("形状渲染方式。")
+        .name("形状模式")
+        .description("覆盖层的形状渲染方式。Both=侧面+边线，Sides=仅侧面，Lines=仅边线。")
         .defaultValue(ShapeMode.Both)
         .visible(() -> renderMode.get() != RenderMode.None)
         .build()
     );
 
     private final Setting<SettingColor> sideColor = sgRender.add(new ColorSetting.Builder()
-        .name("side-color")
-        .description("覆盖层侧面颜色。")
+        .name("侧面颜色")
+        .description("覆盖层侧面填充的 RGBA 颜色。")
         .defaultValue(new SettingColor(255, 255, 255, 45))
         .visible(() -> shapeMode.get().sides() && renderMode.get() != RenderMode.None)
         .build()
     );
 
     private final Setting<SettingColor> lineColor = sgRender.add(new ColorSetting.Builder()
-        .name("line-color")
-        .description("覆盖层边线颜色。")
+        .name("边线颜色")
+        .description("覆盖层边线的 RGBA 颜色。")
         .defaultValue(new SettingColor(255, 255, 255))
         .visible(() -> shapeMode.get().lines() && renderMode.get() != RenderMode.None)
         .build()
     );
 
     private final Setting<Boolean> renderDamageText = sgRender.add(new BoolSetting.Builder()
-        .name("damage")
-        .description("在覆盖层上显示水晶伤害数值。")
+        .name("显示伤害数值")
+        .description("在覆盖层上方显示水晶对目标的预估伤害数值。")
         .defaultValue(true)
         .visible(() -> renderMode.get() != RenderMode.None)
         .build()
     );
 
     private final Setting<SettingColor> damageColor = sgRender.add(new ColorSetting.Builder()
-        .name("damage-color")
-        .description("伤害数值的文字颜色。")
+        .name("伤害文字颜色")
+        .description("伤害数值文字的 RGBA 颜色。")
         .defaultValue(new SettingColor(255, 255, 255))
         .visible(() -> renderMode.get() != RenderMode.None && renderDamageText.get())
         .build()
     );
 
     private final Setting<Double> damageTextScale = sgRender.add(new DoubleSetting.Builder()
-        .name("damage-scale")
-        .description("伤害文字的大小。")
+        .name("伤害文字大小")
+        .description("伤害数值文字的缩放比例。默认 1.25，值越大文字越明显。")
         .defaultValue(1.25)
         .min(1)
         .sliderMax(4)
