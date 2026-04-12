@@ -1440,7 +1440,7 @@ public class CrystalAura extends Module {
 
             if (BlockUtilHelper.isPointValid(hitVec, face, blockPos, eyePos, mc.world, mc.player,
                 true, true, reach, null)) {
-                return new BlockHitResult(hitVec, face, blockPos, false);
+                return new BlockHitResult(hitVec, face, blockPos instanceof BlockPos.Mutable ? blockPos.toImmutable() : blockPos, false);
             }
         }
 
