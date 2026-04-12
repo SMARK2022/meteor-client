@@ -43,9 +43,11 @@ import meteordevelopment.meteorclient.utils.world.TickRate;
 import meteordevelopment.orbit.EventHandler;
 import meteordevelopment.orbit.EventPriority;
 import net.minecraft.block.Blocks;
+import net.minecraft.block.ShapeContext;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.attribute.EntityAttributes;
 import net.minecraft.entity.decoration.EndCrystalEntity;
 import net.minecraft.entity.effect.StatusEffectInstance;
 import net.minecraft.entity.effect.StatusEffects;
@@ -57,11 +59,14 @@ import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.*;
 import net.minecraft.world.RaycastContext;
+import net.minecraft.util.shape.VoxelShapes;
 import org.joml.Vector3d;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -610,6 +615,35 @@ public class CrystalAura extends Module {
     private int baseCacheScanRange;
     private int baseCacheCenterX, baseCacheCenterY, baseCacheCenterZ;
 
+    // Placement proposal cache — amortize scan cost across 2-3 ticks (mio proposal pattern)
+    private final BlockPos.Mutable proposalPos = new BlockPos.Mutable();
+    private boolean proposalIsSupport;
+    private double proposalDamage;
+    private boolean hasProposal;
+    private int proposalAge;
+
+    // Async planner — full scan on background thread (mio async proposal architecture)
+    private static final int SNAP_R = 8;
+    private static final int SNAP_D = SNAP_R * 2 + 1;
+    private final float[] snapBlastRes = new float[SNAP_D * SNAP_D * SNAP_D];
+    private int snapCX, snapCY, snapCZ;
+
+    private final ExecutorService plannerThread = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "CA-Planner");
+        t.setDaemon(true);
+        t.setPriority(Thread.NORM_PRIORITY - 1);
+        return t;
+    });
+
+    private record AsyncPlaceResult(int x, int y, int z, double damage) {}
+    private record TargetSnap(
+        double posX, double posY, double posZ,
+        double bMinX, double bMinY, double bMinZ, double bMaxX, double bMaxY, double bMaxZ,
+        float armor, float toughness, int protLevel, int resLevel, float health, int hurtTime) {}
+
+    private volatile AsyncPlaceResult asyncDirect, asyncSupport;
+    private volatile boolean plannerBusy;
+
     public CrystalAura() {
         super(Categories.Combat, "crystal-aura", "Automatically places and attacks crystals.");
     }
@@ -634,6 +668,10 @@ public class CrystalAura extends Module {
         crystalSpawnTimes.clear();
         handledCrystals.clear();
         baseCacheDirty = true;
+        hasProposal = false;
+        asyncDirect = null;
+        asyncSupport = null;
+        plannerBusy = false;
 
         bestTargetDamage = 0;
         bestTargetTimer = 0;
@@ -833,9 +871,12 @@ public class CrystalAura extends Module {
         if (isOutOfRange(entity.getPos(), entity.getBlockPos(), false)) return 0;
 
         // Check damage to self and anti suicide
+        // Low TPS safety margin: 15% reduction on maxDamage threshold
         blockPos.set(entity.getBlockPos()).move(0, -1, 0);
         float selfDamage = DamageUtils.crystalDamage(mc.player, entity.getPos(), predictMovement.get(), blockPos);
-        if (selfDamage > maxDamage.get() || (antiSuicide.get() && selfDamage >= EntityUtils.getTotalHealth(mc.player))) return 0;
+        float effectiveMaxDmg = maxDamage.get().floatValue();
+        if (TickRate.INSTANCE.getTickRate() < 18) effectiveMaxDmg *= 0.85f;
+        if (selfDamage > effectiveMaxDmg || (antiSuicide.get() && selfDamage >= EntityUtils.getTotalHealth(mc.player))) return 0;
 
         // Check damage to targets and face place
         float damage = getDamageToTargets(entity.getPos(), blockPos, true, false);
@@ -931,8 +972,13 @@ public class CrystalAura extends Module {
 
     @EventHandler
     private void onBlockUpdate(BlockUpdateEvent event) {
-        if (mc.player == null || baseCacheDirty) return;
+        if (mc.player == null) return;
         BlockPos pos = event.pos;
+
+        // Invalidate placement proposal if block changed near proposal position
+        if (hasProposal && pos.isWithinDistance(proposalPos, 3)) hasProposal = false;
+
+        if (baseCacheDirty) return;
         int range = baseCacheScanRange;
 
         // Skip positions outside cache coverage
@@ -1009,11 +1055,298 @@ public class CrystalAura extends Module {
         baseCacheCenterZ = pp.getZ();
     }
 
+    // === Async Planner (mio architecture) ===
+
+    private float getSnapBlastRes(int x, int y, int z) {
+        int dx = x - snapCX + SNAP_R, dy = y - snapCY + SNAP_R, dz = z - snapCZ + SNAP_R;
+        if (dx < 0 || dx >= SNAP_D || dy < 0 || dy >= SNAP_D || dz < 0 || dz >= SNAP_D) return 0;
+        return snapBlastRes[dx * SNAP_D * SNAP_D + dy * SNAP_D + dz];
+    }
+
+    private TargetSnap snapshotTarget(LivingEntity entity) {
+        Vec3d pos = predictMovement.get() ? entity.getPos().add(entity.getVelocity()) : entity.getPos();
+        Box box = entity.getBoundingBox();
+        if (predictMovement.get()) box = box.offset(entity.getVelocity());
+        float armor = (float) Math.floor(entity.getAttributeValue(EntityAttributes.ARMOR));
+        float tough = (float) entity.getAttributeValue(EntityAttributes.ARMOR_TOUGHNESS);
+        int prot = 0;
+        for (ItemStack stack : entity.getAllArmorItems()) {
+            var enchants = new it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap<net.minecraft.registry.entry.RegistryEntry<net.minecraft.enchantment.Enchantment>>();
+            meteordevelopment.meteorclient.utils.Utils.getEnchantments(stack, enchants);
+            int p = meteordevelopment.meteorclient.utils.Utils.getEnchantmentLevel(enchants, net.minecraft.enchantment.Enchantments.PROTECTION);
+            if (p > 0) prot += p;
+            int bp = meteordevelopment.meteorclient.utils.Utils.getEnchantmentLevel(enchants, net.minecraft.enchantment.Enchantments.BLAST_PROTECTION);
+            if (bp > 0) prot += 2 * bp;
+        }
+        int res = -1;
+        StatusEffectInstance resistance = entity.getStatusEffect(StatusEffects.RESISTANCE);
+        if (resistance != null) res = resistance.getAmplifier();
+        return new TargetSnap(pos.x, pos.y, pos.z, box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
+            armor, tough, prot, res, EntityUtils.getTotalHealth(entity), entity.hurtTime);
+    }
+
+    private void captureAndSubmitAsyncScan() {
+        if (plannerBusy) return;
+
+        // 1. Capture blast resistance snapshot
+        BlockPos pp = mc.player.getBlockPos();
+        snapCX = pp.getX(); snapCY = pp.getY(); snapCZ = pp.getZ();
+        int idx = 0;
+        for (int dx = -SNAP_R; dx <= SNAP_R; dx++)
+            for (int dy = -SNAP_R; dy <= SNAP_R; dy++)
+                for (int dz = -SNAP_R; dz <= SNAP_R; dz++)
+                    snapBlastRes[idx++] = mc.world.getBlockState(
+                        new BlockPos(snapCX + dx, snapCY + dy, snapCZ + dz))
+                        .getBlock().getBlastResistance();
+
+        // 2. Snapshot targets
+        TargetSnap[] tSnaps = new TargetSnap[targets.size()];
+        for (int i = 0; i < targets.size(); i++) tSnaps[i] = snapshotTarget(targets.get(i));
+        TargetSnap selfSnap = snapshotTarget(mc.player);
+
+        // 3. Collect valid bases + pre-filter (range, wall, entity overlap on main thread)
+        List<long[]> candidates = new ArrayList<>(); // [packedPos, hasBlock(0/1)]
+        refreshBaseCacheIfNeeded();
+        for (long packed : validBasePosCache) {
+            int bx = BlockPos.unpackLongX(packed), by = BlockPos.unpackLongY(packed), bz = BlockPos.unpackLongZ(packed);
+            net.minecraft.block.BlockState state = mc.world.getBlockState(blockPos.set(bx, by, bz));
+            boolean hasBlock = state.isOf(Blocks.BEDROCK) || state.isOf(Blocks.OBSIDIAN);
+
+            // Range + wall check (needs live world)
+            ((IVec3d) vec3d).meteor$set(bx + 0.5, by + 1, bz + 0.5);
+            blockPos.set(bx, by + 1, bz);
+            if (isOutOfRange(vec3d, blockPos, true)) continue;
+
+            // Entity intersection (needs live entities)
+            double cx = bx, cy = by + 1.0, cz = bz;
+            ((IBox) box).meteor$set(cx, cy, cz, cx + 1, cy + (placement112.get() ? 1 : 2), cz + 1);
+            if (intersectsWithEntities(box)) continue;
+
+            candidates.add(new long[]{packed, hasBlock ? 1 : 0});
+        }
+
+        if (candidates.isEmpty()) return;
+
+        // 4. Snapshot settings
+        double maxDmg = maxDamage.get();
+        boolean antiSui = antiSuicide.get();
+        double minDmg = minDamage.get();
+        boolean smart = smartDelay.get();
+        boolean fp = shouldFacePlace();
+        boolean supportFast = support.get() == SupportMode.Fast;
+        float tps = TickRate.INSTANCE.getTickRate();
+
+        // 5. Submit to background thread
+        plannerBusy = true;
+        long[][] cands = candidates.toArray(new long[0][]);
+        plannerThread.submit(() -> {
+            try {
+                runAsyncScan(cands, tSnaps, selfSnap, maxDmg, antiSui, minDmg, smart, fp, supportFast, tps);
+            } finally {
+                plannerBusy = false;
+            }
+        });
+    }
+
+    // Runs entirely on background thread — no mc.world access
+    private void runAsyncScan(long[][] candidates, TargetSnap[] targets, TargetSnap self,
+                              double maxDmg, boolean antiSui, double minDmg,
+                              boolean smart, boolean facePlace, boolean supportFast, float tps) {
+        AsyncPlaceResult bestDirect = null, bestSupport = null;
+        double bestDirectDmg = 0, bestSupportDmg = 0;
+        float effectiveMaxDmg = (float) maxDmg;
+        if (tps < 18) effectiveMaxDmg *= 0.85f;
+
+        for (long[] cand : candidates) {
+            int bx = BlockPos.unpackLongX(cand[0]), by = BlockPos.unpackLongY(cand[0]), bz = BlockPos.unpackLongZ(cand[0]);
+            boolean hasBlock = cand[1] == 1;
+            double cx = bx + 0.5, cy = by + 1, cz = bz + 0.5;
+
+            // Self-damage via snapshot raycast
+            float selfDmg = asyncCrystalDamage(self, cx, cy, cz, bx, by, bz);
+            if (selfDmg > effectiveMaxDmg || (antiSui && selfDmg >= self.health)) continue;
+
+            // Target damage — full multi-target evaluation for BOTH paths
+            double damage = 0;
+            boolean useFast = !hasBlock && supportFast;
+            if (useFast && targets.length > 0) {
+                float dmg = asyncCrystalDamage(targets[0], cx, cy, cz, bx, by, bz);
+                if (!smart || targets[0].hurtTime <= 0 || dmg >= targets[0].health) damage = dmg;
+            } else {
+                for (TargetSnap t : targets) {
+                    float dmg = asyncCrystalDamage(t, cx, cy, cz, bx, by, bz);
+                    if (smart && t.hurtTime > 0 && dmg < t.health) continue;
+                    damage = Math.max(damage, dmg);
+                }
+            }
+
+            double minimumDamage = facePlace ? Math.min(minDmg, 1.5) : minDmg;
+            if (damage < minimumDamage) continue;
+
+            if (hasBlock) {
+                if (damage > bestDirectDmg) {
+                    bestDirectDmg = damage;
+                    bestDirect = new AsyncPlaceResult(bx, by, bz, damage);
+                    // Lethal short-circuit
+                    if (targets.length > 0 && damage >= targets[0].health) break;
+                }
+            } else {
+                if (damage > bestSupportDmg) {
+                    bestSupportDmg = damage;
+                    bestSupport = new AsyncPlaceResult(bx, by, bz, damage);
+                }
+            }
+        }
+
+        asyncDirect = bestDirect;
+        asyncSupport = bestSupport;
+    }
+
+    // Pure-math crystal damage using blast resistance snapshot — thread-safe
+    private float asyncCrystalDamage(TargetSnap t, double expX, double expY, double expZ, int obsX, int obsY, int obsZ) {
+        double dx = t.posX - expX, dy = t.posY - expY, dz = t.posZ - expZ;
+        double dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist > 12) return 0;
+
+        double exposure = asyncExposure(expX, expY, expZ, t.bMinX, t.bMinY, t.bMinZ, t.bMaxX, t.bMaxY, t.bMaxZ, obsX, obsY, obsZ);
+        double impact = (1 - dist / 12.0) * exposure;
+        float rawDmg = (int) ((impact * impact + impact) / 2.0 * 7.0 * 12.0 + 1);
+
+        return asyncApplyReductions(rawDmg, t);
+    }
+
+    private float asyncApplyReductions(float damage, TargetSnap t) {
+        // Armor reduction (vanilla formula)
+        float f = 2.0f + t.toughness / 4.0f;
+        float g = MathHelper.clamp(t.armor - damage / f, t.armor * 0.2f, 20.0f);
+        damage *= (1 - g / 25.0f);
+        // Resistance
+        if (t.resLevel >= 0) damage *= 1 - (t.resLevel + 1) * 0.2f;
+        // Protection
+        damage *= 1 - Math.min(20, t.protLevel) / 25.0f;
+        return Math.max(damage, 0);
+    }
+
+    private double asyncExposure(double srcX, double srcY, double srcZ,
+                                 double bMinX, double bMinY, double bMinZ,
+                                 double bMaxX, double bMaxY, double bMaxZ,
+                                 int obsX, int obsY, int obsZ) {
+        double xDiff = bMaxX - bMinX, yDiff = bMaxY - bMinY, zDiff = bMaxZ - bMinZ;
+        double xStep = 1 / (xDiff * 2 + 1), yStep = 1 / (yDiff * 2 + 1), zStep = 1 / (zDiff * 2 + 1);
+        if (xStep <= 0 || yStep <= 0 || zStep <= 0) return 0;
+
+        double xOff = (1 - Math.floor(1 / xStep) * xStep) * 0.5;
+        double zOff = (1 - Math.floor(1 / zStep) * zStep) * 0.5;
+        xStep *= xDiff; yStep *= yDiff; zStep *= zDiff;
+
+        int misses = 0, hits = 0;
+        for (double x = bMinX + xOff; x <= bMaxX + xOff; x += xStep) {
+            for (double y = bMinY; y <= bMaxY; y += yStep) {
+                for (double z = bMinZ + zOff; z <= bMaxZ + zOff; z += zStep) {
+                    if (!asyncRayBlocked(x, y, z, srcX, srcY, srcZ, obsX, obsY, obsZ)) misses++;
+                    hits++;
+                }
+            }
+        }
+        return hits == 0 ? 0 : (double) misses / hits;
+    }
+
+    // Snapshot-based ray walk — uses DDA algorithm, no world access
+    private boolean asyncRayBlocked(double startX, double startY, double startZ,
+                                     double endX, double endY, double endZ,
+                                     int obsX, int obsY, int obsZ) {
+        // Use BlockView.raycast with a snapshot factory
+        DamageUtils.ExposureRaycastContext ctx = new DamageUtils.ExposureRaycastContext(
+            new Vec3d(startX, startY, startZ), new Vec3d(endX, endY, endZ));
+
+        DamageUtils.RaycastFactory factory = (c, bp) -> {
+            float blastRes;
+            if (bp.getX() == obsX && bp.getY() == obsY && bp.getZ() == obsZ) {
+                blastRes = 0; // Override obsidian position as air (crystal replaces it visually)
+            } else {
+                blastRes = getSnapBlastRes(bp.getX(), bp.getY(), bp.getZ());
+            }
+            if (blastRes < 600) return null;
+            return VoxelShapes.fullCube().raycast(c.start(), c.end(), bp);
+        };
+
+        // Reuse MC's ray walking algorithm — pure math, thread-safe with snapshot factory
+        return net.minecraft.world.BlockView.raycast(ctx.start(), ctx.end(), ctx, factory, c -> null) != null;
+    }
+
+    // Proposal validation — 2 damage calcs instead of full scan (~80 calcs)
+
+    private boolean quickValidateProposal() {
+        // Base block still valid?
+        net.minecraft.block.BlockState state = mc.world.getBlockState(proposalPos);
+        if (proposalIsSupport) {
+            if (!state.isReplaceable()) return false;
+        } else {
+            if (!state.isOf(Blocks.BEDROCK) && !state.isOf(Blocks.OBSIDIAN)) return false;
+        }
+
+        // Air above still clear?
+        blockPos.set(proposalPos).move(0, 1, 0);
+        if (!mc.world.getBlockState(blockPos).isAir()) return false;
+
+        // Range still OK?
+        ((IVec3d) vec3d).meteor$set(proposalPos.getX() + 0.5, proposalPos.getY() + 1, proposalPos.getZ() + 0.5);
+        if (isOutOfRange(vec3d, blockPos, true)) return false;
+
+        // Self-damage still safe?
+        float selfDamage = DamageUtils.crystalDamage(mc.player, vec3d, predictMovement.get(), proposalPos);
+        float effectiveMaxDmg = maxDamage.get().floatValue();
+        if (TickRate.INSTANCE.getTickRate() < 18) effectiveMaxDmg *= 0.85f;
+        if (selfDamage > effectiveMaxDmg || (antiSuicide.get() && selfDamage >= EntityUtils.getTotalHealth(mc.player))) return false;
+
+        // Target damage still meets threshold?
+        float damage = getDamageToTargets(vec3d, proposalPos, false, proposalIsSupport && support.get() == SupportMode.Fast);
+        double minimumDamage = shouldFacePlace() ? Math.min(minDamage.get(), 1.5) : minDamage.get();
+        if (damage < minimumDamage) return false;
+
+        // Entity intersection?
+        double x = proposalPos.getX(), y = proposalPos.getY() + 1, z = proposalPos.getZ();
+        ((IBox) box).meteor$set(x, y, z, x + 1, y + (placement112.get() ? 1 : 2), z + 1);
+        if (intersectsWithEntities(box)) return false;
+
+        proposalDamage = damage;
+        return true;
+    }
+
+    private void executeProposal() {
+        BlockHitResult result = getPlaceInfo(proposalPos);
+        BlockPos supportBlock = proposalIsSupport ? proposalPos.toImmutable() : null;
+
+        ((IVec3d) vec3d).meteor$set(
+            result.getBlockPos().getX() + 0.5 + result.getSide().getVector().getX() * 0.5,
+            result.getBlockPos().getY() + 0.5 + result.getSide().getVector().getY() * 0.5,
+            result.getBlockPos().getZ() + 0.5 + result.getSide().getVector().getZ() * 0.5
+        );
+
+        if (rotate.get()) {
+            double yaw = Rotations.getYaw(vec3d);
+            double pitch = Rotations.getPitch(vec3d);
+
+            if (yawStepMode.get() == YawStepMode.Break || doYawSteps(yaw, pitch)) {
+                setRotation(true, vec3d, 0, 0);
+                Rotations.rotate(yaw, pitch, 50, () -> placeCrystal(result, proposalDamage, supportBlock));
+                placeTimer += placeDelay.get();
+            }
+        } else {
+            placeCrystal(result, proposalDamage, supportBlock);
+            placeTimer += placeDelay.get();
+        }
+    }
+
     // Place
 
     private void doPlace() {
         if (!doPlace.get() || placeTimer > 0) return;
         if (shouldPause(PauseMode.Place)) return;
+
+        // Don't send redundant place packets while waiting for crystal spawn confirmation
+        // RusherHack/mio: zero wasted packets on low TPS
+        if (placing && placingTimer > 0) return;
 
         // Return if there are no crystals in hotbar or offhand
         if (!InvUtils.testInHotbar(Items.END_CRYSTAL)) return;
@@ -1033,6 +1366,84 @@ public class CrystalAura extends Module {
         for (Entity entity : mc.world.getEntities()) {
             if (getBreakDamage(entity, false) > 0) return;
         }
+
+        // === Async pipeline: consume result from background thread ===
+        AsyncPlaceResult ad = asyncDirect, as = asyncSupport;
+        if (ad != null || as != null) {
+            asyncDirect = null;
+            asyncSupport = null;
+
+            boolean supportEnabled = support.get() != SupportMode.Disabled;
+            boolean useDirect = ad != null;
+            boolean useSupport = supportEnabled && as != null
+                && (!useDirect || as.damage > ad.damage * 1.5);
+
+            AsyncPlaceResult chosen = useSupport ? as : useDirect ? ad : null;
+            if (chosen != null) {
+                BlockPos.Mutable bp = new BlockPos.Mutable(chosen.x, chosen.y, chosen.z);
+
+                // Quick validation on main thread: base still valid + range OK
+                net.minecraft.block.BlockState state = mc.world.getBlockState(bp);
+                boolean hasBlock = state.isOf(Blocks.BEDROCK) || state.isOf(Blocks.OBSIDIAN);
+                boolean valid = hasBlock || (supportEnabled && state.isReplaceable());
+
+                if (valid) {
+                    ((IVec3d) vec3d).meteor$set(bp.getX() + 0.5, bp.getY() + 1, bp.getZ() + 0.5);
+                    blockPos.set(bp).move(0, 1, 0);
+                    if (!isOutOfRange(vec3d, blockPos, true)) {
+                        // Save as proposal for subsequent ticks
+                        proposalPos.set(bp);
+                        proposalIsSupport = useSupport;
+                        proposalDamage = chosen.damage;
+                        hasProposal = true;
+                        proposalAge = 0;
+
+                        // Execute placement
+                        BlockHitResult result = getPlaceInfo(bp);
+                        BlockPos supportBlock = useSupport ? bp.toImmutable() : null;
+
+                        ((IVec3d) vec3d).meteor$set(
+                            result.getBlockPos().getX() + 0.5 + result.getSide().getVector().getX() * 0.5,
+                            result.getBlockPos().getY() + 0.5 + result.getSide().getVector().getY() * 0.5,
+                            result.getBlockPos().getZ() + 0.5 + result.getSide().getVector().getZ() * 0.5);
+
+                        if (rotate.get()) {
+                            double yaw = Rotations.getYaw(vec3d);
+                            double pitch = Rotations.getPitch(vec3d);
+                            if (yawStepMode.get() == YawStepMode.Break || doYawSteps(yaw, pitch)) {
+                                setRotation(true, vec3d, 0, 0);
+                                Rotations.rotate(yaw, pitch, 50, () -> placeCrystal(result, chosen.damage, supportBlock));
+                                placeTimer += placeDelay.get();
+                            }
+                        } else {
+                            placeCrystal(result, chosen.damage, supportBlock);
+                            placeTimer += placeDelay.get();
+                        }
+
+                        // Submit next async scan for following ticks
+                        captureAndSubmitAsyncScan();
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Proposal cache fast-path: reuse previous scan result (2 damage calcs vs 80+)
+        if (hasProposal && proposalAge < 3) {
+            if (quickValidateProposal()) {
+                proposalAge++;
+                executeProposal();
+                // Submit async scan in background for when proposal expires
+                captureAndSubmitAsyncScan();
+                return;
+            }
+            hasProposal = false;
+        }
+
+        // Submit async scan for next tick while falling through to sync scan
+        captureAndSubmitAsyncScan();
+
+        // Sync fallback: full scan via BlockIterator (used on first tick or when async is behind)
 
         // Setup variables — track direct and support candidates independently
         AtomicDouble bestDirectDamage = new AtomicDouble(0);
@@ -1057,8 +1468,11 @@ public class CrystalAura extends Module {
             if (isOutOfRange(vec3d, blockPos, true)) return;
 
             // Check damage to self and anti suicide
+            // On low TPS (< 18), add 15% safety margin — entity positions may be staler
             float selfDamage = DamageUtils.crystalDamage(mc.player, vec3d, predictMovement.get(), bp);
-            if (selfDamage > maxDamage.get() || (antiSuicide.get() && selfDamage >= EntityUtils.getTotalHealth(mc.player))) return;
+            float effectiveMaxDmg = maxDamage.get().floatValue();
+            if (TickRate.INSTANCE.getTickRate() < 18) effectiveMaxDmg *= 0.85f;
+            if (selfDamage > effectiveMaxDmg || (antiSuicide.get() && selfDamage >= EntityUtils.getTotalHealth(mc.player))) return;
 
             // Check damage to targets and face place
             float damage = getDamageToTargets(vec3d, bp, false, !hasBlock && support.get() == SupportMode.Fast);
@@ -1081,6 +1495,13 @@ public class CrystalAura extends Module {
                 if (damage > bestDirectDamage.get()) {
                     bestDirectDamage.set(damage);
                     bestDirectPos.get().set(bp);
+
+                    // Lethal short-circuit: stop scanning if this position would kill the best target
+                    LivingEntity nearest = getNearestTarget();
+                    if (nearest != null && damage >= EntityUtils.getTotalHealth(nearest)) {
+                        BlockIterator.disableCurrent();
+                        return;
+                    }
                 }
             } else {
                 if (damage > bestSupportDamage.get()) {
@@ -1116,6 +1537,13 @@ public class CrystalAura extends Module {
             } else {
                 return;
             }
+
+            // Cache this scan result as a proposal for next 2-3 ticks
+            proposalPos.set(bestBlockPos);
+            proposalIsSupport = supportBlock != null;
+            proposalDamage = bestDamage;
+            hasProposal = true;
+            proposalAge = 0;
 
             BlockHitResult result = getPlaceInfo(bestBlockPos);
 
