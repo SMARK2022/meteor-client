@@ -43,11 +43,9 @@ import meteordevelopment.meteorclient.utils.world.TickRate;
 import meteordevelopment.orbit.EventHandler;
 import meteordevelopment.orbit.EventPriority;
 import net.minecraft.block.Blocks;
-import net.minecraft.block.ShapeContext;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.LivingEntity;
-import net.minecraft.entity.attribute.EntityAttributes;
 import net.minecraft.entity.decoration.EndCrystalEntity;
 import net.minecraft.entity.effect.StatusEffectInstance;
 import net.minecraft.entity.effect.StatusEffects;
@@ -59,31 +57,28 @@ import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.*;
 import net.minecraft.world.RaycastContext;
-import net.minecraft.util.shape.VoxelShapes;
 import org.joml.Vector3d;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 public class CrystalAura extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
-    private final SettingGroup sgSwitch = settings.createGroup("Switch");
-    private final SettingGroup sgPlace = settings.createGroup("Place");
-    private final SettingGroup sgFacePlace = settings.createGroup("Face Place");
-    private final SettingGroup sgBreak = settings.createGroup("Break");
-    private final SettingGroup sgPause = settings.createGroup("Pause");
-    private final SettingGroup sgRender = settings.createGroup("Render");
+    private final SettingGroup sgSwitch = settings.createGroup("切换");
+    private final SettingGroup sgPlace = settings.createGroup("放置");
+    private final SettingGroup sgFacePlace = settings.createGroup("贴脸放置");
+    private final SettingGroup sgBreak = settings.createGroup("破坏");
+    private final SettingGroup sgPause = settings.createGroup("暂停");
+    private final SettingGroup sgRender = settings.createGroup("渲染");
 
-    // General
+    // 通用
 
     private final Setting<Double> targetRange = sgGeneral.add(new DoubleSetting.Builder()
         .name("target-range")
-        .description("Range in which to target players.")
+        .description("搜索目标的范围（格）。")
         .defaultValue(10)
         .min(0)
         .sliderMax(16)
@@ -92,14 +87,14 @@ public class CrystalAura extends Module {
 
     private final Setting<Boolean> predictMovement = sgGeneral.add(new BoolSetting.Builder()
         .name("predict-movement")
-        .description("Predicts target movement.")
+        .description("预测目标移动位置，提高对移动目标的命中率。")
         .defaultValue(false)
         .build()
     );
 
     private final Setting<Double> minDamage = sgGeneral.add(new DoubleSetting.Builder()
         .name("min-damage")
-        .description("Minimum damage the crystal needs to deal to your target.")
+        .description("水晶对目标造成的最低伤害阈值。")
         .defaultValue(6)
         .min(0)
         .build()
@@ -107,7 +102,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Double> maxDamage = sgGeneral.add(new DoubleSetting.Builder()
         .name("max-damage")
-        .description("Maximum damage crystals can deal to yourself.")
+        .description("水晶对自己造成的最大允许伤害。")
         .defaultValue(6)
         .range(0, 36)
         .sliderMax(36)
@@ -116,28 +111,28 @@ public class CrystalAura extends Module {
 
     private final Setting<Boolean> antiSuicide = sgGeneral.add(new BoolSetting.Builder()
         .name("anti-suicide")
-        .description("Will not place and break crystals if they will kill you.")
+        .description("当水晶会杀死自己时不放置/破坏。")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<Boolean> ignoreNakeds = sgGeneral.add(new BoolSetting.Builder()
         .name("ignore-nakeds")
-        .description("Ignore players with no items.")
+        .description("忽略没有穿戴任何物品的玩家。")
         .defaultValue(false)
         .build()
     );
 
     private final Setting<Boolean> rotate = sgGeneral.add(new BoolSetting.Builder()
         .name("rotate")
-        .description("Rotates server-side towards the crystals being hit/placed.")
+        .description("服务端旋转朝向正在放置/破坏的水晶。")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<YawStepMode> yawStepMode = sgGeneral.add(new EnumSetting.Builder<YawStepMode>()
         .name("yaw-steps-mode")
-        .description("When to run the yaw steps check.")
+        .description("何时执行偏航步进检查。")
         .defaultValue(YawStepMode.Break)
         .visible(rotate::get)
         .build()
@@ -145,7 +140,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Double> yawSteps = sgGeneral.add(new DoubleSetting.Builder()
         .name("yaw-steps")
-        .description("Maximum number of degrees its allowed to rotate in one tick.")
+        .description("每 tick 允许的最大旋转角度。")
         .defaultValue(180)
         .range(1, 180)
         .visible(rotate::get)
@@ -154,7 +149,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Set<EntityType<?>>> entities = sgGeneral.add(new EntityTypeListSetting.Builder()
         .name("entities")
-        .description("Entities to attack.")
+        .description("要攻击的实体类型。")
         .onlyAttackable()
         .defaultValue(EntityType.PLAYER, EntityType.WARDEN, EntityType.WITHER)
         .build()
@@ -164,14 +159,14 @@ public class CrystalAura extends Module {
 
     private final Setting<AutoSwitchMode> autoSwitch = sgSwitch.add(new EnumSetting.Builder<AutoSwitchMode>()
         .name("auto-switch")
-        .description("Switches to crystals in your hotbar once a target is found.")
+        .description("发现目标时自动切换到快捷栏上的水晶。")
         .defaultValue(AutoSwitchMode.Normal)
         .build()
     );
 
     private final Setting<Integer> switchDelay = sgSwitch.add(new IntSetting.Builder()
         .name("switch-delay")
-        .description("The delay in ticks to wait to break a crystal after switching hotbar slot.")
+        .description("切换快捷栏槽位后等待多少 tick 再破坏水晶。")
         .defaultValue(0)
         .min(0)
         .build()
@@ -179,7 +174,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Boolean> noGapSwitch = sgSwitch.add(new BoolSetting.Builder()
         .name("no-gap-switch")
-        .description("Won't auto switch if you're holding a gapple.")
+        .description("手持金苹果时不自动切换。")
         .defaultValue(true)
         .visible(() -> autoSwitch.get() == AutoSwitchMode.Normal)
         .build()
@@ -187,30 +182,30 @@ public class CrystalAura extends Module {
 
     private final Setting<Boolean> noBowSwitch = sgSwitch.add(new BoolSetting.Builder()
         .name("no-bow-switch")
-        .description("Won't auto switch if you're holding a bow.")
+        .description("手持弓时不自动切换。")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<Boolean> antiWeakness = sgSwitch.add(new BoolSetting.Builder()
         .name("anti-weakness")
-        .description("Switches to tools with so you can break crystals with the weakness effect.")
+        .description("有虚弱效果时自动切换到工具以破坏水晶。")
         .defaultValue(true)
         .build()
     );
 
-    // Place
+    // 放置
 
     private final Setting<Boolean> doPlace = sgPlace.add(new BoolSetting.Builder()
         .name("place")
-        .description("If the CA should place crystals.")
+        .description("是否自动放置水晶。")
         .defaultValue(true)
         .build()
     );
 
     public final Setting<Integer> placeDelay = sgPlace.add(new IntSetting.Builder()
         .name("place-delay")
-        .description("The delay in ticks to wait to place a crystal after it's exploded.")
+        .description("水晶爆炸后等待多少 tick 再放置下一个。")
         .defaultValue(0)
         .min(0)
         .sliderMax(20)
@@ -219,7 +214,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Double> placeRange = sgPlace.add(new DoubleSetting.Builder()
         .name("place-range")
-        .description("Range in which to place crystals.")
+        .description("放置水晶的范围（格）。")
         .defaultValue(4.5)
         .min(0)
         .sliderMax(6)
@@ -228,7 +223,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Double> placeWallsRange = sgPlace.add(new DoubleSetting.Builder()
         .name("walls-range")
-        .description("Range in which to place crystals when behind blocks.")
+        .description("穿墙放置水晶的范围（格）。")
         .defaultValue(4.5)
         .min(0)
         .sliderMax(6)
@@ -237,39 +232,39 @@ public class CrystalAura extends Module {
 
     private final Setting<Boolean> placement112 = sgPlace.add(new BoolSetting.Builder()
         .name("1.12-placement")
-        .description("Uses 1.12 crystal placement.")
+        .description("使用 1.12 版放置规则（基座上方 2 格空间）。")
         .defaultValue(false)
         .build()
     );
 
     private final Setting<SupportMode> support = sgPlace.add(new EnumSetting.Builder<SupportMode>()
         .name("support")
-        .description("Places a support block in air if no other position have been found.")
+        .description("找不到其他位置时，在空中放置支撑方块。")
         .defaultValue(SupportMode.Disabled)
         .build()
     );
 
     private final Setting<Integer> supportDelay = sgPlace.add(new IntSetting.Builder()
         .name("support-delay")
-        .description("Delay in ticks after placing support block.")
+        .description("放置支撑方块后等待的 tick 数。")
         .defaultValue(1)
         .min(0)
         .visible(() -> support.get() != SupportMode.Disabled)
         .build()
     );
 
-    // Face place
+    // 贴脸放置
 
     private final Setting<Boolean> facePlace = sgFacePlace.add(new BoolSetting.Builder()
         .name("face-place")
-        .description("Will face-place when target is below a certain health or armor durability threshold.")
+        .description("目标血量或护甲耐久低于阈值时启用贴脸放置。")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<Double> facePlaceHealth = sgFacePlace.add(new DoubleSetting.Builder()
         .name("face-place-health")
-        .description("The health the target has to be at to start face placing.")
+        .description("启用贴脸放置的目标血量阈值。")
         .defaultValue(8)
         .min(1)
         .sliderMin(1)
@@ -280,7 +275,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Double> facePlaceDurability = sgFacePlace.add(new DoubleSetting.Builder()
         .name("face-place-durability")
-        .description("The durability threshold percentage to be able to face-place.")
+        .description("启用贴脸放置的护甲耐久百分比阈值。")
         .defaultValue(2)
         .min(1)
         .sliderMin(1)
@@ -291,7 +286,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Boolean> facePlaceArmor = sgFacePlace.add(new BoolSetting.Builder()
         .name("face-place-missing-armor")
-        .description("Automatically starts face placing when a target misses a piece of armor.")
+        .description("目标缺少护甲部件时自动启用贴脸放置。")
         .defaultValue(false)
         .visible(facePlace::get)
         .build()
@@ -299,23 +294,23 @@ public class CrystalAura extends Module {
 
     private final Setting<Keybind> forceFacePlace = sgFacePlace.add(new KeybindSetting.Builder()
         .name("force-face-place")
-        .description("Starts face place when this button is pressed.")
+        .description("按下此键强制启用贴脸放置。")
         .defaultValue(Keybind.none())
         .build()
     );
 
-    // Break
+    // 破坏
 
     private final Setting<Boolean> doBreak = sgBreak.add(new BoolSetting.Builder()
         .name("break")
-        .description("If the CA should break crystals.")
+        .description("是否自动破坏水晶。")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<Integer> breakDelay = sgBreak.add(new IntSetting.Builder()
         .name("break-delay")
-        .description("The delay in ticks to wait to break a crystal after it's placed.")
+        .description("水晶放置后等待多少 tick 再破坏。")
         .defaultValue(0)
         .min(0)
         .sliderMax(20)
@@ -324,14 +319,14 @@ public class CrystalAura extends Module {
 
     private final Setting<Boolean> smartDelay = sgBreak.add(new BoolSetting.Builder()
         .name("smart-delay")
-        .description("Only breaks crystals when the target can receive damage.")
+        .description("仅在目标能受到伤害时才破坏水晶（无受伤 CD）。")
         .defaultValue(false)
         .build()
     );
 
     private final Setting<Double> breakRange = sgBreak.add(new DoubleSetting.Builder()
         .name("break-range")
-        .description("Range in which to break crystals.")
+        .description("破坏水晶的范围（格）。")
         .defaultValue(4.5)
         .min(0)
         .sliderMax(6)
@@ -340,7 +335,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Double> breakWallsRange = sgBreak.add(new DoubleSetting.Builder()
         .name("walls-range")
-        .description("Range in which to break crystals when behind blocks.")
+        .description("穿墙破坏水晶的范围（格）。")
         .defaultValue(4.5)
         .min(0)
         .sliderMax(6)
@@ -349,14 +344,14 @@ public class CrystalAura extends Module {
 
     private final Setting<Boolean> onlyBreakOwn = sgBreak.add(new BoolSetting.Builder()
         .name("only-own")
-        .description("Only breaks own crystals.")
+        .description("仅破坏自己放置的水晶。")
         .defaultValue(false)
         .build()
     );
 
     private final Setting<Integer> breakAttempts = sgBreak.add(new IntSetting.Builder()
         .name("break-attempts")
-        .description("How many times to hit a crystal before stopping to target it.")
+        .description("对同一颗水晶的最大攻击次数。")
         .defaultValue(2)
         .sliderMin(1)
         .sliderMax(5)
@@ -365,7 +360,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Integer> ticksExisted = sgBreak.add(new IntSetting.Builder()
         .name("ticks-existed")
-        .description("Amount of ticks a crystal needs to have lived for it to be attacked by CrystalAura.")
+        .description("水晶需要存在多少 tick 后才能被攻击。")
         .defaultValue(0)
         .min(0)
         .build()
@@ -373,7 +368,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Integer> attackFrequency = sgBreak.add(new IntSetting.Builder()
         .name("attack-frequency")
-        .description("Maximum hits to do per second.")
+        .description("每秒最大攻击次数。")
         .defaultValue(25)
         .min(1)
         .sliderRange(1, 30)
@@ -382,69 +377,69 @@ public class CrystalAura extends Module {
 
     private final Setting<Boolean> fastBreak = sgBreak.add(new BoolSetting.Builder()
         .name("fast-break")
-        .description("Ignores break delay and tries to break the crystal as soon as it's spawned in the world.")
+        .description("忽略破坏延迟，水晶生成后立即尝试破坏。")
         .defaultValue(true)
         .build()
     );
 
-    // Pause
+    // 暂停
 
     public final Setting<PauseMode> pauseOnUse = sgPause.add(new EnumSetting.Builder<PauseMode>()
         .name("pause-on-use")
-        .description("Which processes should be paused while using an item.")
+        .description("使用物品时暂停哪些流程。")
         .defaultValue(PauseMode.Place)
         .build()
     );
 
     public final Setting<PauseMode> pauseOnMine = sgPause.add(new EnumSetting.Builder<PauseMode>()
         .name("pause-on-mine")
-        .description("Which processes should be paused while mining a block.")
+        .description("挖掘方块时暂停哪些流程。")
         .defaultValue(PauseMode.None)
         .build()
     );
 
     private final Setting<Boolean> pauseOnLag = sgPause.add(new BoolSetting.Builder()
         .name("pause-on-lag")
-        .description("Whether to pause if the server is not responding.")
+        .description("服务器无响应时是否暂停。")
         .defaultValue(true)
         .build()
     );
 
     public final Setting<List<Module>> pauseModules = sgPause.add(new ModuleListSetting.Builder()
         .name("pause-modules")
-        .description("Pauses while any of the selected modules are active.")
+        .description("任一已选模块激活时暂停。")
         .defaultValue(BedAura.class)
         .build()
     );
 
     public final Setting<Double> pauseHealth = sgPause.add(new DoubleSetting.Builder()
         .name("pause-health")
-        .description("Pauses when you go below a certain health.")
+        .description("自身血量低于此值时暂停。")
         .defaultValue(5)
         .range(0,36)
         .sliderRange(0,36)
         .build()
     );
 
-    // Render
+    // 渲染
 
     public final Setting<SwingMode> swingMode = sgRender.add(new EnumSetting.Builder<SwingMode>()
         .name("swing-mode")
-        .description("How to swing when placing.")
+        .description("放置时的挥手方式。")
         .defaultValue(SwingMode.Both)
         .build()
     );
 
     private final Setting<RenderMode> renderMode = sgRender.add(new EnumSetting.Builder<RenderMode>()
         .name("render-mode")
-        .description("The mode to render in.")
+        .description("渲染模式。")
         .defaultValue(RenderMode.Normal)
         .build()
     );
 
     private final Setting<Boolean> renderPlace = sgRender.add(new BoolSetting.Builder()
         .name("render-place")
-        .description("Renders a block overlay over the block the crystals are being placed on.")
+        .description("在放置水晶的方块上渲染覆盖层。")
         .defaultValue(true)
         .visible(() -> renderMode.get() == RenderMode.Normal)
         .build()
@@ -452,7 +447,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Integer> placeRenderTime = sgRender.add(new IntSetting.Builder()
         .name("place-time")
-        .description("How long to render placements.")
+        .description("放置渲染持续时间（tick）。")
         .defaultValue(10)
         .min(0)
         .sliderMax(20)
@@ -462,7 +457,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Boolean> renderBreak = sgRender.add(new BoolSetting.Builder()
         .name("render-break")
-        .description("Renders a block overlay over the block the crystals are broken on.")
+        .description("在破坏水晶的方块上渲染覆盖层。")
         .defaultValue(false)
         .visible(() -> renderMode.get() == RenderMode.Normal)
         .build()
@@ -470,7 +465,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Integer> breakRenderTime = sgRender.add(new IntSetting.Builder()
         .name("break-time")
-        .description("How long to render breaking for.")
+        .description("破坏渲染持续时间（tick）。")
         .defaultValue(13)
         .min(0)
         .sliderMax(20)
@@ -480,7 +475,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Integer> smoothness = sgRender.add(new IntSetting.Builder()
         .name("smoothness")
-        .description("How smoothly the render should move around.")
+        .description("平滑渲染的平滑度。")
         .defaultValue(10)
         .min(0)
         .sliderMax(20)
@@ -490,7 +485,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Double> height = sgRender.add(new DoubleSetting.Builder()
         .name("height")
-        .description("How tall the gradient should be.")
+        .description("渐变渲染的高度。")
         .defaultValue(0.7)
         .min(0)
         .sliderMax(1)
@@ -500,7 +495,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Integer> renderTime = sgRender.add(new IntSetting.Builder()
         .name("render-time")
-        .description("How long to render placements.")
+        .description("渲染持续时间（tick）。")
         .defaultValue(10)
         .min(0)
         .sliderMax(20)
@@ -510,7 +505,7 @@ public class CrystalAura extends Module {
 
     private final Setting<ShapeMode> shapeMode = sgRender.add(new EnumSetting.Builder<ShapeMode>()
         .name("shape-mode")
-        .description("How the shapes are rendered.")
+        .description("形状渲染方式。")
         .defaultValue(ShapeMode.Both)
         .visible(() -> renderMode.get() != RenderMode.None)
         .build()
@@ -518,7 +513,7 @@ public class CrystalAura extends Module {
 
     private final Setting<SettingColor> sideColor = sgRender.add(new ColorSetting.Builder()
         .name("side-color")
-        .description("The side color of the block overlay.")
+        .description("覆盖层侧面颜色。")
         .defaultValue(new SettingColor(255, 255, 255, 45))
         .visible(() -> shapeMode.get().sides() && renderMode.get() != RenderMode.None)
         .build()
@@ -526,7 +521,7 @@ public class CrystalAura extends Module {
 
     private final Setting<SettingColor> lineColor = sgRender.add(new ColorSetting.Builder()
         .name("line-color")
-        .description("The line color of the block overlay.")
+        .description("覆盖层边线颜色。")
         .defaultValue(new SettingColor(255, 255, 255))
         .visible(() -> shapeMode.get().lines() && renderMode.get() != RenderMode.None)
         .build()
@@ -534,7 +529,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Boolean> renderDamageText = sgRender.add(new BoolSetting.Builder()
         .name("damage")
-        .description("Renders crystal damage text in the block overlay.")
+        .description("在覆盖层上显示水晶伤害数值。")
         .defaultValue(true)
         .visible(() -> renderMode.get() != RenderMode.None)
         .build()
@@ -542,7 +537,7 @@ public class CrystalAura extends Module {
 
     private final Setting<SettingColor> damageColor = sgRender.add(new ColorSetting.Builder()
         .name("damage-color")
-        .description("The color of the damage text.")
+        .description("伤害数值的文字颜色。")
         .defaultValue(new SettingColor(255, 255, 255))
         .visible(() -> renderMode.get() != RenderMode.None && renderDamageText.get())
         .build()
@@ -550,7 +545,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Double> damageTextScale = sgRender.add(new DoubleSetting.Builder()
         .name("damage-scale")
-        .description("How big the damage text should be.")
+        .description("伤害文字的大小。")
         .defaultValue(1.25)
         .min(1)
         .sliderMax(4)
@@ -558,7 +553,7 @@ public class CrystalAura extends Module {
         .build()
     );
 
-    // Fields
+    // 字段
 
     private Item mainItem, offItem;
 
@@ -604,48 +599,29 @@ public class CrystalAura extends Module {
 
     private double renderDamage;
 
-    // Crystal lifecycle tracking (replaces entity mixin — all state in one place)
-    private boolean attackedThisTick;
-    private final Int2LongMap crystalSpawnTimes = new Int2LongOpenHashMap();
-    private final IntSet handledCrystals = new IntOpenHashSet();
+    // 水晶生命周期追踪（替代实体 mixin，所有状态集中管理）
+    private boolean attackedThisTick;                                       // 本 tick 已攻击标志，防止重复攻击
+    private final Int2LongMap crystalSpawnTimes = new Int2LongOpenHashMap(); // entityId → 生成时间戚，用于新生判定
+    private final IntSet handledCrystals = new IntOpenHashSet();             // 已处理的水晶 id，避免重复处理
 
-    // Valid base position cache — invalidated on block updates
+    // 有效基座位置缓存 —— BlockUpdateEvent 时增量失效，过滤 ~90% 的无效位置
     private final LongSet validBasePosCache = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
     private boolean baseCacheDirty = true;
     private int baseCacheScanRange;
     private int baseCacheCenterX, baseCacheCenterY, baseCacheCenterZ;
 
-    // Placement proposal cache — amortize scan cost across 2-3 ticks (mio proposal pattern)
+    // 放置方案缓存 —— 分摊扫描开销到 2–3 tick（mio 方案模式）
     private final BlockPos.Mutable proposalPos = new BlockPos.Mutable();
     private boolean proposalIsSupport;
     private double proposalDamage;
     private boolean hasProposal;
     private int proposalAge;
 
-    // Async planner — full scan on background thread (mio async proposal architecture)
-    private static final int SNAP_R = 8;
-    private static final int SNAP_D = SNAP_R * 2 + 1;
-    private final float[] snapBlastRes = new float[SNAP_D * SNAP_D * SNAP_D];
-    private int snapCX, snapCY, snapCZ;
-
-    private final ExecutorService plannerThread = Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(r, "CA-Planner");
-        t.setDaemon(true);
-        t.setPriority(Thread.NORM_PRIORITY - 1);
-        return t;
-    });
-
-    private record AsyncPlaceResult(int x, int y, int z, double damage) {}
-    private record TargetSnap(
-        double posX, double posY, double posZ,
-        double bMinX, double bMinY, double bMinZ, double bMaxX, double bMaxY, double bMaxZ,
-        float armor, float toughness, int protLevel, int resLevel, float health, int hurtTime) {}
-
-    private volatile AsyncPlaceResult asyncDirect, asyncSupport;
-    private volatile boolean plannerBusy;
+    // 异步规划器 —— 将完整扫描委派给后台线程 (CrystalPlanner)
+    private final CrystalPlanner planner = new CrystalPlanner();
 
     public CrystalAura() {
-        super(Categories.Combat, "crystal-aura", "Automatically places and attacks crystals.");
+        super(Categories.Combat, "crystal-aura", "自动放置与攻击末影水晶。");
     }
 
     @Override
@@ -669,9 +645,7 @@ public class CrystalAura extends Module {
         handledCrystals.clear();
         baseCacheDirty = true;
         hasProposal = false;
-        asyncDirect = null;
-        asyncSupport = null;
-        plannerBusy = false;
+        planner.reset();
 
         bestTargetDamage = 0;
         bestTargetTimer = 0;
@@ -791,7 +765,7 @@ public class CrystalAura extends Module {
         }
 
         // Spawn window: instant break with fresh damage evaluation
-        // Own crystals skip age check; all others use standard validation
+        // 自己放置的水晶跳过年龄检查；其他水晶走标准验证
         // Respects switchTimer for anti-cheat packet ordering
         if (fastBreak.get() && !attackedThisTick && switchTimer <= 0 && attacks < attackFrequency.get()) {
             float damage = getBreakDamage(event.entity, !isOwnCrystal);
@@ -824,7 +798,7 @@ public class CrystalAura extends Module {
         lastRotationTimer = 0;
     }
 
-    // Break
+    // 破坏流程
 
     private void doBreak() {
         if (!doBreak.get() || breakTimer > 0 || switchTimer > 0 || attackedThisTick || attacks >= attackFrequency.get()) return;
@@ -841,7 +815,7 @@ public class CrystalAura extends Module {
 
             float score = damage;
             if (placedCrystals.contains(entity.getId())) score += 0.5f;
-            // Newborn window (150ms): massive priority bonus for fresh crystals
+            // 新生窗口 (150ms)：给予新生成水晶巨大的优先级加分
             if (now - crystalSpawnTimes.getOrDefault(entity.getId(), 0L) <= 150) score += 2.0f;
             if (score > bestScore) {
                 bestScore = score;
@@ -978,6 +952,10 @@ public class CrystalAura extends Module {
         // Invalidate placement proposal if block changed near proposal position
         if (hasProposal && pos.isWithinDistance(proposalPos, 3)) hasProposal = false;
 
+        // Incremental blast-resistance snapshot update for async planner
+        planner.updateBlock(pos.getX(), pos.getY(), pos.getZ(),
+            event.newState.getBlock().getBlastResistance());
+
         if (baseCacheDirty) return;
         int range = baseCacheScanRange;
 
@@ -999,7 +977,7 @@ public class CrystalAura extends Module {
         else validBasePosCache.remove(packed);
     }
 
-    // Crystal state queries for renderers (no entity mixin needed)
+    // 水晶状态查询（供渲染器 mixin 调用，无需实体 mixin）
 
     public boolean shouldHideCrystal(int entityId) {
         return handledCrystals.contains(entityId)
@@ -1010,7 +988,7 @@ public class CrystalAura extends Module {
         return System.currentTimeMillis() - crystalSpawnTimes.getOrDefault(entityId, 0L) <= 150;
     }
 
-    // Valid base position cache — full rebuild on move/range change, incremental on block update
+    // 有效基座缓存 —— 移动/范围变化时全量重建，方块变化时增量更新
 
     private boolean isValidBase(int x, int y, int z, boolean supportEnabled) {
         blockPos.set(x, y, z);
@@ -1055,69 +1033,35 @@ public class CrystalAura extends Module {
         baseCacheCenterZ = pp.getZ();
     }
 
-    // === Async Planner (mio architecture) ===
-
-    private float getSnapBlastRes(int x, int y, int z) {
-        int dx = x - snapCX + SNAP_R, dy = y - snapCY + SNAP_R, dz = z - snapCZ + SNAP_R;
-        if (dx < 0 || dx >= SNAP_D || dy < 0 || dy >= SNAP_D || dz < 0 || dz >= SNAP_D) return 0;
-        return snapBlastRes[dx * SNAP_D * SNAP_D + dy * SNAP_D + dz];
-    }
-
-    private TargetSnap snapshotTarget(LivingEntity entity) {
-        Vec3d pos = predictMovement.get() ? entity.getPos().add(entity.getVelocity()) : entity.getPos();
-        Box box = entity.getBoundingBox();
-        if (predictMovement.get()) box = box.offset(entity.getVelocity());
-        float armor = (float) Math.floor(entity.getAttributeValue(EntityAttributes.ARMOR));
-        float tough = (float) entity.getAttributeValue(EntityAttributes.ARMOR_TOUGHNESS);
-        int prot = 0;
-        for (ItemStack stack : entity.getAllArmorItems()) {
-            var enchants = new it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap<net.minecraft.registry.entry.RegistryEntry<net.minecraft.enchantment.Enchantment>>();
-            meteordevelopment.meteorclient.utils.Utils.getEnchantments(stack, enchants);
-            int p = meteordevelopment.meteorclient.utils.Utils.getEnchantmentLevel(enchants, net.minecraft.enchantment.Enchantments.PROTECTION);
-            if (p > 0) prot += p;
-            int bp = meteordevelopment.meteorclient.utils.Utils.getEnchantmentLevel(enchants, net.minecraft.enchantment.Enchantments.BLAST_PROTECTION);
-            if (bp > 0) prot += 2 * bp;
-        }
-        int res = -1;
-        StatusEffectInstance resistance = entity.getStatusEffect(StatusEffects.RESISTANCE);
-        if (resistance != null) res = resistance.getAmplifier();
-        return new TargetSnap(pos.x, pos.y, pos.z, box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
-            armor, tough, prot, res, EntityUtils.getTotalHealth(entity), entity.hurtTime);
-    }
+    // === Async Planner — delegates to CrystalPlanner ===
 
     private void captureAndSubmitAsyncScan() {
-        if (plannerBusy) return;
-
-        // 1. Capture blast resistance snapshot
+        // Always keep snapshot current (main thread only — no contention with background thread's copy)
         BlockPos pp = mc.player.getBlockPos();
-        snapCX = pp.getX(); snapCY = pp.getY(); snapCZ = pp.getZ();
-        int idx = 0;
-        for (int dx = -SNAP_R; dx <= SNAP_R; dx++)
-            for (int dy = -SNAP_R; dy <= SNAP_R; dy++)
-                for (int dz = -SNAP_R; dz <= SNAP_R; dz++)
-                    snapBlastRes[idx++] = mc.world.getBlockState(
-                        new BlockPos(snapCX + dx, snapCY + dy, snapCZ + dz))
-                        .getBlock().getBlastResistance();
+        if (planner.needsRebuild(pp.getX(), pp.getY(), pp.getZ())) {
+            planner.rebuildSnapshot(mc.world, pp.getX(), pp.getY(), pp.getZ());
+        }
+
+        if (planner.isBusy()) return;
 
         // 2. Snapshot targets
-        TargetSnap[] tSnaps = new TargetSnap[targets.size()];
-        for (int i = 0; i < targets.size(); i++) tSnaps[i] = snapshotTarget(targets.get(i));
-        TargetSnap selfSnap = snapshotTarget(mc.player);
+        boolean predict = predictMovement.get();
+        CrystalPlanner.TargetSnap[] tSnaps = new CrystalPlanner.TargetSnap[targets.size()];
+        for (int i = 0; i < targets.size(); i++) tSnaps[i] = CrystalPlanner.snapshotTarget(targets.get(i), predict);
+        CrystalPlanner.TargetSnap selfSnap = CrystalPlanner.snapshotTarget(mc.player, predict);
 
         // 3. Collect valid bases + pre-filter (range, wall, entity overlap on main thread)
-        List<long[]> candidates = new ArrayList<>(); // [packedPos, hasBlock(0/1)]
+        List<long[]> candidates = new ArrayList<>();
         refreshBaseCacheIfNeeded();
         for (long packed : validBasePosCache) {
             int bx = BlockPos.unpackLongX(packed), by = BlockPos.unpackLongY(packed), bz = BlockPos.unpackLongZ(packed);
             net.minecraft.block.BlockState state = mc.world.getBlockState(blockPos.set(bx, by, bz));
             boolean hasBlock = state.isOf(Blocks.BEDROCK) || state.isOf(Blocks.OBSIDIAN);
 
-            // Range + wall check (needs live world)
             ((IVec3d) vec3d).meteor$set(bx + 0.5, by + 1, bz + 0.5);
             blockPos.set(bx, by + 1, bz);
             if (isOutOfRange(vec3d, blockPos, true)) continue;
 
-            // Entity intersection (needs live entities)
             double cx = bx, cy = by + 1.0, cz = bz;
             ((IBox) box).meteor$set(cx, cy, cz, cx + 1, cy + (placement112.get() ? 1 : 2), cz + 1);
             if (intersectsWithEntities(box)) continue;
@@ -1127,154 +1071,18 @@ public class CrystalAura extends Module {
 
         if (candidates.isEmpty()) return;
 
-        // 4. Snapshot settings
-        double maxDmg = maxDamage.get();
-        boolean antiSui = antiSuicide.get();
-        double minDmg = minDamage.get();
-        boolean smart = smartDelay.get();
-        boolean fp = shouldFacePlace();
-        boolean supportFast = support.get() == SupportMode.Fast;
-        float tps = TickRate.INSTANCE.getTickRate();
-
-        // 5. Submit to background thread
-        plannerBusy = true;
-        long[][] cands = candidates.toArray(new long[0][]);
-        plannerThread.submit(() -> {
-            try {
-                runAsyncScan(cands, tSnaps, selfSnap, maxDmg, antiSui, minDmg, smart, fp, supportFast, tps);
-            } finally {
-                plannerBusy = false;
-            }
-        });
+        // 4. Submit to planner background thread
+        planner.submitScan(
+            candidates.toArray(new long[0][]),
+            tSnaps, selfSnap,
+            new CrystalPlanner.ScanSettings(
+                maxDamage.get(), antiSuicide.get(), minDamage.get(), smartDelay.get(),
+                shouldFacePlace(), support.get() == SupportMode.Fast, TickRate.INSTANCE.getTickRate(),
+                mc.world.getDifficulty())
+        );
     }
 
-    // Runs entirely on background thread — no mc.world access
-    private void runAsyncScan(long[][] candidates, TargetSnap[] targets, TargetSnap self,
-                              double maxDmg, boolean antiSui, double minDmg,
-                              boolean smart, boolean facePlace, boolean supportFast, float tps) {
-        AsyncPlaceResult bestDirect = null, bestSupport = null;
-        double bestDirectDmg = 0, bestSupportDmg = 0;
-        float effectiveMaxDmg = (float) maxDmg;
-        if (tps < 18) effectiveMaxDmg *= 0.85f;
-
-        for (long[] cand : candidates) {
-            int bx = BlockPos.unpackLongX(cand[0]), by = BlockPos.unpackLongY(cand[0]), bz = BlockPos.unpackLongZ(cand[0]);
-            boolean hasBlock = cand[1] == 1;
-            double cx = bx + 0.5, cy = by + 1, cz = bz + 0.5;
-
-            // Self-damage via snapshot raycast
-            float selfDmg = asyncCrystalDamage(self, cx, cy, cz, bx, by, bz);
-            if (selfDmg > effectiveMaxDmg || (antiSui && selfDmg >= self.health)) continue;
-
-            // Target damage — full multi-target evaluation for BOTH paths
-            double damage = 0;
-            boolean useFast = !hasBlock && supportFast;
-            if (useFast && targets.length > 0) {
-                float dmg = asyncCrystalDamage(targets[0], cx, cy, cz, bx, by, bz);
-                if (!smart || targets[0].hurtTime <= 0 || dmg >= targets[0].health) damage = dmg;
-            } else {
-                for (TargetSnap t : targets) {
-                    float dmg = asyncCrystalDamage(t, cx, cy, cz, bx, by, bz);
-                    if (smart && t.hurtTime > 0 && dmg < t.health) continue;
-                    damage = Math.max(damage, dmg);
-                }
-            }
-
-            double minimumDamage = facePlace ? Math.min(minDmg, 1.5) : minDmg;
-            if (damage < minimumDamage) continue;
-
-            if (hasBlock) {
-                if (damage > bestDirectDmg) {
-                    bestDirectDmg = damage;
-                    bestDirect = new AsyncPlaceResult(bx, by, bz, damage);
-                    // Lethal short-circuit
-                    if (targets.length > 0 && damage >= targets[0].health) break;
-                }
-            } else {
-                if (damage > bestSupportDmg) {
-                    bestSupportDmg = damage;
-                    bestSupport = new AsyncPlaceResult(bx, by, bz, damage);
-                }
-            }
-        }
-
-        asyncDirect = bestDirect;
-        asyncSupport = bestSupport;
-    }
-
-    // Pure-math crystal damage using blast resistance snapshot — thread-safe
-    private float asyncCrystalDamage(TargetSnap t, double expX, double expY, double expZ, int obsX, int obsY, int obsZ) {
-        double dx = t.posX - expX, dy = t.posY - expY, dz = t.posZ - expZ;
-        double dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
-        if (dist > 12) return 0;
-
-        double exposure = asyncExposure(expX, expY, expZ, t.bMinX, t.bMinY, t.bMinZ, t.bMaxX, t.bMaxY, t.bMaxZ, obsX, obsY, obsZ);
-        double impact = (1 - dist / 12.0) * exposure;
-        float rawDmg = (int) ((impact * impact + impact) / 2.0 * 7.0 * 12.0 + 1);
-
-        return asyncApplyReductions(rawDmg, t);
-    }
-
-    private float asyncApplyReductions(float damage, TargetSnap t) {
-        // Armor reduction (vanilla formula)
-        float f = 2.0f + t.toughness / 4.0f;
-        float g = MathHelper.clamp(t.armor - damage / f, t.armor * 0.2f, 20.0f);
-        damage *= (1 - g / 25.0f);
-        // Resistance
-        if (t.resLevel >= 0) damage *= 1 - (t.resLevel + 1) * 0.2f;
-        // Protection
-        damage *= 1 - Math.min(20, t.protLevel) / 25.0f;
-        return Math.max(damage, 0);
-    }
-
-    private double asyncExposure(double srcX, double srcY, double srcZ,
-                                 double bMinX, double bMinY, double bMinZ,
-                                 double bMaxX, double bMaxY, double bMaxZ,
-                                 int obsX, int obsY, int obsZ) {
-        double xDiff = bMaxX - bMinX, yDiff = bMaxY - bMinY, zDiff = bMaxZ - bMinZ;
-        double xStep = 1 / (xDiff * 2 + 1), yStep = 1 / (yDiff * 2 + 1), zStep = 1 / (zDiff * 2 + 1);
-        if (xStep <= 0 || yStep <= 0 || zStep <= 0) return 0;
-
-        double xOff = (1 - Math.floor(1 / xStep) * xStep) * 0.5;
-        double zOff = (1 - Math.floor(1 / zStep) * zStep) * 0.5;
-        xStep *= xDiff; yStep *= yDiff; zStep *= zDiff;
-
-        int misses = 0, hits = 0;
-        for (double x = bMinX + xOff; x <= bMaxX + xOff; x += xStep) {
-            for (double y = bMinY; y <= bMaxY; y += yStep) {
-                for (double z = bMinZ + zOff; z <= bMaxZ + zOff; z += zStep) {
-                    if (!asyncRayBlocked(x, y, z, srcX, srcY, srcZ, obsX, obsY, obsZ)) misses++;
-                    hits++;
-                }
-            }
-        }
-        return hits == 0 ? 0 : (double) misses / hits;
-    }
-
-    // Snapshot-based ray walk — uses DDA algorithm, no world access
-    private boolean asyncRayBlocked(double startX, double startY, double startZ,
-                                     double endX, double endY, double endZ,
-                                     int obsX, int obsY, int obsZ) {
-        // Use BlockView.raycast with a snapshot factory
-        DamageUtils.ExposureRaycastContext ctx = new DamageUtils.ExposureRaycastContext(
-            new Vec3d(startX, startY, startZ), new Vec3d(endX, endY, endZ));
-
-        DamageUtils.RaycastFactory factory = (c, bp) -> {
-            float blastRes;
-            if (bp.getX() == obsX && bp.getY() == obsY && bp.getZ() == obsZ) {
-                blastRes = 0; // Override obsidian position as air (crystal replaces it visually)
-            } else {
-                blastRes = getSnapBlastRes(bp.getX(), bp.getY(), bp.getZ());
-            }
-            if (blastRes < 600) return null;
-            return VoxelShapes.fullCube().raycast(c.start(), c.end(), bp);
-        };
-
-        // Reuse MC's ray walking algorithm — pure math, thread-safe with snapshot factory
-        return net.minecraft.world.BlockView.raycast(ctx.start(), ctx.end(), ctx, factory, c -> null) != null;
-    }
-
-    // Proposal validation — 2 damage calcs instead of full scan (~80 calcs)
+    // 方案验证 —— 仅 2 次伤害计算替代完整扫描（~80 次）
 
     private boolean quickValidateProposal() {
         // Base block still valid?
@@ -1338,14 +1146,14 @@ public class CrystalAura extends Module {
         }
     }
 
-    // Place
+    // 放置流程
 
     private void doPlace() {
         if (!doPlace.get() || placeTimer > 0) return;
         if (shouldPause(PauseMode.Place)) return;
 
-        // Don't send redundant place packets while waiting for crystal spawn confirmation
-        // RusherHack/mio: zero wasted packets on low TPS
+        // 等待水晶生成确认时不发送冗余放置包
+        // RusherHack/mio 模式：低 TPS 时零浪费包
         if (placing && placingTimer > 0) return;
 
         // Return if there are no crystals in hotbar or offhand
@@ -1368,19 +1176,18 @@ public class CrystalAura extends Module {
         }
 
         // === Async pipeline: consume result from background thread ===
-        AsyncPlaceResult ad = asyncDirect, as = asyncSupport;
+        CrystalPlanner.PlaceResult ad = planner.getDirectResult(), as = planner.getSupportResult();
         if (ad != null || as != null) {
-            asyncDirect = null;
-            asyncSupport = null;
+            planner.clearResults();
 
             boolean supportEnabled = support.get() != SupportMode.Disabled;
             boolean useDirect = ad != null;
             boolean useSupport = supportEnabled && as != null
-                && (!useDirect || as.damage > ad.damage * 1.5);
+                && (!useDirect || as.damage() > ad.damage() * 1.5);
 
-            AsyncPlaceResult chosen = useSupport ? as : useDirect ? ad : null;
+            CrystalPlanner.PlaceResult chosen = useSupport ? as : useDirect ? ad : null;
             if (chosen != null) {
-                BlockPos.Mutable bp = new BlockPos.Mutable(chosen.x, chosen.y, chosen.z);
+                BlockPos.Mutable bp = new BlockPos.Mutable(chosen.x(), chosen.y(), chosen.z());
 
                 // Quick validation on main thread: base still valid + range OK
                 net.minecraft.block.BlockState state = mc.world.getBlockState(bp);
@@ -1394,7 +1201,7 @@ public class CrystalAura extends Module {
                         // Save as proposal for subsequent ticks
                         proposalPos.set(bp);
                         proposalIsSupport = useSupport;
-                        proposalDamage = chosen.damage;
+                        proposalDamage = chosen.damage();
                         hasProposal = true;
                         proposalAge = 0;
 
@@ -1412,11 +1219,11 @@ public class CrystalAura extends Module {
                             double pitch = Rotations.getPitch(vec3d);
                             if (yawStepMode.get() == YawStepMode.Break || doYawSteps(yaw, pitch)) {
                                 setRotation(true, vec3d, 0, 0);
-                                Rotations.rotate(yaw, pitch, 50, () -> placeCrystal(result, chosen.damage, supportBlock));
+                                Rotations.rotate(yaw, pitch, 50, () -> placeCrystal(result, chosen.damage(), supportBlock));
                                 placeTimer += placeDelay.get();
                             }
                         } else {
-                            placeCrystal(result, chosen.damage, supportBlock);
+                            placeCrystal(result, chosen.damage(), supportBlock);
                             placeTimer += placeDelay.get();
                         }
 
@@ -1428,7 +1235,7 @@ public class CrystalAura extends Module {
             }
         }
 
-        // Proposal cache fast-path: reuse previous scan result (2 damage calcs vs 80+)
+        // 方案缓存快速路径：复用上次扫描结果（2 次伤害计算 vs 80+）
         if (hasProposal && proposalAge < 3) {
             if (quickValidateProposal()) {
                 proposalAge++;
@@ -1443,7 +1250,7 @@ public class CrystalAura extends Module {
         // Submit async scan for next tick while falling through to sync scan
         captureAndSubmitAsyncScan();
 
-        // Sync fallback: full scan via BlockIterator (used on first tick or when async is behind)
+        // 同步回退：通过 BlockIterator 全量扫描（首 tick 或异步未就绪时使用）
 
         // Setup variables — track direct and support candidates independently
         AtomicDouble bestDirectDamage = new AtomicDouble(0);
@@ -1496,7 +1303,7 @@ public class CrystalAura extends Module {
                     bestDirectDamage.set(damage);
                     bestDirectPos.get().set(bp);
 
-                    // Lethal short-circuit: stop scanning if this position would kill the best target
+                    // 致命短路：如果该位置可击杀最优目标，停止扫描
                     LivingEntity nearest = getNearestTarget();
                     if (nearest != null && damage >= EntityUtils.getTotalHealth(nearest)) {
                         BlockIterator.disableCurrent();
@@ -1513,7 +1320,7 @@ public class CrystalAura extends Module {
 
         // Place the crystal — choose between direct and support candidates
         BlockIterator.after(() -> {
-            // GrimAC MultiActionsF: entity interact + block place in same tick is flagged
+            // GrimAC MultiActionsF：同一 tick 内实体交互 + 方块放置会被标记
             // Skip placement on ticks where we already attacked a crystal
             if (attackedThisTick) return;
 
@@ -1649,7 +1456,7 @@ public class CrystalAura extends Module {
         if (autoSwitch.get() == AutoSwitchMode.Silent) InvUtils.swap(prevSlot, false);
     }
 
-    // Yaw steps
+    // 偏航步进
 
     @EventHandler
     private void onPacketSent(PacketEvent.Sent event) {
@@ -1686,14 +1493,14 @@ public class CrystalAura extends Module {
         return phi > 180 ? 360 - phi : phi;
     }
 
-    // Face place
+    // 贴脸放置判定
 
     private boolean shouldFacePlace() {
         if (!facePlace.get()) return false;
 
         if (forceFacePlace.get().isPressed()) return true;
 
-        // Checks if the provided crystal position should face place to any target
+        // 检查当前位置是否应对任一目标启用贴脸放置
         for (LivingEntity target : targets) {
             if (EntityUtils.getTotalHealth(target) <= facePlaceHealth.get()) return true;
 
@@ -1710,7 +1517,7 @@ public class CrystalAura extends Module {
         return false;
     }
 
-    // Others
+    // 其他工具方法
 
     private boolean shouldPause(PauseMode process) {
         if (mc.player.isUsingItem() || mc.options.useKey.isPressed()) {
@@ -1826,7 +1633,7 @@ public class CrystalAura extends Module {
         return EntityUtils.intersectsWithEntity(box, entity -> !entity.isSpectator() && !removed.contains(entity.getId()));
     }
 
-    // Rendering
+    // 渲染系统
 
     @EventHandler
     private void onRender(Render3DEvent event) {

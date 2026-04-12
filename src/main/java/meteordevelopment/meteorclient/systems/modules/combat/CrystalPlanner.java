@@ -1,0 +1,343 @@
+package meteordevelopment.meteorclient.systems.modules.combat;
+
+import it.unimi.dsi.fastutil.objects.Object2IntOpenHashMap;
+import meteordevelopment.meteorclient.utils.Utils;
+import meteordevelopment.meteorclient.utils.entity.DamageUtils;
+import meteordevelopment.meteorclient.utils.entity.EntityUtils;
+import net.minecraft.client.world.ClientWorld;
+import net.minecraft.enchantment.Enchantments;
+import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.attribute.EntityAttributes;
+import net.minecraft.entity.effect.StatusEffectInstance;
+import net.minecraft.entity.effect.StatusEffects;
+import net.minecraft.item.ItemStack;
+import net.minecraft.registry.entry.RegistryEntry;
+import net.minecraft.enchantment.Enchantment;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Box;
+import net.minecraft.util.math.MathHelper;
+import net.minecraft.util.math.Vec3d;
+import net.minecraft.util.shape.VoxelShapes;
+import net.minecraft.world.BlockView;
+import net.minecraft.world.Difficulty;
+
+import java.util.Arrays;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+/**
+ * 异步水晶放置扫描器。
+ *
+ * 架构说明：
+ * 1. 主线程维护一个「爆炸抗性快照」浮点数组，在 BlockUpdateEvent 时增量更新、玩家移动时全量重建。
+ * 2. 每次提交扫描前用 Arrays.copyOf 生成快照副本，传递给后台线程，保证线程安全。
+ * 3. 后台守护线程对所有候选基座位置做完整伤害评估（自伤 + 全目标），输出 bestDirect / bestSupport。
+ * 4. 主线程下一 tick 消费结果，做快速验证后执行放置。
+ *
+ * 快照半径分析：
+ * - 曝光度射线从目标包围盒顶点出发，指向水晶位置（玩家附近 placeRange 以内）。
+ * - 射线经过的方块均在 max(targetRange, placeRange) 以内（距快照中心/玩家位置）。
+ * - 默认 targetRange=10 → 射线最远到距中心 ~10.5 格 → SNAP_R=10 即可覆盖。
+ * - 超出范围的方块返回 blastRes=0（视为非防爆），等同于空气，不影响射线判定。
+ * - 在水晶 PvP 中，防爆方块（黑曜石/基岩）集中在玩家基地附近 5 格内，远端几乎没有。
+ * - 即使在极端情况下远处有黑曜石被忽略，误差也是保守的（高估目标伤害，行为偏激进）。
+ *
+ * 快照规模：SNAP_R=10 → SNAP_D=21 → 9261 entries = 37KB 内存，全量重建 ~0.5ms。
+ */
+public class CrystalPlanner {
+
+    // ====== 快照参数 ======
+    // 半径 10 覆盖默认 targetRange=10；直径 21，总量 9261 个浮点数
+    private static final int SNAP_R = 10;
+    private static final int SNAP_D = SNAP_R * 2 + 1;
+    private static final int SNAP_SIZE = SNAP_D * SNAP_D * SNAP_D;
+
+    // 持久化爆炸抗性快照（主线程写入，提交时拷贝给后台线程）
+    private final float[] blastRes = new float[SNAP_SIZE];
+    private int centerX, centerY, centerZ;
+    private boolean snapshotReady;
+
+    // ====== 后台线程 ======
+    // 单线程守护线程，低于正常优先级，避免影响主线程帧率
+    private final ExecutorService thread = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "CA-Planner");
+        t.setDaemon(true);
+        t.setPriority(Thread.NORM_PRIORITY - 1);
+        return t;
+    });
+
+    // ====== 结果（后台线程写入，主线程通过 volatile 读取）======
+    private volatile PlaceResult directResult, supportResult;
+    private volatile boolean busy;
+
+    // ====== 数据结构 ======
+
+    /** 放置扫描结果：最佳基座坐标 + 预估伤害。 */
+    public record PlaceResult(int x, int y, int z, double damage) {}
+
+    /**
+     * 目标快照 —— 在主线程从活体实体上提取的纯值拷贝，后台线程可安全读取。
+     * 包含位置、包围盒、护甲/韧性、保护附魔等级、抗性效果等级、生命值、受伤 CD。
+     */
+    public record TargetSnap(
+        double posX, double posY, double posZ,
+        double bMinX, double bMinY, double bMinZ, double bMaxX, double bMaxY, double bMaxZ,
+        float armor, float toughness, int protLevel, int resLevel, float health, int hurtTime) {}
+
+    /** 扫描配置快照 —— 在主线程捕获的设置值，确保后台线程读取的是一致性快照。 */
+    public record ScanSettings(
+        double maxDmg, boolean antiSui, double minDmg, boolean smart,
+        boolean facePlace, boolean supportFast, float tps, Difficulty difficulty) {}
+
+    // ============================== 快照管理 ==============================
+
+    /** 判断是否需要全量重建（首次运行、或玩家移动超过 2 格）。 */
+    public boolean needsRebuild(int playerX, int playerY, int playerZ) {
+        if (!snapshotReady) return true;
+        return Math.abs(playerX - centerX) > 2
+            || Math.abs(playerY - centerY) > 2
+            || Math.abs(playerZ - centerZ) > 2;
+    }
+
+    /** 全量重建快照 —— 遍历 SNAP_D³ 个方块，存储爆炸抗性。在主线程调用。 */
+    public void rebuildSnapshot(ClientWorld world, int cx, int cy, int cz) {
+        centerX = cx; centerY = cy; centerZ = cz;
+        int idx = 0;
+        BlockPos.Mutable mutable = new BlockPos.Mutable();
+        for (int dx = -SNAP_R; dx <= SNAP_R; dx++)
+            for (int dy = -SNAP_R; dy <= SNAP_R; dy++)
+                for (int dz = -SNAP_R; dz <= SNAP_R; dz++)
+                    blastRes[idx++] = world.getBlockState(mutable.set(cx + dx, cy + dy, cz + dz))
+                        .getBlock().getBlastResistance();
+        snapshotReady = true;
+    }
+
+    /**
+     * 增量更新单个方块的爆炸抗性。由 BlockUpdateEvent 触发，在主线程调用。
+     * 如果坐标超出快照范围则静默忽略（远端方块无影响）。
+     */
+    public void updateBlock(int x, int y, int z, float newBlastRes) {
+        if (!snapshotReady) return;
+        int dx = x - centerX + SNAP_R, dy = y - centerY + SNAP_R, dz = z - centerZ + SNAP_R;
+        if (dx < 0 || dx >= SNAP_D || dy < 0 || dy >= SNAP_D || dz < 0 || dz >= SNAP_D) return;
+        blastRes[dx * SNAP_D * SNAP_D + dy * SNAP_D + dz] = newBlastRes;
+    }
+
+    // ============================== 扫描提交 ==============================
+
+    public boolean isBusy() { return busy; }
+    public PlaceResult getDirectResult() { return directResult; }
+    public PlaceResult getSupportResult() { return supportResult; }
+    public void clearResults() { directResult = null; supportResult = null; }
+
+    /**
+     * 提交候选位置到后台线程进行伤害评估。
+     * 在提交前拷贝快照数组（Arrays.copyOf），保证后台线程读取的是主线程提交时刻的一致性快照，
+     * 主线程可在此之后继续通过 updateBlock 修改原始数组而不影响正在运行的扫描。
+     *
+     * @param candidates 数组，每个元素为 [packedBlockPos, hasBlock(0 或 1)]
+     */
+    public void submitScan(long[][] candidates, TargetSnap[] targets, TargetSnap self, ScanSettings settings) {
+        if (busy || !snapshotReady) return;
+
+        // 线程安全：拷贝快照 + 中心坐标后提交
+        float[] snapCopy = Arrays.copyOf(blastRes, SNAP_SIZE);
+        int cx = centerX, cy = centerY, cz = centerZ;
+        busy = true;
+        thread.submit(() -> {
+            try {
+                runScan(snapCopy, cx, cy, cz, candidates, targets, self, settings);
+            } finally {
+                busy = false;
+            }
+        });
+    }
+
+    // ============================== 后台线程（禁止访问 mc.world）==============================
+
+    private void runScan(float[] snap, int cx, int cy, int cz,
+                         long[][] candidates, TargetSnap[] targets, TargetSnap self,
+                         ScanSettings s) {
+        PlaceResult bestDirect = null, bestSupport = null;
+        double bestDirectDmg = 0, bestSupportDmg = 0;
+        float effectiveMaxDmg = (float) s.maxDmg;
+        if (s.tps < 18) effectiveMaxDmg *= 0.85f;
+
+        for (long[] cand : candidates) {
+            int bx = BlockPos.unpackLongX(cand[0]);
+            int by = BlockPos.unpackLongY(cand[0]);
+            int bz = BlockPos.unpackLongZ(cand[0]);
+            boolean hasBlock = cand[1] == 1;
+            double expX = bx + 0.5, expY = by + 1, expZ = bz + 0.5;
+
+            // 自伤检测
+            float selfDmg = crystalDamage(snap, cx, cy, cz, self, expX, expY, expZ, bx, by, bz, s.difficulty);
+            if (selfDmg > effectiveMaxDmg || (s.antiSui && selfDmg >= self.health)) continue;
+
+            // 目标伤害 —— 对所有目标进行完整评估
+            double damage = 0;
+            boolean useFast = !hasBlock && s.supportFast;
+            if (useFast && targets.length > 0) {
+                float dmg = crystalDamage(snap, cx, cy, cz, targets[0], expX, expY, expZ, bx, by, bz, s.difficulty);
+                if (!s.smart || targets[0].hurtTime <= 0 || dmg >= targets[0].health) damage = dmg;
+            } else {
+                for (TargetSnap t : targets) {
+                    float dmg = crystalDamage(snap, cx, cy, cz, t, expX, expY, expZ, bx, by, bz, s.difficulty);
+                    if (s.smart && t.hurtTime > 0 && dmg < t.health) continue;
+                    damage = Math.max(damage, dmg);
+                }
+            }
+
+            double minDamage = s.facePlace ? Math.min(s.minDmg, 1.5) : s.minDmg;
+            if (damage < minDamage) continue;
+
+            if (hasBlock) {
+                if (damage > bestDirectDmg) {
+                    bestDirectDmg = damage;
+                    bestDirect = new PlaceResult(bx, by, bz, damage);
+                    // 致命短路：伤害 >= 目标血量，直接中断搜索
+                    if (targets.length > 0 && damage >= targets[0].health) break;
+                }
+            } else {
+                if (damage > bestSupportDmg) {
+                    bestSupportDmg = damage;
+                    bestSupport = new PlaceResult(bx, by, bz, damage);
+                }
+            }
+        }
+
+        directResult = bestDirect;
+        supportResult = bestSupport;
+    }
+
+    // ------ 纯数学伤害计算（线程安全，不访问 mc.world）------
+
+    private float crystalDamage(float[] snap, int cx, int cy, int cz,
+                                TargetSnap t, double expX, double expY, double expZ,
+                                int obsX, int obsY, int obsZ, Difficulty difficulty) {
+        double dx = t.posX - expX, dy = t.posY - expY, dz = t.posZ - expZ;
+        double dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        if (dist > 12) return 0;
+
+        double exposure = calcExposure(snap, cx, cy, cz, expX, expY, expZ,
+            t.bMinX, t.bMinY, t.bMinZ, t.bMaxX, t.bMaxY, t.bMaxZ, obsX, obsY, obsZ);
+        double impact = (1 - dist / 12.0) * exposure;
+        float rawDmg = (int) ((impact * impact + impact) / 2.0 * 7.0 * 12.0 + 1);
+
+        return applyReductions(rawDmg, t, difficulty);
+    }
+
+    private float applyReductions(float damage, TargetSnap t, Difficulty difficulty) {
+        // 难度缩放（位于护甲之前 —— 原版顺序）
+        switch (difficulty) {
+            case EASY -> damage = Math.min(damage / 2 + 1, damage);  // 简单: 伤害减半+1
+            case HARD -> damage *= 1.5f;  // 困难: 1.5倍
+            default -> {}
+        }
+        // 护甲减免（原版公式：f = 2 + toughness/4; g = clamp(armor - damage/f, armor*0.2, 20); damage *= 1 - g/25）
+        float f = 2.0f + t.toughness / 4.0f;
+        float g = MathHelper.clamp(t.armor - damage / f, t.armor * 0.2f, 20.0f);
+        damage *= (1 - g / 25.0f);
+        // 抵抗效果（每级减 20%）
+        if (t.resLevel >= 0) damage *= 1 - (t.resLevel + 1) * 0.2f;
+        // 保护附魔（合计等级 clamp(0,20)，每点 4% 减免）
+        damage *= 1 - MathHelper.clamp(t.protLevel, 0, 20) / 25.0f;
+        return Math.max(damage, 0);
+    }
+
+    private double calcExposure(float[] snap, int cx, int cy, int cz,
+                                double srcX, double srcY, double srcZ,
+                                double bMinX, double bMinY, double bMinZ,
+                                double bMaxX, double bMaxY, double bMaxZ,
+                                int obsX, int obsY, int obsZ) {
+        double xDiff = bMaxX - bMinX, yDiff = bMaxY - bMinY, zDiff = bMaxZ - bMinZ;
+        double xStep = 1 / (xDiff * 2 + 1), yStep = 1 / (yDiff * 2 + 1), zStep = 1 / (zDiff * 2 + 1);
+        if (xStep <= 0 || yStep <= 0 || zStep <= 0) return 0;
+
+        double xOff = (1 - Math.floor(1 / xStep) * xStep) * 0.5;
+        double zOff = (1 - Math.floor(1 / zStep) * zStep) * 0.5;
+        xStep *= xDiff; yStep *= yDiff; zStep *= zDiff;
+
+        int misses = 0, total = 0;
+        for (double x = bMinX + xOff; x <= bMaxX + xOff; x += xStep)
+            for (double y = bMinY; y <= bMaxY; y += yStep)
+                for (double z = bMinZ + zOff; z <= bMaxZ + zOff; z += zStep) {
+                    if (!rayBlocked(snap, cx, cy, cz, x, y, z, srcX, srcY, srcZ, obsX, obsY, obsZ))
+                        misses++;
+                    total++;
+                }
+        return total == 0 ? 0 : (double) misses / total;
+    }
+
+    /**
+     * 基于快照的射线检测 —— 复用 MC 的 BlockView.raycast (DDA 行走算法)。
+     * 工厂函数从快照数组读取爆炸抗性：
+     * - 抗性 >= 600（黑曜石/基岩）：返回 VoxelShapes.fullCube() 射线命中（全方块程序化碰撞体）
+     * - 抗性 < 600：返回 null（射线穿透）
+     * - obsX/Y/Z 位置强制返回 1200（模拟 support 位置放置的黑曜石）
+     */
+    private boolean rayBlocked(float[] snap, int cx, int cy, int cz,
+                               double startX, double startY, double startZ,
+                               double endX, double endY, double endZ,
+                               int obsX, int obsY, int obsZ) {
+        DamageUtils.ExposureRaycastContext ctx = new DamageUtils.ExposureRaycastContext(
+            new Vec3d(startX, startY, startZ), new Vec3d(endX, endY, endZ));
+
+        DamageUtils.RaycastFactory factory = (c, bp) -> {
+            float br;
+            if (bp.getX() == obsX && bp.getY() == obsY && bp.getZ() == obsZ) {
+                br = 1200.0f; // 强制视为黑曜石，模拟 support 块已放置
+            } else {
+                br = getBlastRes(snap, cx, cy, cz, bp.getX(), bp.getY(), bp.getZ());
+            }
+            if (br < 600) return null;
+            return VoxelShapes.fullCube().raycast(c.start(), c.end(), bp);
+        };
+
+        return BlockView.raycast(ctx.start(), ctx.end(), ctx, factory, c -> null) != null;
+    }
+
+    private static float getBlastRes(float[] snap, int cx, int cy, int cz, int x, int y, int z) {
+        int dx = x - cx + SNAP_R, dy = y - cy + SNAP_R, dz = z - cz + SNAP_R;
+        if (dx < 0 || dx >= SNAP_D || dy < 0 || dy >= SNAP_D || dz < 0 || dz >= SNAP_D) return 0;
+        return snap[dx * SNAP_D * SNAP_D + dy * SNAP_D + dz];
+    }
+
+    // ============================== 目标快照（主线程）==============================
+
+    /**
+     * 从活体实体提取纯值快照，后台线程可安全读取。
+     * 护甲值取 floor（原版行为），保护等级 = protection + 2*blast_protection（爆炸保护权重 2x）。
+     */
+    public static TargetSnap snapshotTarget(LivingEntity entity, boolean predictMovement) {
+        Vec3d pos = predictMovement ? entity.getPos().add(entity.getVelocity()) : entity.getPos();
+        Box box = entity.getBoundingBox();
+        if (predictMovement) box = box.offset(entity.getVelocity());
+        float armor = (float) Math.floor(entity.getAttributeValue(EntityAttributes.ARMOR));
+        float tough = (float) entity.getAttributeValue(EntityAttributes.ARMOR_TOUGHNESS);
+        int prot = 0;
+        for (ItemStack stack : entity.getAllArmorItems()) {
+            var enchants = new Object2IntOpenHashMap<RegistryEntry<Enchantment>>();
+            Utils.getEnchantments(stack, enchants);
+            int p = Utils.getEnchantmentLevel(enchants, Enchantments.PROTECTION);
+            if (p > 0) prot += p;
+            int bp = Utils.getEnchantmentLevel(enchants, Enchantments.BLAST_PROTECTION);
+            if (bp > 0) prot += 2 * bp;
+        }
+        int res = -1;
+        StatusEffectInstance resistance = entity.getStatusEffect(StatusEffects.RESISTANCE);
+        if (resistance != null) res = resistance.getAmplifier();
+        return new TargetSnap(pos.x, pos.y, pos.z, box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ,
+            armor, tough, prot, res, EntityUtils.getTotalHealth(entity), entity.hurtTime);
+    }
+
+    // ============================== 生命周期 ==============================
+
+    /** 模块激活时调用，重置所有状态。 */
+    public void reset() {
+        directResult = null;
+        supportResult = null;
+        busy = false;
+        snapshotReady = false;
+    }
+}
