@@ -72,8 +72,17 @@ public class CrystalPlanner {
 
     // ====== 数据结构 ======
 
-    /** 放置扫描结果：最佳基座坐标 + 预估伤害。 */
+    /**
+     * 放置扫描结果：最佳基座坐标 + 预估伤害。
+     * 主线程消费结果时必须实时调用 resolveCrystalHit 验证可达性。
+     */
     public record PlaceResult(int x, int y, int z, double damage) {}
+
+    /**
+     * 候选位置 —— 主线程范围/碰撞预过滤后传递给后台线程。
+     * 仅包含基座坐标和是否有方块（LOS 在消费时实时验证）。
+     */
+    public record Candidate(int x, int y, int z, boolean hasBlock) {}
 
     /**
      * 目标快照 —— 在主线程从活体实体上提取的纯值拷贝，后台线程可安全读取。
@@ -126,18 +135,19 @@ public class CrystalPlanner {
     // ============================== 扫描提交 ==============================
 
     public boolean isBusy() { return busy; }
+    /** 获取 direct 最佳候选，可能为 null。 */
     public PlaceResult getDirectResult() { return directResult; }
+    /** 获取 support 最佳候选，可能为 null。 */
     public PlaceResult getSupportResult() { return supportResult; }
     public void clearResults() { directResult = null; supportResult = null; }
 
     /**
      * 提交候选位置到后台线程进行伤害评估。
+     * 候选仅需范围/碰撞预过滤（LOS 在主线程消费结果时实时验证）。
      * 在提交前拷贝快照数组（Arrays.copyOf），保证后台线程读取的是主线程提交时刻的一致性快照，
      * 主线程可在此之后继续通过 updateBlock 修改原始数组而不影响正在运行的扫描。
-     *
-     * @param candidates 数组，每个元素为 [packedBlockPos, hasBlock(0 或 1)]
      */
-    public void submitScan(long[][] candidates, TargetSnap[] targets, TargetSnap self, ScanSettings settings) {
+    public void submitScan(Candidate[] candidates, TargetSnap[] targets, TargetSnap self, ScanSettings settings) {
         if (busy || !snapshotReady) return;
 
         // 线程安全：拷贝快照 + 中心坐标后提交
@@ -156,33 +166,29 @@ public class CrystalPlanner {
     // ============================== 后台线程（禁止访问 mc.world）==============================
 
     private void runScan(float[] snap, int cx, int cy, int cz,
-                         long[][] candidates, TargetSnap[] targets, TargetSnap self,
+                         Candidate[] candidates, TargetSnap[] targets, TargetSnap self,
                          ScanSettings s) {
         PlaceResult bestDirect = null, bestSupport = null;
-        double bestDirectDmg = 0, bestSupportDmg = 0;
+
         float effectiveMaxDmg = (float) s.maxDmg;
         if (s.tps < 18) effectiveMaxDmg *= 0.85f;
 
-        for (long[] cand : candidates) {
-            int bx = BlockPos.unpackLongX(cand[0]);
-            int by = BlockPos.unpackLongY(cand[0]);
-            int bz = BlockPos.unpackLongZ(cand[0]);
-            boolean hasBlock = cand[1] == 1;
-            double expX = bx + 0.5, expY = by + 1, expZ = bz + 0.5;
+        for (Candidate cand : candidates) {
+            double expX = cand.x + 0.5, expY = cand.y + 1, expZ = cand.z + 0.5;
 
             // 自伤检测
-            float selfDmg = crystalDamage(snap, cx, cy, cz, self, expX, expY, expZ, bx, by, bz, s.difficulty);
+            float selfDmg = crystalDamage(snap, cx, cy, cz, self, expX, expY, expZ, cand.x, cand.y, cand.z, s.difficulty);
             if (selfDmg > effectiveMaxDmg || (s.antiSui && selfDmg >= self.health)) continue;
 
             // 目标伤害 —— 对所有目标进行完整评估
             double damage = 0;
-            boolean useFast = !hasBlock && s.supportFast;
+            boolean useFast = !cand.hasBlock && s.supportFast;
             if (useFast && targets.length > 0) {
-                float dmg = crystalDamage(snap, cx, cy, cz, targets[0], expX, expY, expZ, bx, by, bz, s.difficulty);
+                float dmg = crystalDamage(snap, cx, cy, cz, targets[0], expX, expY, expZ, cand.x, cand.y, cand.z, s.difficulty);
                 if (!s.smart || targets[0].hurtTime <= 0 || dmg >= targets[0].health) damage = dmg;
             } else {
                 for (TargetSnap t : targets) {
-                    float dmg = crystalDamage(snap, cx, cy, cz, t, expX, expY, expZ, bx, by, bz, s.difficulty);
+                    float dmg = crystalDamage(snap, cx, cy, cz, t, expX, expY, expZ, cand.x, cand.y, cand.z, s.difficulty);
                     if (s.smart && t.hurtTime > 0 && dmg < t.health) continue;
                     damage = Math.max(damage, dmg);
                 }
@@ -191,18 +197,12 @@ public class CrystalPlanner {
             double minDamage = s.facePlace ? Math.min(s.minDmg, 1.5) : s.minDmg;
             if (damage < minDamage) continue;
 
-            if (hasBlock) {
-                if (damage > bestDirectDmg) {
-                    bestDirectDmg = damage;
-                    bestDirect = new PlaceResult(bx, by, bz, damage);
-                    // 致命短路：伤害 >= 目标血量，直接中断搜索
-                    if (targets.length > 0 && damage >= targets[0].health) break;
-                }
+            PlaceResult pr = new PlaceResult(cand.x, cand.y, cand.z, damage);
+
+            if (cand.hasBlock) {
+                if (bestDirect == null || damage > bestDirect.damage()) bestDirect = pr;
             } else {
-                if (damage > bestSupportDmg) {
-                    bestSupportDmg = damage;
-                    bestSupport = new PlaceResult(bx, by, bz, damage);
-                }
+                if (bestSupport == null || damage > bestSupport.damage()) bestSupport = pr;
             }
         }
 
