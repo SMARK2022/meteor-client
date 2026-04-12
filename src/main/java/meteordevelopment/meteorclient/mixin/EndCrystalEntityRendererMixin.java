@@ -6,7 +6,9 @@
 package meteordevelopment.meteorclient.mixin;
 
 import com.llamalad7.mixinextras.injector.v2.WrapWithCondition;
+import meteordevelopment.meteorclient.mixininterface.IEntityRenderState;
 import meteordevelopment.meteorclient.systems.modules.Modules;
+import meteordevelopment.meteorclient.systems.modules.combat.CrystalAura;
 import meteordevelopment.meteorclient.systems.modules.render.Chams;
 import net.minecraft.client.render.RenderLayer;
 import net.minecraft.client.render.VertexConsumer;
@@ -23,6 +25,18 @@ import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(EndCrystalEntityRenderer.class)
 public abstract class EndCrystalEntityRendererMixin {
+    // Combat - Hide newborn crystals that are in the kill pipeline (attacked within spawn window)
+
+    @Inject(method = "render(Lnet/minecraft/client/render/entity/state/EndCrystalEntityRenderState;Lnet/minecraft/client/util/math/MatrixStack;Lnet/minecraft/client/render/VertexConsumerProvider;I)V", at = @At("HEAD"), cancellable = true)
+    private void render$hideHandled(EndCrystalEntityRenderState state, MatrixStack matrixStack, VertexConsumerProvider vertexConsumerProvider, int i, CallbackInfo ci) {
+        CrystalAura ca = Modules.get().get(CrystalAura.class);
+        if (!ca.isActive()) return;
+        net.minecraft.entity.Entity entity = ((IEntityRenderState) state).meteor$getEntity();
+        if (entity != null && ca.shouldHideCrystal(entity.getId())) {
+            ci.cancel();
+        }
+    }
+
     // Chams
 
     @Unique

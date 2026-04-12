@@ -6,7 +6,9 @@
 package meteordevelopment.meteorclient.mixin;
 
 import com.llamalad7.mixinextras.injector.ModifyExpressionValue;
+import meteordevelopment.meteorclient.mixininterface.IEntityRenderState;
 import meteordevelopment.meteorclient.systems.modules.Modules;
+import meteordevelopment.meteorclient.systems.modules.combat.CrystalAura;
 import meteordevelopment.meteorclient.systems.modules.render.Chams;
 import net.minecraft.client.render.entity.model.EndCrystalEntityModel;
 import net.minecraft.client.render.entity.state.EndCrystalEntityRenderState;
@@ -31,7 +33,16 @@ public abstract class EndCrystalEntityModelMixin {
     // Chams - Rotation speed
 
     @ModifyExpressionValue(method = "setAngles(Lnet/minecraft/client/render/entity/state/EndCrystalEntityRenderState;)V", at = @At(value = "FIELD", target = "Lnet/minecraft/client/render/entity/state/EndCrystalEntityRenderState;age:F", ordinal = 0))
-    private float modifySpeed(float original) {
+    private float modifySpeed(float original, EndCrystalEntityRenderState state) {
+        // Combat: newborn crystals spin 1.65x faster for visual feedback
+        CrystalAura ca = Modules.get().get(CrystalAura.class);
+        if (ca.isActive()) {
+            net.minecraft.entity.Entity entity = ((IEntityRenderState) state).meteor$getEntity();
+            if (entity != null && ca.isNewbornCrystal(entity.getId())) {
+                return original * 1.65f;
+            }
+        }
+
         Chams module = Modules.get().get(Chams.class);
         if (!module.isActive() || !module.crystals.get()) return original;
 

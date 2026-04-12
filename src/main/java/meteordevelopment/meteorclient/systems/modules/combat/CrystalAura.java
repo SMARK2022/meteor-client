@@ -7,11 +7,13 @@ package meteordevelopment.meteorclient.systems.modules.combat;
 
 import com.google.common.util.concurrent.AtomicDouble;
 import it.unimi.dsi.fastutil.ints.*;
+import it.unimi.dsi.fastutil.longs.LongSet;
 import meteordevelopment.meteorclient.events.entity.EntityAddedEvent;
 import meteordevelopment.meteorclient.events.entity.EntityRemovedEvent;
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.render.Render2DEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
+import meteordevelopment.meteorclient.events.world.BlockUpdateEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.mixininterface.IBox;
 import meteordevelopment.meteorclient.mixininterface.IMiningToolItem;
@@ -597,6 +599,16 @@ public class CrystalAura extends Module {
 
     private double renderDamage;
 
+    // Crystal lifecycle tracking (replaces entity mixin — all state in one place)
+    private boolean attackedThisTick;
+    private final Int2LongMap crystalSpawnTimes = new Int2LongOpenHashMap();
+    private final IntSet handledCrystals = new IntOpenHashSet();
+
+    // Valid base position cache — invalidated on block updates
+    private final LongSet validBasePosCache = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
+    private boolean baseCacheDirty = true;
+    private int baseCacheScanRange;
+
     public CrystalAura() {
         super(Categories.Combat, "crystal-aura", "Automatically places and attacks crystals.");
     }
@@ -617,6 +629,11 @@ public class CrystalAura extends Module {
 
         serverYaw = mc.player.getYaw();
 
+        attackedThisTick = false;
+        crystalSpawnTimes.clear();
+        handledCrystals.clear();
+        baseCacheDirty = true;
+
         bestTargetDamage = 0;
         bestTargetTimer = 0;
 
@@ -636,6 +653,9 @@ public class CrystalAura extends Module {
         waitingToExplode.clear();
 
         removed.clear();
+        crystalSpawnTimes.clear();
+        handledCrystals.clear();
+        validBasePosCache.clear();
 
         bestTarget = null;
     }
@@ -648,6 +668,7 @@ public class CrystalAura extends Module {
     private void onPreTick(TickEvent.Pre event) {
         // Update last rotation
         didRotateThisTick = false;
+        attackedThisTick = false;
         lastRotationTimer++;
 
         // Decrement placing timer
@@ -688,6 +709,7 @@ public class CrystalAura extends Module {
             if (ticks > 3) {
                 it.remove();
                 removed.remove(id);
+                handledCrystals.remove(id);
             }
             else {
                 waitingToExplode.put(id, ticks + 1);
@@ -718,24 +740,34 @@ public class CrystalAura extends Module {
     private void onEntityAdded(EntityAddedEvent event) {
         if (!(event.entity instanceof EndCrystalEntity)) return;
 
-        if (placing && event.entity.getBlockPos().equals(placingCrystalBlockPos)) {
+        // Track spawn time for newborn window
+        crystalSpawnTimes.put(event.entity.getId(), System.currentTimeMillis());
+
+        boolean isOwnCrystal = placing && event.entity.getBlockPos().equals(placingCrystalBlockPos);
+
+        if (isOwnCrystal) {
             placing = false;
             placingTimer = 0;
             placedCrystals.add(event.entity.getId());
         }
 
-        if (fastBreak.get() && !didRotateThisTick && attacks < attackFrequency.get()) {
-            float damage = getBreakDamage(event.entity, true);
-            if (damage > minDamage.get()) doBreak(event.entity);
+        // Spawn window: instant break with fresh damage evaluation
+        // Own crystals skip age check; all others use standard validation
+        if (fastBreak.get() && !attackedThisTick && attacks < attackFrequency.get()) {
+            float damage = getBreakDamage(event.entity, !isOwnCrystal);
+            if (damage > 0) doBreak(event.entity);
         }
     }
 
     @EventHandler
     private void onEntityRemoved(EntityRemovedEvent event) {
         if (event.entity instanceof EndCrystalEntity) {
-            placedCrystals.remove(event.entity.getId());
-            removed.remove(event.entity.getId());
-            waitingToExplode.remove(event.entity.getId());
+            int id = event.entity.getId();
+            placedCrystals.remove(id);
+            removed.remove(id);
+            waitingToExplode.remove(id);
+            crystalSpawnTimes.remove(id);
+            handledCrystals.remove(id);
         }
     }
 
@@ -755,23 +787,28 @@ public class CrystalAura extends Module {
     // Break
 
     private void doBreak() {
-        if (!doBreak.get() || breakTimer > 0 || switchTimer > 0 || attacks >= attackFrequency.get()) return;
+        if (!doBreak.get() || breakTimer > 0 || switchTimer > 0 || attackedThisTick || attacks >= attackFrequency.get()) return;
         if (shouldPause(PauseMode.Break)) return;
 
-        float bestDamage = 0;
+        float bestScore = 0;
         Entity crystal = null;
 
-        // Find best crystal to break
+        // Find best crystal — own + newborn bonuses (mio-style utility)
+        long now = System.currentTimeMillis();
         for (Entity entity : mc.world.getEntities()) {
             float damage = getBreakDamage(entity, true);
+            if (damage <= 0) continue;
 
-            if (damage > bestDamage) {
-                bestDamage = damage;
+            float score = damage;
+            if (placedCrystals.contains(entity.getId())) score += 0.5f;
+            // Newborn window (150ms): massive priority bonus for fresh crystals
+            if (now - crystalSpawnTimes.getOrDefault(entity.getId(), 0L) <= 150) score += 2.0f;
+            if (score > bestScore) {
+                bestScore = score;
                 crystal = entity;
             }
         }
 
-        // Break the crystal
         if (crystal != null) doBreak(crystal);
     }
 
@@ -850,7 +887,9 @@ public class CrystalAura extends Module {
         }
 
         if (attacked) {
-            // Update state
+            // Update state & mark handled for render feedback
+            attackedThisTick = true;
+            handledCrystals.add(crystal.getId());
             removed.add(crystal.getId());
             attemptedBreaks.put(crystal.getId(), attemptedBreaks.get(crystal.getId()) + 1);
             waitingToExplode.put(crystal.getId(), 0);
@@ -888,6 +927,59 @@ public class CrystalAura extends Module {
         }
     }
 
+    @EventHandler
+    private void onBlockUpdate(BlockUpdateEvent event) {
+        // Invalidate base cache when blocks change within placement range
+        if (mc.player != null && mc.player.getBlockPos().isWithinDistance(event.pos, placeRange.get() + 2)) {
+            baseCacheDirty = true;
+        }
+    }
+
+    // Crystal state queries for renderers (no entity mixin needed)
+
+    public boolean shouldHideCrystal(int entityId) {
+        return handledCrystals.contains(entityId)
+            && System.currentTimeMillis() - crystalSpawnTimes.getOrDefault(entityId, 0L) <= 150;
+    }
+
+    public boolean isNewbornCrystal(int entityId) {
+        return System.currentTimeMillis() - crystalSpawnTimes.getOrDefault(entityId, 0L) <= 150;
+    }
+
+    // Valid base position cache — refreshed on block change
+
+    private void refreshBaseCacheIfNeeded() {
+        int range = (int) Math.ceil(placeRange.get());
+        if (!baseCacheDirty && range == baseCacheScanRange) return;
+
+        validBasePosCache.clear();
+        BlockPos playerPos = mc.player.getBlockPos();
+        boolean supportEnabled = support.get() != SupportMode.Disabled;
+
+        for (int dx = -range; dx <= range; dx++) {
+            for (int dy = -range; dy <= range; dy++) {
+                for (int dz = -range; dz <= range; dz++) {
+                    int x = playerPos.getX() + dx, y = playerPos.getY() + dy, z = playerPos.getZ() + dz;
+                    blockPos.set(x, y, z);
+                    net.minecraft.block.BlockState state = mc.world.getBlockState(blockPos);
+                    boolean hasBlock = state.isOf(Blocks.BEDROCK) || state.isOf(Blocks.OBSIDIAN);
+                    if (hasBlock || (supportEnabled && state.isReplaceable())) {
+                        // Check air above
+                        blockPos.set(x, y + 1, z);
+                        if (!mc.world.getBlockState(blockPos).isAir()) continue;
+                        if (placement112.get()) {
+                            blockPos.set(x, y + 2, z);
+                            if (!mc.world.getBlockState(blockPos).isAir()) continue;
+                        }
+                        validBasePosCache.add(net.minecraft.util.math.BlockPos.asLong(x, y, z));
+                    }
+                }
+            }
+        }
+        baseCacheDirty = false;
+        baseCacheScanRange = range;
+    }
+
     // Place
 
     private void doPlace() {
@@ -913,27 +1005,24 @@ public class CrystalAura extends Module {
             if (getBreakDamage(entity, false) > 0) return;
         }
 
-        // Setup variables
-        AtomicDouble bestDamage = new AtomicDouble(0);
-        AtomicReference<BlockPos.Mutable> bestBlockPos = new AtomicReference<>(new BlockPos.Mutable());
-        AtomicBoolean isSupport = new AtomicBoolean(support.get() != SupportMode.Disabled);
+        // Setup variables — track direct and support candidates independently
+        AtomicDouble bestDirectDamage = new AtomicDouble(0);
+        AtomicReference<BlockPos.Mutable> bestDirectPos = new AtomicReference<>(new BlockPos.Mutable());
+        AtomicDouble bestSupportDamage = new AtomicDouble(0);
+        AtomicReference<BlockPos.Mutable> bestSupportPos = new AtomicReference<>(new BlockPos.Mutable());
+        boolean supportEnabled = support.get() != SupportMode.Disabled;
 
-        // Find best position to place the crystal on
+        // Refresh valid base cache (invalidated on block updates)
+        refreshBaseCacheIfNeeded();
+
+        // Find best position — cache filters ~90% of positions before expensive damage calcs
         BlockIterator.register((int) Math.ceil(placeRange.get()), (int) Math.ceil(placeRange.get()), (bp, blockState) -> {
-            // Check if its bedrock or obsidian and return if isSupport is false
+            // Fast-path: skip positions not in valid base cache
+            if (!validBasePosCache.contains(net.minecraft.util.math.BlockPos.asLong(bp.getX(), bp.getY(), bp.getZ()))) return;
+
             boolean hasBlock = blockState.isOf(Blocks.BEDROCK) || blockState.isOf(Blocks.OBSIDIAN);
-            if (!hasBlock && (!isSupport.get() || !blockState.isReplaceable())) return;
 
-            // Check if there is air on top
-            blockPos.set(bp.getX(), bp.getY() + 1, bp.getZ());
-            if (!mc.world.getBlockState(blockPos).isAir()) return;
-
-            if (placement112.get()) {
-                blockPos.move(0, 1, 0);
-                if (!mc.world.getBlockState(blockPos).isAir()) return;
-            }
-
-            // Check range
+            // Range check (position-relative, can't cache)
             ((IVec3d) vec3d).meteor$set(bp.getX() + 0.5, bp.getY() + 1, bp.getZ() + 0.5);
             blockPos.set(bp).move(0, 1, 0);
             if (isOutOfRange(vec3d, blockPos, true)) return;
@@ -958,20 +1047,44 @@ public class CrystalAura extends Module {
 
             if (intersectsWithEntities(box)) return;
 
-            // Compare damage
-            if (damage > bestDamage.get() || (isSupport.get() && hasBlock)) {
-                bestDamage.set(damage);
-                bestBlockPos.get().set(bp);
+            // Compare damage — direct and support tracked independently
+            if (hasBlock) {
+                if (damage > bestDirectDamage.get()) {
+                    bestDirectDamage.set(damage);
+                    bestDirectPos.get().set(bp);
+                }
+            } else {
+                if (damage > bestSupportDamage.get()) {
+                    bestSupportDamage.set(damage);
+                    bestSupportPos.get().set(bp);
+                }
             }
-
-            if (hasBlock) isSupport.set(false);
         });
 
-        // Place the crystal
+        // Place the crystal — choose between direct and support candidates
         BlockIterator.after(() -> {
-            if (bestDamage.get() == 0) return;
+            // Direct always preferred; support only when no direct or support damage significantly higher
+            boolean useDirect = bestDirectDamage.get() > 0;
+            boolean useSupport = supportEnabled && bestSupportDamage.get() > 0
+                && (!useDirect || bestSupportDamage.get() > bestDirectDamage.get() * 1.5);
 
-            BlockHitResult result = getPlaceInfo(bestBlockPos.get());
+            double bestDamage;
+            BlockPos.Mutable bestBlockPos;
+            BlockPos supportBlock;
+
+            if (useSupport) {
+                bestDamage = bestSupportDamage.get();
+                bestBlockPos = bestSupportPos.get();
+                supportBlock = bestBlockPos;
+            } else if (useDirect) {
+                bestDamage = bestDirectDamage.get();
+                bestBlockPos = bestDirectPos.get();
+                supportBlock = null;
+            } else {
+                return;
+            }
+
+            BlockHitResult result = getPlaceInfo(bestBlockPos);
 
             ((IVec3d) vec3d).meteor$set(
                     result.getBlockPos().getX() + 0.5 + result.getSide().getVector().getX() * 1.0 / 2.0,
@@ -985,13 +1098,13 @@ public class CrystalAura extends Module {
 
                 if (yawStepMode.get() == YawStepMode.Break || doYawSteps(yaw, pitch)) {
                     setRotation(true, vec3d, 0, 0);
-                    Rotations.rotate(yaw, pitch, 50, () -> placeCrystal(result, bestDamage.get(), isSupport.get() ? bestBlockPos.get() : null));
+                    Rotations.rotate(yaw, pitch, 50, () -> placeCrystal(result, bestDamage, supportBlock));
 
                     placeTimer += placeDelay.get();
                 }
             }
             else {
-                placeCrystal(result, bestDamage.get(), isSupport.get() ? bestBlockPos.get() : null);
+                placeCrystal(result, bestDamage, supportBlock);
                 placeTimer += placeDelay.get();
             }
         });
@@ -1180,13 +1293,20 @@ public class CrystalAura extends Module {
 
         if (fast) {
             LivingEntity target = getNearestTarget();
-            if (!(smartDelay.get() && breaking && target.hurtTime > 0)) damage = DamageUtils.crystalDamage(target, vec3d, predictMovement.get(), obsidianPos);
+            if (target != null) {
+                float dmg = DamageUtils.crystalDamage(target, vec3d, predictMovement.get(), obsidianPos);
+                // Smart delay lethal override: break even with hurtTime if damage would kill
+                if (!breaking || !smartDelay.get() || target.hurtTime <= 0 || dmg >= EntityUtils.getTotalHealth(target)) {
+                    damage = dmg;
+                }
+            }
         }
         else {
             for (LivingEntity target : targets) {
-                if (smartDelay.get() && breaking && target.hurtTime > 0) continue;
-
                 float dmg = DamageUtils.crystalDamage(target, vec3d, predictMovement.get(), obsidianPos);
+
+                // Smart delay lethal override: skip hurtTime targets UNLESS this would kill them
+                if (breaking && smartDelay.get() && target.hurtTime > 0 && dmg < EntityUtils.getTotalHealth(target)) continue;
 
                 // Update best target
                 if (dmg > bestTargetDamage) {
@@ -1195,7 +1315,7 @@ public class CrystalAura extends Module {
                     bestTargetTimer = 10;
                 }
 
-                damage += dmg;
+                damage = Math.max(damage, dmg);
             }
         }
 
