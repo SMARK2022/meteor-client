@@ -42,14 +42,13 @@ import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.item.*;
 import net.minecraft.network.packet.c2s.play.UpdateSelectedSlotC2SPacket;
 import net.minecraft.util.Hand;
+import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.util.math.Vec3d;
 import net.minecraft.world.GameMode;
 
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Set;
+import java.util.*;
 import java.util.function.Predicate;
 
 public class KillAura extends Module {
@@ -309,17 +308,22 @@ public class KillAura extends Module {
     );
 
     private final List<Entity> targets = new ArrayList<>();
+    private final List<Entity> renderCandidates = new ArrayList<>();
     private int switchTimer, hitTimer;
     private boolean wasPathing = false;
     public boolean attacking, swapped;
     public static int previousSlot;
 
-    // α-β 滤波器状态 — 平滑相对速度 + 估计相对加速度 (二阶预测)
-    private Vec3d trackedVel = Vec3d.ZERO;
-    private Vec3d trackedAcc = Vec3d.ZERO;
-    private Entity trackedEntity = null;
+    // 多实体 α-β 追踪器: 为视野内最近 4 个实体各维护独立的速度/加速度估计
+    private static class TrackState {
+        Vec3d vel = Vec3d.ZERO;   // 平滑后的实体绝对速度 (blocks/tick)
+        Vec3d acc = Vec3d.ZERO;   // 估计的加速度 (blocks/tick²)
+        int lastTick;             // 上次更新的 tick 序号
+        TrackState(int tick) { this.lastTick = tick; }
+    }
+    private final Map<Integer, TrackState> trackMap = new HashMap<>();
     private static final double TRACK_ALPHA = 0.5;   // 速度响应灵敏度: 半衰期 ~2 tick
-    private static final double TRACK_BETA = 0.15;   // 加速度响应灵敏度: 半衰期 ~5 tick
+    private static final double TRACK_BETA  = 0.15;  // 加速度响应灵敏度: 半衰期 ~5 tick
 
     public KillAura() {
         super(Categories.Combat, "kill-aura", "Attacks specified entities around you.");
@@ -334,10 +338,9 @@ public class KillAura extends Module {
     @Override
     public void onDeactivate() {
         targets.clear();
+        renderCandidates.clear();
+        trackMap.clear();
         stopAttacking();
-        trackedEntity = null;
-        trackedVel = Vec3d.ZERO;
-        trackedAcc = Vec3d.ZERO;
     }
 
     @EventHandler
@@ -372,13 +375,32 @@ public class KillAura extends Module {
 
             targets.clear();
             targets.add(mc.targetedEntity);
+            // onlyOnLook: renderCandidates = targets
+            renderCandidates.clear();
+            renderCandidates.add(mc.targetedEntity);
         } else {
-            targets.clear();
-            TargetUtils.getList(targets, this::entityCheck, priority.get(), maxTargets.get());
+            // === 单遍收集: renderCandidates (最近 4 个合格实体) + targets (在攻击范围内) ===
+            collectEntities();
         }
+
+        // 更新所有渲染候选的 α-β 追踪状态
+        int tick = mc.player.age;
+        for (Entity e : renderCandidates) updateTrack(e, tick);
+        cleanStaleTrack(tick);
 
         if (targets.isEmpty()) {
             stopAttacking();
+
+            // 前瞻预瞄: 在攻击范围外但接近的候选实体, 提前旋转到位
+            if (rotation.get() == RotationMode.Always && !renderCandidates.isEmpty()) {
+                Entity approaching = findApproaching();
+                if (approaching != null) {
+                    Rotations.rotateWith(
+                        phase -> solveEntityAim(approaching),
+                        30, null   // 低优先级, 无 callback (不攻击)
+                    );
+                }
+            }
             return;
         }
 
@@ -470,25 +492,55 @@ public class KillAura extends Module {
         return false;
     }
 
-    private boolean entityCheck(Entity entity) {
+    // ==================== 实体收集 ====================
+
+    /**
+     * 单遍遍历所有实体, 同时填充 renderCandidates (最近 4 个) 和 targets (在攻击范围内)。
+     * renderCandidates 不受 range 限制, 只看实体类型/存活/好友等基础过滤。
+     * targets 额外要求在 range 内 + 墙壁距离判定。
+     */
+    private void collectEntities() {
+        renderCandidates.clear();
+        targets.clear();
+
+        Vec3d eyePos = mc.player.getEyePos();
+        double effectiveRange = getEffectiveRange();
+        double effectiveRangeSq = effectiveRange * effectiveRange;
+        double effectiveWallsRange = Math.min(wallsRange.get(), effectiveRange);
+        double effectiveWallsRangeSq = effectiveWallsRange * effectiveWallsRange;
+
+        for (Entity entity : mc.world.getEntities()) {
+            if (!entityFilterBase(entity)) continue;
+
+            double distSq = eyeDistSqToAABB(eyePos, entity.getBoundingBox());
+            renderCandidates.add(entity);
+
+            // 攻击目标: 在范围内 + 墙壁视线
+            if (distSq <= effectiveRangeSq) {
+                if (PlayerUtils.canSeeEntity(entity) || distSq <= effectiveWallsRangeSq) {
+                    targets.add(entity);
+                }
+            }
+        }
+
+        // 渲染候选: 按距离排序, 取最近 4 个
+        renderCandidates.sort(Comparator.comparingDouble(e -> eyeDistSqToAABB(eyePos, e.getBoundingBox())));
+        if (renderCandidates.size() > 4) renderCandidates.subList(4, renderCandidates.size()).clear();
+
+        // 攻击目标: 按优先级排序, 取 maxTargets
+        targets.sort(priority.get());
+        if (targets.size() > maxTargets.get()) targets.subList(maxTargets.get(), targets.size()).clear();
+    }
+
+    /**
+     * 基础实体过滤 (不含距离判定)。
+     * 用于渲染候选和攻击候选的共享前置过滤。
+     */
+    private boolean entityFilterBase(Entity entity) {
         if (entity.equals(mc.player) || entity.equals(mc.cameraEntity)) return false;
         if ((entity instanceof LivingEntity livingEntity && livingEntity.isDead()) || !entity.isAlive()) return false;
-
-        // Eye-based distance to entity AABB — matches server-side reach semantics
-        Vec3d eyePos = mc.player.getEyePos();
-        Box hitbox = entity.getBoundingBox();
-        double dx = MathHelper.clamp(eyePos.x, hitbox.minX, hitbox.maxX) - eyePos.x;
-        double dy = MathHelper.clamp(eyePos.y, hitbox.minY, hitbox.maxY) - eyePos.y;
-        double dz = MathHelper.clamp(eyePos.z, hitbox.minZ, hitbox.maxZ) - eyePos.z;
-        double distSq = dx * dx + dy * dy + dz * dz;
-
-        double effectiveRange = getEffectiveRange();
-        if (distSq > effectiveRange * effectiveRange) return false;
-
         if (!entities.get().contains(entity.getType())) return false;
         if (ignoreNamed.get() && entity.hasCustomName()) return false;
-        double effectiveWallsRange = Math.min(wallsRange.get(), effectiveRange);
-        if (!PlayerUtils.canSeeEntity(entity) && distSq > effectiveWallsRange * effectiveWallsRange) return false;
         if (ignoreTamed.get()) {
             if (entity instanceof Tameable tameable
                 && tameable.getOwnerUuid() != null
@@ -513,6 +565,77 @@ public class KillAura extends Module {
             };
         }
         return true;
+    }
+
+    /** 眼睛位置到 AABB 最近表面的欧几里得距离² */
+    private static double eyeDistSqToAABB(Vec3d eyePos, Box box) {
+        double dx = MathHelper.clamp(eyePos.x, box.minX, box.maxX) - eyePos.x;
+        double dy = MathHelper.clamp(eyePos.y, box.minY, box.maxY) - eyePos.y;
+        double dz = MathHelper.clamp(eyePos.z, box.minZ, box.maxZ) - eyePos.z;
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    /** 完整实体检测 (含距离) — 用于 onlyOnLook + isStillValidTarget */
+    private boolean entityCheck(Entity entity) {
+        if (!entityFilterBase(entity)) return false;
+        Vec3d eyePos = mc.player.getEyePos();
+        double distSq = eyeDistSqToAABB(eyePos, entity.getBoundingBox());
+        double effectiveRange = getEffectiveRange();
+        if (distSq > effectiveRange * effectiveRange) return false;
+        double effectiveWallsRange = Math.min(wallsRange.get(), effectiveRange);
+        if (!PlayerUtils.canSeeEntity(entity) && distSq > effectiveWallsRange * effectiveWallsRange) return false;
+        return true;
+    }
+
+    // ==================== α-β 追踪器 ====================
+
+    /** 更新指定实体的 α-β 滤波状态: 跟踪实体绝对速度 + 加速度 */
+    private void updateTrack(Entity entity, int tick) {
+        // 实体绝对速度 (position delta, 修复远程玩家 getVelocity()≈0 的问题)
+        Vec3d vel = new Vec3d(
+            entity.getX() - entity.prevX,
+            entity.getY() - entity.prevY,
+            entity.getZ() - entity.prevZ
+        );
+
+        int id = entity.getId();
+        TrackState state = trackMap.get(id);
+
+        if (state != null && state.lastTick == tick - 1) {
+            // 连续 tick: α-β 滤波
+            Vec3d predicted = state.vel.add(state.acc);
+            Vec3d residual = vel.subtract(predicted);
+            state.vel = predicted.add(residual.multiply(TRACK_ALPHA));
+            state.acc = state.acc.add(residual.multiply(TRACK_BETA));
+        } else {
+            // 首次或间断: 重新初始化
+            state = new TrackState(tick);
+            state.vel = vel;
+            trackMap.put(id, state);
+        }
+        state.lastTick = tick;
+    }
+
+    /** 清理 5 tick 内未更新的过时追踪条目 */
+    private void cleanStaleTrack(int tick) {
+        trackMap.values().removeIf(s -> tick - s.lastTick > 5);
+    }
+
+    /**
+     * 从渲染候选中找到正在接近攻击范围的实体 (用于前瞻预瞄)。
+     * 如果候选实体的距离 ≤ attackRange + 2.0, 返回最近的那个。
+     */
+    private Entity findApproaching() {
+        double threshold = getEffectiveRange() + 2.0;
+        double thSq = threshold * threshold;
+        Vec3d eyePos = mc.player.getEyePos();
+
+        for (Entity e : renderCandidates) {
+            if (targets.contains(e)) continue;  // 已在攻击范围, 跳过
+            double dSq = eyeDistSqToAABB(eyePos, e.getBoundingBox());
+            if (dSq <= thSq) return e;          // renderCandidates 已按距离排序
+        }
+        return null;
     }
 
     private boolean delayCheck() {
@@ -579,48 +702,27 @@ public class KillAura extends Module {
      * 计算给定实体的最优瞄准点。
      * <p>
      * 算法:
-     * 1. 从位置差分导出目标速度 (修复 entity.getVelocity() 对远程玩家无效的问题)
-     * 2. α-β 滤波: 平滑相对速度 + 估计加速度 (捕捉鞘翅飞行曲率)
-     * 3. 二阶预测: v·t + ½a·t² (比纯匀速更精确)
-     * 4. 动态 Horizon: 从网络延迟自动计算预测时域
-     * 5. X/Z: clamp(eye, box) + 30% 中心混合
-     * 6. Y: 优选上胸区 (62% 身高)
+     * 1. 从 trackMap 获取实体的 α-β 平滑绝对速度 + 加速度
+     * 2. 二阶预测: v·t + ½a·t² (比纯匀速更精确)
+     * 3. 动态 Horizon: 从网络延迟自动计算预测时域
+     * 4. X/Z: clamp(eye, box) + 30% 中心混合
+     * 5. Y: 优选上胸区 (62% 身高)
+     * <p>
+     * 注意: 使用实体 绝对速度 (非相对速度), 因为服务端命中检测从
+     * 玩家当前位置射线 → 预测点应为实体在世界坐标中的未来位置。
      */
     private Vec3d computeAimPoint(Entity entity) {
         Vec3d eyePos = mc.player.getEyePos();
         Box box = entity.getBoundingBox();
 
         if (predictMovement.get()) {
-            // === 改进 1: 位置差分导出速度 ===
-            // entity.getVelocity() 对远程玩家返回 ~(0,0,0), 因为服务端仅在击退时发送速度包。
-            // 改用 (currentPos - prevPos) 导出实际每 tick 位移, 对所有实体类型可靠。
-            Vec3d targetVel = new Vec3d(
-                entity.getX() - entity.prevX,
-                entity.getY() - entity.prevY,
-                entity.getZ() - entity.prevZ
-            );
-            Vec3d selfVel = mc.player.getVelocity();
-            Vec3d relVel = targetVel.subtract(selfVel);
+            // 从 trackMap 获取实体的平滑绝对速度 + 加速度
+            TrackState state = trackMap.get(entity.getId());
+            Vec3d vel = state != null ? state.vel : Vec3d.ZERO;
+            Vec3d acc = state != null ? state.acc : Vec3d.ZERO;
 
-            // === 改进 2: α-β 滤波器 ===
-            // 从相对速度序列中同时提取平滑速度和加速度估计。
-            // 解决单帧 position delta 噪声, 并捕捉鞘翅飞行的曲率 (拉升/俯冲/转弯)。
-            // 当目标切换时重置滤波器状态, 避免旧目标状态污染。
-            if (entity == trackedEntity) {
-                Vec3d predicted = trackedVel.add(trackedAcc);      // 预测: v + a
-                Vec3d residual = relVel.subtract(predicted);       // 残差: 观测 - 预测
-                trackedVel = predicted.add(residual.multiply(TRACK_ALPHA));  // 速度修正
-                trackedAcc = trackedAcc.add(residual.multiply(TRACK_BETA));  // 加速度修正
-            } else {
-                trackedVel = relVel;
-                trackedAcc = Vec3d.ZERO;
-                trackedEntity = entity;
-            }
-
-            // === 改进 3: 动态 Horizon ===
-            // 从网络延迟自动计算预测时域, 替代用户手动设置的固定 tick 数。
+            // === 动态 Horizon ===
             // horizon = RTT/2 (oneWay) + 25ms (服务端排队偏置), 转为 tick 单位。
-            // 若获取不到延迟信息, 回退到用户设置的 predictionTicks。
             double t;
             int pingMs = PlayerUtils.getPing();
             if (pingMs > 0) {
@@ -630,13 +732,11 @@ public class KillAura extends Module {
                 t = predictionTicks.get();
             }
 
-            // === 改进 2 (cont): 二阶预测 v·t + ½a·t² ===
-            // 纯匀速 (v·t) 在直线运动时足够, 但鞘翅拉升/俯冲/转弯时
-            // 加速度项 (½a·t²) 显著提升曲线路径的预测精度。
+            // 二阶预测: v·t + ½a·t²
             box = box.offset(
-                trackedVel.x * t + 0.5 * trackedAcc.x * t * t,
-                trackedVel.y * t + 0.5 * trackedAcc.y * t * t,
-                trackedVel.z * t + 0.5 * trackedAcc.z * t * t
+                vel.x * t + 0.5 * acc.x * t * t,
+                vel.y * t + 0.5 * acc.y * t * t,
+                vel.z * t + 0.5 * acc.z * t * t
             );
         }
 
@@ -664,89 +764,90 @@ public class KillAura extends Module {
     private final Vector3d vec3 = new Vector3d();
 
     /**
-     * 渲染目标未来 1 秒 (20 tick) 的预测轨迹线。
-     * <p>
-     * 使用 α-β 滤波器的平滑速度 + 加速度进行二阶外推,
+     * 渲染所有渲染候选实体 (最多 4 个) 的预测轨迹线。
+     * 使用各实体独立的 α-β 追踪状态进行二阶外推,
      * 线段颜色从 trajectoryStartColor 渐变到 trajectoryEndColor。
+     * 碰撞裁剪: 外推点如果落在实心方块内则截断。
      */
     @EventHandler
     private void onRender3D(Render3DEvent event) {
         if (!predictMovement.get() || !renderTrajectory.get()) return;
-        if (trackedEntity == null || !targets.contains(trackedEntity)) return;
-
-        Entity entity = trackedEntity;
-
-        // 插值当前渲染位置
-        double baseX = entity.prevX + (entity.getX() - entity.prevX) * event.tickDelta;
-        double baseY = entity.prevY + (entity.getY() - entity.prevY) * event.tickDelta;
-        double baseZ = entity.prevZ + (entity.getZ() - entity.prevZ) * event.tickDelta;
-
-        // 目标绝对速度 ≈ filteredRelVel + selfVel
-        Vec3d selfVel = mc.player.getVelocity();
-        double vx = trackedVel.x + selfVel.x;
-        double vy = trackedVel.y + selfVel.y;
-        double vz = trackedVel.z + selfVel.z;
-
-        // 目标绝对加速度 ≈ filteredRelAcc (忽略自身加速度, 渲染用足够)
-        double ax = trackedAcc.x, ay = trackedAcc.y, az = trackedAcc.z;
+        if (renderCandidates.isEmpty()) return;
 
         Color start = trajectoryStartColor.get();
         Color end = trajectoryEndColor.get();
         int segments = 20;
 
-        double prevX = baseX, prevY = baseY, prevZ = baseZ;
+        for (Entity entity : renderCandidates) {
+            TrackState state = trackMap.get(entity.getId());
+            if (state == null) continue;
 
-        for (int i = 1; i <= segments; i++) {
-            double t = i;
-            double nextX = baseX + vx * t + 0.5 * ax * t * t;
-            double nextY = baseY + vy * t + 0.5 * ay * t * t;
-            double nextZ = baseZ + vz * t + 0.5 * az * t * t;
+            // 插值当前渲染位置
+            double baseX = entity.prevX + (entity.getX() - entity.prevX) * event.tickDelta;
+            double baseY = entity.prevY + (entity.getY() - entity.prevY) * event.tickDelta;
+            double baseZ = entity.prevZ + (entity.getZ() - entity.prevZ) * event.tickDelta;
 
-            float f1 = (i - 1) / (float) segments;
-            float f2 = i / (float) segments;
-            lerpColor(gradientA, start, end, f1);
-            lerpColor(gradientB, start, end, f2);
+            // 实体绝对速度/加速度 (trackMap 已是绝对速度)
+            double vx = state.vel.x, vy = state.vel.y, vz = state.vel.z;
+            double ax = state.acc.x, ay = state.acc.y, az = state.acc.z;
 
-            event.renderer.line(prevX, prevY, prevZ, nextX, nextY, nextZ, gradientA, gradientB);
+            double prevX = baseX, prevY = baseY, prevZ = baseZ;
 
-            prevX = nextX;
-            prevY = nextY;
-            prevZ = nextZ;
+            for (int i = 1; i <= segments; i++) {
+                double t = i;
+                double nextX = baseX + vx * t + 0.5 * ax * t * t;
+                double nextY = baseY + vy * t + 0.5 * ay * t * t;
+                double nextZ = baseZ + vz * t + 0.5 * az * t * t;
+
+                // 碰撞裁剪: 外推点所在方块为实心则截断
+                BlockPos bp = BlockPos.ofFloored(nextX, nextY, nextZ);
+                if (mc.world.getBlockState(bp).isFullCube(mc.world, bp)) break;
+
+                float f1 = (i - 1) / (float) segments;
+                float f2 = i / (float) segments;
+                lerpColor(gradientA, start, end, f1);
+                lerpColor(gradientB, start, end, f2);
+
+                event.renderer.line(prevX, prevY, prevZ, nextX, nextY, nextZ, gradientA, gradientB);
+
+                prevX = nextX;
+                prevY = nextY;
+                prevZ = nextZ;
+            }
         }
     }
 
     /**
-     * 在目标头顶渲染移动速度 (m/s)。
-     * 使用 NametagUtils 将世界坐标投影到屏幕后绘制文字。
+     * 在所有渲染候选实体 (最多 4 个) 头顶渲染移动速度 (m/s)。
      */
     @EventHandler
     private void onRender2D(Render2DEvent event) {
         if (!predictMovement.get() || !renderSpeed.get()) return;
-        if (trackedEntity == null || !targets.contains(trackedEntity)) return;
+        if (renderCandidates.isEmpty()) return;
 
-        Entity entity = trackedEntity;
+        for (Entity entity : renderCandidates) {
+            TrackState state = trackMap.get(entity.getId());
+            if (state == null) continue;
 
-        // 目标绝对速度
-        Vec3d selfVel = mc.player.getVelocity();
-        double vx = trackedVel.x + selfVel.x;
-        double vy = trackedVel.y + selfVel.y;
-        double vz = trackedVel.z + selfVel.z;
-        double speedMps = Math.sqrt(vx * vx + vy * vy + vz * vz) * 20.0; // blocks/tick → m/s
+            // 实体绝对速度 (trackMap 已是绝对速度)
+            double vx = state.vel.x, vy = state.vel.y, vz = state.vel.z;
+            double speedMps = Math.sqrt(vx * vx + vy * vy + vz * vz) * 20.0; // blocks/tick → m/s
 
-        // 投影实体头顶到屏幕坐标
-        Utils.set(vec3, entity, event.tickDelta);
-        double height = entity.getBoundingBox().maxY - entity.getBoundingBox().minY;
-        vec3.y += height + 0.5;
+            // 投影实体头顶到屏幕坐标
+            Utils.set(vec3, entity, event.tickDelta);
+            double height = entity.getBoundingBox().maxY - entity.getBoundingBox().minY;
+            vec3.y += height + 0.5;
 
-        if (NametagUtils.to2D(vec3, speedTextScale.get())) {
-            NametagUtils.begin(vec3);
-            TextRenderer text = TextRenderer.get();
-            text.begin(1, false, true);
-            String speedText = String.format("%.1f m/s", speedMps);
-            double w = text.getWidth(speedText) / 2;
-            text.render(speedText, -w, 0, trajectoryStartColor.get(), true);
-            text.end();
-            NametagUtils.end();
+            if (NametagUtils.to2D(vec3, speedTextScale.get())) {
+                NametagUtils.begin(vec3);
+                TextRenderer text = TextRenderer.get();
+                text.begin(1, false, true);
+                String speedText = String.format("%.1f m/s", speedMps);
+                double w = text.getWidth(speedText) / 2;
+                text.render(speedText, -w, 0, trajectoryStartColor.get(), true);
+                text.end();
+                NametagUtils.end();
+            }
         }
     }
 
