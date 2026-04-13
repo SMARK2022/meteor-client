@@ -1236,7 +1236,13 @@ public class CrystalAura extends Module {
             return;
         }
 
-        // LOS 验证通过后才更新渲染位置 —— 保证白框只出现在可达位置
+        // 修正 1: support 候选必须通过 obsidian resolver 预验证
+        if (proposalIsSupport && resolveSupportHit(proposalPos) == null) {
+            hasProposal = false;
+            return;
+        }
+
+        // crystal hit + support 预验证均通过后才更新渲染 —— 保证橙框=真的能执行
         updateRenderCandidate(proposalPos, proposalDamage, proposalIsSupport);
 
         BlockPos supportBlock = proposalIsSupport ? proposalPos.toImmutable() : null;
@@ -1254,8 +1260,11 @@ public class CrystalAura extends Module {
             if (yawStepMode.get() == YawStepMode.Break || doYawSteps(yaw, pitch)) {
                 setRotation(true, vec3d, 0, 0);
                 Vec3d hitTarget = new Vec3d(vec3d.x, vec3d.y, vec3d.z);
-                Rotations.rotateToward(hitTarget, 50, () -> placeCrystal(result, proposalDamage, supportBlock));
-                placeTimer += getEffectivePlaceDelay();
+                // 修正 2: placeTimer 移入 callback —— 仅成功发包后才扣冷却
+                Rotations.rotateToward(hitTarget, 50, () -> {
+                    placeCrystal(result, proposalDamage, supportBlock);
+                    placeTimer += getEffectivePlaceDelay();
+                });
             }
         } else {
             placeCrystal(result, proposalDamage, supportBlock);
@@ -1275,6 +1284,9 @@ public class CrystalAura extends Module {
 
         // Return if there are no crystals in hotbar or offhand
         if (!InvUtils.testInHotbar(Items.END_CRYSTAL)) return;
+
+        // 修正 3: Support 早期物品检查 —— 无黑曜石时 support 全链路不触发
+        boolean supportAvailable = support.get() != SupportMode.Disabled && InvUtils.testInHotbar(Items.OBSIDIAN);
 
         // Return if there are no crystals in either hand and auto switch mode is none
         if (autoSwitch.get() != AutoSwitchMode.None) {
@@ -1297,16 +1309,15 @@ public class CrystalAura extends Module {
         CrystalPlanner.PlaceResult supportRes = planner.getSupportResult();
         if (directRes != null || supportRes != null) {
             planner.clearResults();
-            boolean supportEnabled = support.get() != SupportMode.Disabled;
 
             CrystalPlanner.PlaceResult chosen = null;
             boolean isSup = false;
-            if (directRes != null && supportRes != null && supportEnabled) {
+            if (directRes != null && supportRes != null && supportAvailable) {
                 isSup = shouldPreferSupport(supportRes.damage(), directRes.damage());
                 chosen = isSup ? supportRes : directRes;
             } else if (directRes != null) {
                 chosen = directRes;
-            } else if (supportEnabled) {
+            } else if (supportAvailable) {
                 chosen = supportRes;
                 isSup = true;
             }
@@ -1342,7 +1353,6 @@ public class CrystalAura extends Module {
         final AtomicReference<BlockHitResult> bestSupportHit = new AtomicReference<>();
         final AtomicReference<BlockPos> bestDirectPos = new AtomicReference<>();
         final AtomicReference<BlockPos> bestSupportPos = new AtomicReference<>();
-        boolean supportEnabled = support.get() != SupportMode.Disabled;
 
         refreshBaseCacheIfNeeded();
 
@@ -1384,7 +1394,9 @@ public class CrystalAura extends Module {
                     bestDirectHit.set(hit);
                     bestDirectPos.set(bp.toImmutable());
                 }
-            } else {
+            } else if (supportAvailable) {
+                // 修正 1: support 候选必须通过与执行相同的 obsidian resolver 预验证
+                if (resolveSupportHit(bp) == null) return;
                 if (damage > bestSupportDamage.get()) {
                     bestSupportDamage.set(damage);
                     bestSupportHit.set(hit);
@@ -1402,9 +1414,9 @@ public class CrystalAura extends Module {
             BlockPos pos;
             double dmg;
 
-            if (bestDirectPos.get() != null && bestSupportPos.get() != null && supportEnabled) {
+            if (bestDirectPos.get() != null && bestSupportPos.get() != null && supportAvailable) {
                 isSup = shouldPreferSupport(bestSupportDamage.get(), bestDirectDamage.get());
-            } else if (bestDirectPos.get() == null && bestSupportPos.get() != null && supportEnabled) {
+            } else if (bestDirectPos.get() == null && bestSupportPos.get() != null && supportAvailable) {
                 isSup = true;
             }
 
@@ -1420,7 +1432,8 @@ public class CrystalAura extends Module {
 
             if (result == null || pos == null) return;
 
-            // 实时候选渲染 —— 同步扫描找到最优位置时立即渲染（不等放置成功）
+            // 同步扫描的 support 候选已在 BlockIterator 回调中通过 resolveSupportHit 验证
+            // 故此处渲染 = 真的能执行
             updateRenderCandidate(pos, dmg, isSup);
 
             proposalPos.set(pos);
@@ -1442,8 +1455,11 @@ public class CrystalAura extends Module {
                 if (yawStepMode.get() == YawStepMode.Break || doYawSteps(yaw, pitch)) {
                     setRotation(true, vec3d, 0, 0);
                     Vec3d hitTarget = new Vec3d(vec3d.x, vec3d.y, vec3d.z);
-                    Rotations.rotateToward(hitTarget, 50, () -> placeCrystal(result, dmg, supportBlock));
-                    placeTimer += getEffectivePlaceDelay();
+                    // 修正 2: placeTimer 移入 callback
+                    Rotations.rotateToward(hitTarget, 50, () -> {
+                        placeCrystal(result, dmg, supportBlock);
+                        placeTimer += getEffectivePlaceDelay();
+                    });
                 }
             } else {
                 placeCrystal(result, dmg, supportBlock);
@@ -1479,6 +1495,37 @@ public class CrystalAura extends Module {
         }
 
         return null;
+    }
+
+    /**
+     * Support 放置方案 —— 由 resolveSupportHit() 预验证，供 placeCrystal() 直接使用。
+     * 消除 "渲染用 crystal 规则, 执行用 printer 规则" 的不对齐。
+     */
+    private record SupportPlan(BlockPos interactPos, Direction clickedFace, Vec3d hitVec) {}
+
+    /**
+     * 预验证 support 方块放置可行性 —— 与 placeSupportSafe 共享同一套 Printer 规则。
+     * <p>
+     * 返回 SupportPlan 表示当前帧确实可以把黑曜石放在此位置；返回 null 表示不可行。
+     * 调用方可把返回的 plan 直接传给 placeCrystal，避免二次求解（修正 5）。
+     */
+    private SupportPlan resolveSupportHit(BlockPos pos) {
+        if (mc.player == null || mc.world == null) return null;
+        if (BlockUtils.getPlaceSide(pos) == null) return null;
+
+        if (supportSafePlacement.get()) {
+            // 修正 4: checkLos 参数与上游统一
+            net.minecraft.block.BlockState obsidianState = Blocks.OBSIDIAN.getDefaultState();
+            PlacementContext ctx = PlacementContext.of(
+                mc.world, pos, obsidianState, mc.player, true, strictPlaceLOS.get(), placeRange.get()
+            );
+            PlacementOption option = ResolverRegistry.resolve(ctx);
+            if (option == null || option.hitVec() == null) return null;
+            return new SupportPlan(option.getInteractPos(pos), option.getClickedFace(), option.hitVec());
+        } else {
+            // 传统路径: 只需确认 getPlaceSide 有效（已在上面检查）
+            return new SupportPlan(null, null, null);
+        }
     }
 
     private void placeCrystal(BlockHitResult result, double damage, BlockPos supportBlock) {
@@ -1533,6 +1580,7 @@ public class CrystalAura extends Module {
             boolean placed;
             if (supportSafePlacement.get()) {
                 // 安全放置：复用 Printer 的 NCP/LOS 系统
+                // 修正 4: checkLos 使用 strictPlaceLOS 设置而非硬编码 true
                 placed = placeSupportSafe(supportBlock, item, hand);
             } else {
                 // 传统放置：直接发包（无 NCP/LOS 验证）
@@ -1563,10 +1611,10 @@ public class CrystalAura extends Module {
     private boolean placeSupportSafe(BlockPos pos, FindItemResult item, Hand hand) {
         if (mc.player == null || mc.world == null) return false;
 
-        // 构建放置上下文（黑曜石 defaultState，NCP strict + LOS check）
+        // 构建放置上下文（黑曜石 defaultState，NCP strict + LOS 跟随上游设置）
         net.minecraft.block.BlockState obsidianState = Blocks.OBSIDIAN.getDefaultState();
         PlacementContext ctx = PlacementContext.of(
-            mc.world, pos, obsidianState, mc.player, true, true, placeRange.get()
+            mc.world, pos, obsidianState, mc.player, true, strictPlaceLOS.get(), placeRange.get()
         );
 
         // 通过 Printer 的规则引擎解析最佳放置方案
