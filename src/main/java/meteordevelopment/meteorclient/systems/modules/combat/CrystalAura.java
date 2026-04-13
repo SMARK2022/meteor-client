@@ -226,10 +226,17 @@ public class CrystalAura extends Module {
 
     private final Setting<Double> placeWallsRange = sgPlace.add(new DoubleSetting.Builder()
         .name("穿墙放置范围")
-        .description("透过墙壁放置水晶的最远距离（格）。视线被阵挡时使用此范围而非普通放置范围。")
+        .description("透过墙壁放置水晶的最远距离（格）。视线被阻挡时使用此范围而非普通放置范围。")
         .defaultValue(4.5)
         .min(0)
         .sliderMax(6)
+        .build()
+    );
+
+    private final Setting<Boolean> strictPlaceLOS = sgPlace.add(new BoolSetting.Builder()
+        .name("严格视线检查")
+        .description("对放置面执行 OUTLINE 射线遮挡检测。关闭后仅检查距离和 NCP 方向（与 GrimAC 检测等级对齐），大幅增加可放置位置。")
+        .defaultValue(false)
         .build()
     );
 
@@ -1464,7 +1471,7 @@ public class CrystalAura extends Module {
             );
 
             if (BlockUtilHelper.isPointValid(hitVec, face, blockPos, eyePos, mc.world, mc.player,
-                true, true, reach, null)) {
+                true, strictPlaceLOS.get(), reach, null)) {
                 return new BlockHitResult(hitVec, face, blockPos instanceof BlockPos.Mutable ? blockPos.toImmutable() : blockPos, false);
             }
         }
