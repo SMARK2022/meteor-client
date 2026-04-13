@@ -1295,6 +1295,8 @@ public class CrystalAura extends Module {
         if (hasProposal && proposalAge < 3) {
             if (quickValidateProposal()) {
                 proposalAge++;
+                // 实时候选渲染 —— proposal 验证通过即更新渲染位置（不等放置成功）
+                updateRenderCandidate(proposalPos, proposalDamage);
                 executeProposal();
                 captureAndSubmitAsyncScan();
                 return;
@@ -1389,6 +1391,9 @@ public class CrystalAura extends Module {
             }
 
             if (result == null || pos == null) return;
+
+            // 实时候选渲染 —— 同步扫描找到最优位置时立即渲染（不等放置成功）
+            updateRenderCandidate(pos, dmg);
 
             proposalPos.set(pos);
             proposalIsSupport = isSup;
@@ -1747,6 +1752,22 @@ public class CrystalAura extends Module {
     }
 
     // 渲染系统
+
+    /**
+     * 实时更新候选渲染位置 —— 在 proposal 验证通过或同步扫描找到最优位置时调用。
+     * 不需要等放置成功，让用户始终看到当前瞄准的位置和伤害。
+     */
+    private void updateRenderCandidate(BlockPos pos, double damage) {
+        if (renderMode.get() == RenderMode.None) return;
+        placeRenderPos.set(pos);
+        renderDamage = damage;
+        // 持续刷新 timer 保证渲染不中断 —— 下一 tick 无候选时自然倒计时消失
+        if (renderMode.get() == RenderMode.Normal) {
+            placeRenderTimer = Math.max(placeRenderTimer, 2);
+        } else {
+            placeRenderTimer = Math.max(placeRenderTimer, 2);
+        }
+    }
 
     @EventHandler
     private void onRender(Render3DEvent event) {
