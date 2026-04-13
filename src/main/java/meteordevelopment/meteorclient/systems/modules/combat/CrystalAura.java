@@ -549,6 +549,22 @@ public class CrystalAura extends Module {
         .build()
     );
 
+    private final Setting<SettingColor> supportSideColor = sgRender.add(new ColorSetting.Builder()
+        .name("支撑侧面颜色")
+        .description("Support 候选（待放黑曜石位置）侧面填充的 RGBA 颜色。")
+        .defaultValue(new SettingColor(255, 170, 0, 45))
+        .visible(() -> shapeMode.get().sides() && renderMode.get() != RenderMode.None && support.get() != SupportMode.Disabled)
+        .build()
+    );
+
+    private final Setting<SettingColor> supportLineColor = sgRender.add(new ColorSetting.Builder()
+        .name("支撑边线颜色")
+        .description("Support 候选（待放黑曜石位置）边线的 RGBA 颜色。")
+        .defaultValue(new SettingColor(255, 170, 0))
+        .visible(() -> shapeMode.get().lines() && renderMode.get() != RenderMode.None && support.get() != SupportMode.Disabled)
+        .build()
+    );
+
     private final Setting<Boolean> renderDamageText = sgRender.add(new BoolSetting.Builder()
         .name("显示伤害数值")
         .description("在覆盖层上方显示水晶对目标的预估伤害数值。")
@@ -619,6 +635,7 @@ public class CrystalAura extends Module {
     private Box renderBoxOne, renderBoxTwo;
 
     private double renderDamage;
+    private boolean renderIsSupport; // 当前渲染位置是否为 support 候选（用于颜色区分）
 
     // 水晶生命周期追踪（替代实体 mixin，所有状态集中管理）
     private boolean attackedThisTick;                                       // 本 tick 已攻击标志，防止重复攻击
@@ -1211,6 +1228,10 @@ public class CrystalAura extends Module {
             hasProposal = false;
             return;
         }
+
+        // LOS 验证通过后才更新渲染位置 —— 保证白框只出现在可达位置
+        updateRenderCandidate(proposalPos, proposalDamage, proposalIsSupport);
+
         BlockPos supportBlock = proposalIsSupport ? proposalPos.toImmutable() : null;
 
         ((IVec3d) vec3d).meteor$set(
@@ -1295,8 +1316,7 @@ public class CrystalAura extends Module {
         if (hasProposal && proposalAge < 3) {
             if (quickValidateProposal()) {
                 proposalAge++;
-                // 实时候选渲染 —— proposal 验证通过即更新渲染位置（不等放置成功）
-                updateRenderCandidate(proposalPos, proposalDamage);
+                // 渲染移至 executeProposal 内 resolveCrystalHit 通过后，避免渲染不可达位置
                 executeProposal();
                 captureAndSubmitAsyncScan();
                 return;
@@ -1393,7 +1413,7 @@ public class CrystalAura extends Module {
             if (result == null || pos == null) return;
 
             // 实时候选渲染 —— 同步扫描找到最优位置时立即渲染（不等放置成功）
-            updateRenderCandidate(pos, dmg);
+            updateRenderCandidate(pos, dmg, isSup);
 
             proposalPos.set(pos);
             proposalIsSupport = isSup;
@@ -1481,6 +1501,7 @@ public class CrystalAura extends Module {
 
             placeRenderPos.set(result.getBlockPos());
             renderDamage = damage;
+            renderIsSupport = false; // 实际水晶放置 —— 不是 support
 
             if (renderMode.get() == RenderMode.Normal) {
                 placeRenderTimer = placeRenderTime.get();
@@ -1754,13 +1775,14 @@ public class CrystalAura extends Module {
     // 渲染系统
 
     /**
-     * 实时更新候选渲染位置 —— 在 proposal 验证通过或同步扫描找到最优位置时调用。
+     * 实时更新候选渲染位置 —— 在 LOS 验证通过或同步扫描找到最优位置时调用。
      * 不需要等放置成功，让用户始终看到当前瞄准的位置和伤害。
      */
-    private void updateRenderCandidate(BlockPos pos, double damage) {
+    private void updateRenderCandidate(BlockPos pos, double damage, boolean isSupport) {
         if (renderMode.get() == RenderMode.None) return;
         placeRenderPos.set(pos);
         renderDamage = damage;
+        renderIsSupport = isSupport;
         // 持续刷新 timer 保证渲染不中断 —— 下一 tick 无候选时自然倒计时消失
         if (renderMode.get() == RenderMode.Normal) {
             placeRenderTimer = Math.max(placeRenderTimer, 2);
@@ -1773,10 +1795,14 @@ public class CrystalAura extends Module {
     private void onRender(Render3DEvent event) {
         if (renderMode.get() == RenderMode.None) return;
 
+        // 根据当前渲染位置是否为 support 候选选择颜色
+        SettingColor sc = renderIsSupport ? supportSideColor.get() : sideColor.get();
+        SettingColor lc = renderIsSupport ? supportLineColor.get() : lineColor.get();
+
         switch (renderMode.get()) {
             case Normal -> {
                 if (renderPlace.get() && placeRenderTimer > 0) {
-                    event.renderer.box(placeRenderPos, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
+                    event.renderer.box(placeRenderPos, sc, lc, shapeMode.get(), 0);
                 }
                 if (renderBreak.get() && breakRenderTimer > 0) {
                     event.renderer.box(breakRenderPos, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
@@ -1803,7 +1829,7 @@ public class CrystalAura extends Module {
                     renderBoxOne.maxZ + offsetZ
                 );
 
-                event.renderer.box(renderBoxOne, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
+                event.renderer.box(renderBoxOne, sc, lc, shapeMode.get(), 0);
             }
 
             case Gradient -> {
@@ -1816,23 +1842,23 @@ public class CrystalAura extends Module {
                 int z = placeRenderPos.getZ();
 
                 if (shapeMode.get().sides()) {
-                    event.renderer.quadHorizontal(x, y, z, x + 1, z + 1, sideColor.get());
-                    event.renderer.gradientQuadVertical(x, y, z, x + 1, y - height.get(), z, bottom, sideColor.get());
-                    event.renderer.gradientQuadVertical(x, y, z, x, y - height.get(), z + 1, bottom, sideColor.get());
-                    event.renderer.gradientQuadVertical(x + 1, y, z, x + 1, y - height.get(), z + 1, bottom, sideColor.get());
-                    event.renderer.gradientQuadVertical(x, y, z + 1, x + 1, y - height.get(), z + 1, bottom, sideColor.get());
+                    event.renderer.quadHorizontal(x, y, z, x + 1, z + 1, sc);
+                    event.renderer.gradientQuadVertical(x, y, z, x + 1, y - height.get(), z, bottom, sc);
+                    event.renderer.gradientQuadVertical(x, y, z, x, y - height.get(), z + 1, bottom, sc);
+                    event.renderer.gradientQuadVertical(x + 1, y, z, x + 1, y - height.get(), z + 1, bottom, sc);
+                    event.renderer.gradientQuadVertical(x, y, z + 1, x + 1, y - height.get(), z + 1, bottom, sc);
                 }
 
                 if (shapeMode.get().lines()) {
-                    event.renderer.line(x, y, z, x + 1, y, z, lineColor.get());
-                    event.renderer.line(x, y, z, x, y, z + 1, lineColor.get());
-                    event.renderer.line(x + 1, y, z, x + 1, y, z + 1, lineColor.get());
-                    event.renderer.line(x, y, z + 1, x + 1, y, z + 1, lineColor.get());
+                    event.renderer.line(x, y, z, x + 1, y, z, lc);
+                    event.renderer.line(x, y, z, x, y, z + 1, lc);
+                    event.renderer.line(x + 1, y, z, x + 1, y, z + 1, lc);
+                    event.renderer.line(x, y, z + 1, x + 1, y, z + 1, lc);
 
-                    event.renderer.line(x, y, z, x, y - height.get(), z, lineColor.get(), bottom);
-                    event.renderer.line(x + 1, y, z, x + 1, y - height.get(), z, lineColor.get(), bottom);
-                    event.renderer.line(x, y, z + 1, x, y - height.get(), z + 1, lineColor.get(), bottom);
-                    event.renderer.line(x + 1, y, z + 1, x + 1, y - height.get(), z + 1, lineColor.get(), bottom);
+                    event.renderer.line(x, y, z, x, y - height.get(), z, lc, bottom);
+                    event.renderer.line(x + 1, y, z, x + 1, y - height.get(), z, lc, bottom);
+                    event.renderer.line(x, y, z + 1, x, y - height.get(), z + 1, lc, bottom);
+                    event.renderer.line(x + 1, y, z + 1, x + 1, y - height.get(), z + 1, lc, bottom);
                 }
             }
         }
