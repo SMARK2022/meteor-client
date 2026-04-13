@@ -261,6 +261,13 @@ public class KillAura extends Module {
     public boolean attacking, swapped;
     public static int previousSlot;
 
+    // α-β 滤波器状态 — 平滑相对速度 + 估计相对加速度 (二阶预测)
+    private Vec3d trackedVel = Vec3d.ZERO;
+    private Vec3d trackedAcc = Vec3d.ZERO;
+    private Entity trackedEntity = null;
+    private static final double TRACK_ALPHA = 0.5;   // 速度响应灵敏度: 半衰期 ~2 tick
+    private static final double TRACK_BETA = 0.15;   // 加速度响应灵敏度: 半衰期 ~5 tick
+
     public KillAura() {
         super(Categories.Combat, "kill-aura", "Attacks specified entities around you.");
     }
@@ -275,6 +282,9 @@ public class KillAura extends Module {
     public void onDeactivate() {
         targets.clear();
         stopAttacking();
+        trackedEntity = null;
+        trackedVel = Vec3d.ZERO;
+        trackedAcc = Vec3d.ZERO;
     }
 
     @EventHandler
@@ -516,19 +526,65 @@ public class KillAura extends Module {
      * 计算给定实体的最优瞄准点。
      * <p>
      * 算法:
-     * 1. 取目标碰撞箱 AABB (可选速度预测偏移)
-     * 2. X/Z: clamp(eye, box) → 最近表面点 + 30% 中心混合 (鲁棒性)
-     * 3. Y: 优选上胸区 (62% 身高) — 服务端命中注册面积最宽容
+     * 1. 从位置差分导出目标速度 (修复 entity.getVelocity() 对远程玩家无效的问题)
+     * 2. α-β 滤波: 平滑相对速度 + 估计加速度 (捕捉鞘翅飞行曲率)
+     * 3. 二阶预测: v·t + ½a·t² (比纯匀速更精确)
+     * 4. 动态 Horizon: 从网络延迟自动计算预测时域
+     * 5. X/Z: clamp(eye, box) + 30% 中心混合
+     * 6. Y: 优选上胸区 (62% 身高)
      */
     private Vec3d computeAimPoint(Entity entity) {
         Vec3d eyePos = mc.player.getEyePos();
         Box box = entity.getBoundingBox();
 
-        // 相对速度预测: 按 (targetVel - selfVel) × ticks 偏移 AABB
         if (predictMovement.get()) {
-            Vec3d relVel = entity.getVelocity().subtract(mc.player.getVelocity());
-            int ticks = predictionTicks.get();
-            box = box.offset(relVel.x * ticks, relVel.y * ticks, relVel.z * ticks);
+            // === 改进 1: 位置差分导出速度 ===
+            // entity.getVelocity() 对远程玩家返回 ~(0,0,0), 因为服务端仅在击退时发送速度包。
+            // 改用 (currentPos - prevPos) 导出实际每 tick 位移, 对所有实体类型可靠。
+            Vec3d targetVel = new Vec3d(
+                entity.getX() - entity.prevX,
+                entity.getY() - entity.prevY,
+                entity.getZ() - entity.prevZ
+            );
+            Vec3d selfVel = mc.player.getVelocity();
+            Vec3d relVel = targetVel.subtract(selfVel);
+
+            // === 改进 2: α-β 滤波器 ===
+            // 从相对速度序列中同时提取平滑速度和加速度估计。
+            // 解决单帧 position delta 噪声, 并捕捉鞘翅飞行的曲率 (拉升/俯冲/转弯)。
+            // 当目标切换时重置滤波器状态, 避免旧目标状态污染。
+            if (entity == trackedEntity) {
+                Vec3d predicted = trackedVel.add(trackedAcc);      // 预测: v + a
+                Vec3d residual = relVel.subtract(predicted);       // 残差: 观测 - 预测
+                trackedVel = predicted.add(residual.multiply(TRACK_ALPHA));  // 速度修正
+                trackedAcc = trackedAcc.add(residual.multiply(TRACK_BETA));  // 加速度修正
+            } else {
+                trackedVel = relVel;
+                trackedAcc = Vec3d.ZERO;
+                trackedEntity = entity;
+            }
+
+            // === 改进 3: 动态 Horizon ===
+            // 从网络延迟自动计算预测时域, 替代用户手动设置的固定 tick 数。
+            // horizon = RTT/2 (oneWay) + 25ms (服务端排队偏置), 转为 tick 单位。
+            // 若获取不到延迟信息, 回退到用户设置的 predictionTicks。
+            double t;
+            int pingMs = PlayerUtils.getPing();
+            if (pingMs > 0) {
+                double horizonMs = pingMs * 0.5 + 25.0;
+                t = Math.max(horizonMs / 50.0, 0.5);
+            } else {
+                t = predictionTicks.get();
+            }
+
+            // === 改进 2 (cont): 二阶预测 v·t + ½a·t² ===
+            // 纯匀速 (v·t) 在直线运动时足够, 但鞘翅拉升/俯冲/转弯时
+            // 加速度项 (½a·t²) 显著提升曲线路径的预测精度。
+            box = box.offset(
+                trackedVel.x * t + 0.5 * trackedAcc.x * t * t,
+                trackedVel.y * t + 0.5 * trackedAcc.y * t * t,
+                trackedVel.z * t + 0.5 * trackedAcc.z * t * t
+            );
         }
 
         // X/Z: 最近点 + 30% 中心混合
@@ -540,7 +596,6 @@ public class KillAura extends Module {
         aimZ += (cz - aimZ) * 0.3;
 
         // Y: 优选上胸区 (62% 身高), 再做 30% 中心混合
-        // 相比纯 clamp(eye.y, box), 上胸在中近距离的命中判定更宽容
         double preferY = box.minY + (box.maxY - box.minY) * 0.62;
         double aimY = MathHelper.clamp(preferY, box.minY, box.maxY);
         double cy = (box.minY + box.maxY) * 0.5;
