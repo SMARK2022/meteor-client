@@ -1229,17 +1229,21 @@ public class CrystalAura extends Module {
         return true;
     }
 
-    private void executeProposal() {
+    /**
+     * 尝试执行当前 proposal —— LOS/support 实时重验 + 旋转/放置。
+     * @return true = 已安排动作（rotation scheduled 或直接放置/yawStep 推进），false = 硬失败
+     */
+    private boolean executeProposal() {
         BlockHitResult result = resolveCrystalHit(proposalPos);
         if (result == null) {
             hasProposal = false;
-            return;
+            return false;
         }
 
         // 修正 1: support 候选必须通过 obsidian resolver 预验证
         if (proposalIsSupport && resolveSupportHit(proposalPos) == null) {
             hasProposal = false;
-            return;
+            return false;
         }
 
         // crystal hit + support 预验证均通过后才更新渲染 —— 保证橙框=真的能执行
@@ -1260,16 +1264,18 @@ public class CrystalAura extends Module {
             if (yawStepMode.get() == YawStepMode.Break || doYawSteps(yaw, pitch)) {
                 setRotation(true, vec3d, 0, 0);
                 Vec3d hitTarget = new Vec3d(vec3d.x, vec3d.y, vec3d.z);
-                // 修正 2: placeTimer 移入 callback —— 仅成功发包后才扣冷却
+                // W2 修正: placeTimer 仅在 placeCrystal 成功时递增
                 Rotations.rotateToward(hitTarget, 50, () -> {
-                    placeCrystal(result, proposalDamage, supportBlock);
-                    placeTimer += getEffectivePlaceDelay();
+                    if (placeCrystal(result, proposalDamage, supportBlock))
+                        placeTimer += getEffectivePlaceDelay();
                 });
             }
+            // yawStep 阻塞时 doYawSteps 已发送步进旋转包 → 属于有效动作
         } else {
-            placeCrystal(result, proposalDamage, supportBlock);
-            placeTimer += getEffectivePlaceDelay();
+            if (placeCrystal(result, proposalDamage, supportBlock))
+                placeTimer += getEffectivePlaceDelay();
         }
+        return true;
     }
 
     // 放置流程
@@ -1335,12 +1341,15 @@ public class CrystalAura extends Module {
         if (hasProposal && proposalAge < 3) {
             if (quickValidateProposal()) {
                 proposalAge++;
-                // 渲染移至 executeProposal 内 resolveCrystalHit 通过后，避免渲染不可达位置
-                executeProposal();
-                captureAndSubmitAsyncScan();
-                return;
+                // W1 修正: executeProposal 成功才跳过同步扫描；失败则回落全量扫描
+                if (executeProposal()) {
+                    captureAndSubmitAsyncScan();
+                    return;
+                }
+                // proposal LOS/support 不可达 → 回落同步扫描（本 tick 不浪费）
+            } else {
+                hasProposal = false;
             }
-            hasProposal = false;
         }
 
         // 提交下一轮 async 扫描（结果仅作为 proposal seed）
@@ -1455,15 +1464,15 @@ public class CrystalAura extends Module {
                 if (yawStepMode.get() == YawStepMode.Break || doYawSteps(yaw, pitch)) {
                     setRotation(true, vec3d, 0, 0);
                     Vec3d hitTarget = new Vec3d(vec3d.x, vec3d.y, vec3d.z);
-                    // 修正 2: placeTimer 移入 callback
+                    // W2 修正: placeTimer 仅在 placeCrystal 成功时递增
                     Rotations.rotateToward(hitTarget, 50, () -> {
-                        placeCrystal(result, dmg, supportBlock);
-                        placeTimer += getEffectivePlaceDelay();
+                        if (placeCrystal(result, dmg, supportBlock))
+                            placeTimer += getEffectivePlaceDelay();
                     });
                 }
             } else {
-                placeCrystal(result, dmg, supportBlock);
-                placeTimer += getEffectivePlaceDelay();
+                if (placeCrystal(result, dmg, supportBlock))
+                    placeTimer += getEffectivePlaceDelay();
             }
         });
     }
@@ -1528,19 +1537,23 @@ public class CrystalAura extends Module {
         }
     }
 
-    private void placeCrystal(BlockHitResult result, double damage, BlockPos supportBlock) {
+    /**
+     * 放置水晶或 support 方块。
+     * @return true = 成功发包, false = 某环节失败（物品/手/support 放置等）
+     */
+    private boolean placeCrystal(BlockHitResult result, double damage, BlockPos supportBlock) {
         // Switch
         Item targetItem = supportBlock == null ? Items.END_CRYSTAL : Items.OBSIDIAN;
 
         FindItemResult item = InvUtils.findInHotbar(targetItem);
-        if (!item.found()) return;
+        if (!item.found()) return false;
 
         int prevSlot = mc.player.getInventory().selectedSlot;
 
         if (autoSwitch.get() != AutoSwitchMode.None && !item.isOffhand()) InvUtils.swap(item.slot(), false);
 
         Hand hand = item.getHand();
-        if (hand == null) return;
+        if (hand == null) return false;
 
         // Place
         if (supportBlock == null) {
@@ -1575,7 +1588,7 @@ public class CrystalAura extends Module {
         }
         else {
             // 空中放置保护：无有效邻居面时放弃 support（服务端会拒绝）
-            if (BlockUtils.getPlaceSide(supportBlock) == null) return;
+            if (BlockUtils.getPlaceSide(supportBlock) == null) return false;
 
             boolean placed;
             if (supportSafePlacement.get()) {
@@ -1587,7 +1600,7 @@ public class CrystalAura extends Module {
                 placed = BlockUtils.place(supportBlock, item, false, 0, swingMode.get().client(), true, false);
             }
 
-            if (!placed) return;
+            if (!placed) return false;
 
             placeTimer += supportDelay.get();
 
@@ -1595,11 +1608,13 @@ public class CrystalAura extends Module {
             // 这样后台线程下一轮扫描会把此位置视为有效基座
             planner.updateBlock(supportBlock.getX(), supportBlock.getY(), supportBlock.getZ(), 1200.0f);
 
-            if (supportDelay.get() == 0) placeCrystal(result, damage, null);
+            if (supportDelay.get() == 0) return placeCrystal(result, damage, null);
+            // support 放置成功但 delay > 0: 等待下 tick 放水晶
         }
 
         // Switch back
         if (autoSwitch.get() == AutoSwitchMode.Silent) InvUtils.swap(prevSlot, false);
+        return true;
     }
 
     /**
