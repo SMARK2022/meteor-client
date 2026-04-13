@@ -1543,18 +1543,14 @@ public class CrystalAura extends Module {
         Direction clickedFace = option.getClickedFace();
         BlockHitResult hitResult = new BlockHitResult(option.hitVec(), clickedFace, interactPos, false);
 
-        // 旋转 → 放置
-        float yaw = (float) Rotations.getYaw(option.hitVec());
-        float pitch = (float) Rotations.getPitch(option.hitVec());
-
         if (hand == null) return false;
 
-        // 使用 Rotations 系统确保视角先对准再放置
-        Rotations.rotate(yaw, pitch, 50, () -> {
-            mc.player.networkHandler.sendPacket(new PlayerInteractBlockC2SPacket(hand, hitResult, 0));
-            if (swingMode.get().client()) mc.player.swingHand(hand);
-            if (swingMode.get().packet()) mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(hand));
-        });
+        // 直接发包 —— 此方法在 Rotations callback 内调用（Post 阶段），
+        // 嵌套 Rotations.rotate() 会被 defer 到下一 tick，导致方块包先于旋转包。
+        // NCP/LOS 验证已由 ResolverRegistry.resolve 完成，hitVec 合法即可。
+        mc.player.networkHandler.sendPacket(new PlayerInteractBlockC2SPacket(hand, hitResult, 0));
+        if (swingMode.get().client()) mc.player.swingHand(hand);
+        if (swingMode.get().packet()) mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(hand));
 
         return true;
     }
