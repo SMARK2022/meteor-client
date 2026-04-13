@@ -355,8 +355,8 @@ public class CrystalAura extends Module {
 
     private final Setting<Double> breakRange = sgBreak.add(new DoubleSetting.Builder()
         .name("破坏范围")
-        .description("破坏水晶的最远距离（格）。")
-        .defaultValue(4.5)
+        .description("破坏水晶的最远距离（格）。注：Grim 实体交互距离 3.0 + 水晶碰撞箱 1.0 = 有效极限 ~4.0。")
+        .defaultValue(4.0)
         .min(0)
         .sliderMax(6)
         .build()
@@ -364,8 +364,8 @@ public class CrystalAura extends Module {
 
     private final Setting<Double> breakWallsRange = sgBreak.add(new DoubleSetting.Builder()
         .name("穿墙破坏范围")
-        .description("透过墙壁破坏水晶的最远距离（格）。视线被阵挡时使用此范围。")
-        .defaultValue(4.5)
+        .description("透过墙壁破坏水晶的最远距离（格）。视线被阻挡时使用此范围。")
+        .defaultValue(4.0)
         .min(0)
         .sliderMax(6)
         .build()
@@ -726,7 +726,8 @@ public class CrystalAura extends Module {
     private void onPreTick(TickEvent.Pre event) {
         // Update last rotation
         didRotateThisTick = false;
-        attackedThisTick = false;
+        // F4: attackedThisTick 延迟重置到 findTargets 之后
+        // 使得 EntityAddedEvent → fastBreak 设置的标志在 doBreak+doPlace 间仍生效
         lastRotationTimer++;
 
         // Decrement placing timer
@@ -784,6 +785,11 @@ public class CrystalAura extends Module {
             if (!didRotateThisTick) doBreak();
             if (!didRotateThisTick) doPlace();
         }
+
+        // F4: attackedThisTick 在 tick 末尾重置
+        // fastBreak (EntityAddedEvent 可能在 tick 前触发) 设置的标志
+        // 在 doBreak + doPlace 期间保持有效，防止同 tick 重复攻击/攻击+放置
+        attackedThisTick = false;
     }
 
     @EventHandler(priority = EventPriority.LOWEST - 666)
@@ -1282,6 +1288,8 @@ public class CrystalAura extends Module {
 
     private void doPlace() {
         if (!doPlace.get() || placeTimer > 0) return;
+        // F3: 本 tick 已攻击则跳过放置 —— 避免同 tick attack+place 触发 Grim PacketOrderI/J
+        if (attackedThisTick) return;
         if (shouldPause(PauseMode.Place)) return;
 
         // 等待水晶生成确认时不发送冗余放置包
@@ -1741,14 +1749,63 @@ public class CrystalAura extends Module {
         return (EntityUtils.getTotalHealth(mc.player) <= pauseHealth.get());
     }
 
-    private boolean isOutOfRange(Vec3d vec3d, BlockPos blockPos, boolean place) {
-        ((IRaycastContext) raycastContext).meteor$set(playerEyePos, vec3d, RaycastContext.ShapeType.COLLIDER, RaycastContext.FluidHandling.NONE, mc.player);
+    /**
+     * F1 重写: 范围 + 穿墙检测 —— 对齐 Grim FarPlace/Reach 的检测基准。
+     * <p>
+     * 改动要点:
+     * 1. 起点 = 眼睛 (不再是脚底)
+     * 2. 距离 = 到 AABB 最近表面 (不再是到中心点)
+     * 3. 壁检测: 放置时检查射线是否命中基座方块; 破坏时检查是否命中实体方块
+     *
+     * @param targetPos  放置时=水晶中心(bp.X+0.5, bp.Y+1, bp.Z+0.5); 破坏时=entity.getPos()
+     * @param blockPos   放置时=基座上方空气方块(bp+1); 破坏时=entity.getBlockPos()
+     * @param place      true=放置检测, false=破坏检测
+     */
+    private boolean isOutOfRange(Vec3d targetPos, BlockPos blockPos, boolean place) {
+        double range = (place ? placeRange : breakRange).get();
+        double wallsRange = (place ? placeWallsRange : breakWallsRange).get();
 
+        double eyeX = playerEyePos.x, eyeY = playerEyePos.y, eyeZ = playerEyePos.z;
+
+        // ① 到 AABB 最近表面的距离²（匹配 Grim getMinReachToBox）
+        double distSq;
+        if (place) {
+            // 放置: Grim FarPlace 检测 眼→基座方块 AABB 表面
+            // blockPos = 基座上方 (bp+1), 基座 = blockPos.Y - 1
+            int bx = blockPos.getX(), by = blockPos.getY() - 1, bz = blockPos.getZ();
+            double dx = Math.max(bx - eyeX, Math.max(0, eyeX - (bx + 1)));
+            double dy = Math.max(by - eyeY, Math.max(0, eyeY - (by + 1)));
+            double dz = Math.max(bz - eyeZ, Math.max(0, eyeZ - (bz + 1)));
+            distSq = dx * dx + dy * dy + dz * dz;
+        } else {
+            // 破坏: Grim Reach 检测 眼→水晶 AABB(2×2×2) 表面
+            double px = targetPos.x, py = targetPos.y, pz = targetPos.z;
+            double dx = Math.max(px - 1 - eyeX, Math.max(0, eyeX - (px + 1)));
+            double dy = Math.max(py - eyeY, Math.max(0, eyeY - (py + 2)));
+            double dz = Math.max(pz - 1 - eyeZ, Math.max(0, eyeZ - (pz + 1)));
+            distSq = dx * dx + dy * dy + dz * dz;
+        }
+
+        // ② 壁检测: 从眼到目标点的射线
+        ((IRaycastContext) raycastContext).meteor$set(playerEyePos, targetPos,
+            RaycastContext.ShapeType.COLLIDER, RaycastContext.FluidHandling.NONE, mc.player);
         BlockHitResult result = mc.world.raycast(raycastContext);
 
-        if (result == null || !result.getBlockPos().equals(blockPos)) // Is behind wall
-            return !PlayerUtils.isWithin(vec3d, (place ? placeWallsRange : breakWallsRange).get());
-        return !PlayerUtils.isWithin(vec3d, (place ? placeRange : breakRange).get());
+        boolean behindWall;
+        if (result.getType() == net.minecraft.util.hit.HitResult.Type.MISS) {
+            behindWall = false; // 无遮挡 (对 support 空气位尤其重要)
+        } else if (place) {
+            // 射线命中基座方块 = 直视 (基座在水晶中心正下方)
+            int baseY = blockPos.getY() - 1;
+            behindWall = result.getBlockPos().getX() != blockPos.getX()
+                || result.getBlockPos().getY() != baseY
+                || result.getBlockPos().getZ() != blockPos.getZ();
+        } else {
+            behindWall = !result.getBlockPos().equals(blockPos);
+        }
+
+        double effectiveRange = behindWall ? wallsRange : range;
+        return distSq > effectiveRange * effectiveRange;
     }
 
     private LivingEntity getNearestTarget() {
