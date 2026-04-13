@@ -356,19 +356,21 @@ public class KillAura extends Module {
         }
 
         if (delayCheck()) {
-            // Ready to attack: compute aim and submit one attack this tick
-            Vec3d aim = computeAimPoint(primary);
-
+            // 就绪: 用 AimResolver 提交旋转, SEND_FINAL 时从 post-physics 位置重建 aim
             if (rotation.get() != RotationMode.None) {
-                // Attack in rotation callback — server sees correct angle before attack packet
-                Rotations.rotateToward(aim, 100, () -> commitAttack(primary));
+                Rotations.rotateWith(
+                    phase -> solveEntityAim(primary),
+                    100, () -> commitAttack(primary)
+                );
             } else {
                 commitAttack(primary);
             }
         } else if (rotation.get() == RotationMode.Always) {
-            // Not attacking yet, softly track the target
-            Vec3d aim = computeAimPoint(primary);
-            Rotations.rotateToward(aim, 50, null);
+            // 未就绪: 软追踪, 保持朝向目标 (低优先级)
+            Rotations.rotateWith(
+                phase -> solveEntityAim(primary),
+                50, null
+            );
         }
     }
 
@@ -491,28 +493,59 @@ public class KillAura extends Module {
         return Math.min(range.get(), mc.player.getEntityInteractionRange());
     }
 
+    /**
+     * 构建实体追踪的瞄准解。
+     * <p>
+     * AimResolver 在两个阶段分别调用本方法:
+     * <ul>
+     *   <li>PREVIEW — pre-physics 位置, mc.player.getEyePos() 为旧位置, 角度为近似</li>
+     *   <li>SEND_FINAL — post-physics 位置, mc.player.getEyePos() 为新位置, 角度为精确</li>
+     * </ul>
+     * 每次调用都从当前状态重新计算完整的 aim point + yaw/pitch,
+     * 而非复用 Pre 阶段的旧结果。这消除了 sprint/鞘翅下 self 位移导致的系统性角度偏差。
+     */
+    private Rotations.AimSolution solveEntityAim(Entity entity) {
+        Vec3d aim = computeAimPoint(entity);
+        return new Rotations.AimSolution(
+            (float) Rotations.getYaw(aim),
+            (float) Rotations.getPitch(aim)
+        );
+    }
+
+    /**
+     * 计算给定实体的最优瞄准点。
+     * <p>
+     * 算法:
+     * 1. 取目标碰撞箱 AABB (可选速度预测偏移)
+     * 2. X/Z: clamp(eye, box) → 最近表面点 + 30% 中心混合 (鲁棒性)
+     * 3. Y: 优选上胸区 (62% 身高) — 服务端命中注册面积最宽容
+     */
     private Vec3d computeAimPoint(Entity entity) {
         Vec3d eyePos = mc.player.getEyePos();
         Box box = entity.getBoundingBox();
 
-        // Apply relative velocity prediction: offset AABB by (targetVel - playerVel) * ticks
+        // 相对速度预测: 按 (targetVel - selfVel) × ticks 偏移 AABB
         if (predictMovement.get()) {
             Vec3d relVel = entity.getVelocity().subtract(mc.player.getVelocity());
             int ticks = predictionTicks.get();
             box = box.offset(relVel.x * ticks, relVel.y * ticks, relVel.z * ticks);
         }
 
-        // Closest point on AABB to eye — minimal rotation cost
+        // X/Z: 最近点 + 30% 中心混合
         double aimX = MathHelper.clamp(eyePos.x, box.minX, box.maxX);
-        double aimY = MathHelper.clamp(eyePos.y, box.minY, box.maxY);
         double aimZ = MathHelper.clamp(eyePos.z, box.minZ, box.maxZ);
-        // Blend 30% toward box center for robustness (avoid edge intercepts)
         double cx = (box.minX + box.maxX) * 0.5;
-        double cy = (box.minY + box.maxY) * 0.5;
         double cz = (box.minZ + box.maxZ) * 0.5;
         aimX += (cx - aimX) * 0.3;
-        aimY += (cy - aimY) * 0.3;
         aimZ += (cz - aimZ) * 0.3;
+
+        // Y: 优选上胸区 (62% 身高), 再做 30% 中心混合
+        // 相比纯 clamp(eye.y, box), 上胸在中近距离的命中判定更宽容
+        double preferY = box.minY + (box.maxY - box.minY) * 0.62;
+        double aimY = MathHelper.clamp(preferY, box.minY, box.maxY);
+        double cy = (box.minY + box.maxY) * 0.5;
+        aimY += (cy - aimY) * 0.3;
+
         return new Vec3d(aimX, aimY, aimZ);
     }
 
