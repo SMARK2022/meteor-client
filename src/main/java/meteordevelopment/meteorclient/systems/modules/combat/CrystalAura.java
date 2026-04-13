@@ -966,7 +966,7 @@ public class CrystalAura extends Module {
 
             if (doYawSteps(yaw, pitch)) {
                 setRotation(true, crystal.getPos(), 0, 0);
-                Rotations.rotate(yaw, pitch, 50, () -> attackCrystal(crystal));
+                Rotations.rotateToward(crystal.getPos(), 50, () -> attackCrystal(crystal));
 
                 breakTimer = breakDelay.get();
             }
@@ -1253,7 +1253,8 @@ public class CrystalAura extends Module {
 
             if (yawStepMode.get() == YawStepMode.Break || doYawSteps(yaw, pitch)) {
                 setRotation(true, vec3d, 0, 0);
-                Rotations.rotate(yaw, pitch, 50, () -> placeCrystal(result, proposalDamage, supportBlock));
+                Vec3d hitTarget = new Vec3d(vec3d.x, vec3d.y, vec3d.z);
+                Rotations.rotateToward(hitTarget, 50, () -> placeCrystal(result, proposalDamage, supportBlock));
                 placeTimer += getEffectivePlaceDelay();
             }
         } else {
@@ -1440,7 +1441,8 @@ public class CrystalAura extends Module {
                 double pitch = Rotations.getPitch(vec3d);
                 if (yawStepMode.get() == YawStepMode.Break || doYawSteps(yaw, pitch)) {
                     setRotation(true, vec3d, 0, 0);
-                    Rotations.rotate(yaw, pitch, 50, () -> placeCrystal(result, dmg, supportBlock));
+                    Vec3d hitTarget = new Vec3d(vec3d.x, vec3d.y, vec3d.z);
+                    Rotations.rotateToward(hitTarget, 50, () -> placeCrystal(result, dmg, supportBlock));
                     placeTimer += getEffectivePlaceDelay();
                 }
             } else {

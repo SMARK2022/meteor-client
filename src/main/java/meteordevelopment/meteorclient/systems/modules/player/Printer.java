@@ -697,7 +697,7 @@ public class Printer extends Module {
                 publishRenderPlan(armed.plan());
                 if (rotate.get()) {
                     ActionPlan.Interaction inter = armed.plan().interaction();
-                    Rotations.requestPreMovement(inter.yaw(), inter.pitch(), 50, null);
+                    Rotations.requestPreMovementToward(inter.hitVec(), 50, null);
                 }
                 return; // plan 已就绪，本 tick 不再启动容器
             }

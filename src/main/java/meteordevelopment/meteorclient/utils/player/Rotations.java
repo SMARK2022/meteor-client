@@ -93,7 +93,7 @@ public class Rotations {
     public static void rotate(double yaw, double pitch, int priority, Runnable callback) {
         if (mc.player == null) return;
         // 如果 movement 阶段已过, 本 tick 无法预应用, 自动 defer 到下一 tick
-        pending.add(new RotationRequest((float) yaw, (float) pitch, priority, callback, movementPhasePassed));
+        pending.add(new RotationRequest((float) yaw, (float) pitch, priority, callback, movementPhasePassed, null));
     }
 
     /**
@@ -121,7 +121,29 @@ public class Rotations {
      */
     public static void requestPreMovement(float yaw, float pitch, int priority, Runnable callback) {
         if (mc.player == null) return;
-        pending.add(new RotationRequest(yaw, pitch, priority, callback, false));
+        pending.add(new RotationRequest(yaw, pitch, priority, callback, false, null));
+    }
+
+    /**
+     * 延迟角度重算: 预应用阶段用近似角 (基于 pre-physics 位置),
+     * SendMovementPacketsEvent.Pre 时从定型后的真实眼位重算精确角度。
+     * 消除运动中旋转角与位置包的时序错位。
+     */
+    public static void rotateToward(Vec3d target, int priority, Runnable callback) {
+        if (mc.player == null) return;
+        float approxYaw = (float) getYaw(target);
+        float approxPitch = (float) getPitch(target);
+        pending.add(new RotationRequest(approxYaw, approxPitch, priority, callback, movementPhasePassed, target));
+    }
+
+    /**
+     * 预应用 + 延迟角度重算 — 供 Printer 等模块在 TickEvent.Pre 阶段提交。
+     */
+    public static void requestPreMovementToward(Vec3d target, int priority, Runnable callback) {
+        if (mc.player == null) return;
+        float approxYaw = (float) getYaw(target);
+        float approxPitch = (float) getPitch(target);
+        pending.add(new RotationRequest(approxYaw, approxPitch, priority, callback, false, target));
     }
 
     /**
@@ -205,9 +227,17 @@ public class Rotations {
 
     @EventHandler(priority = EventPriority.HIGHEST)
     private static void onSendMovementPacketsPre(SendMovementPacketsEvent.Pre event) {
-        // 不再做任何额外的 packet 角度注入 —
-        // 因为角度已经在 PlayerTickMovementEvent 中预应用到 mc.player.yaw/pitch,
-        // vanilla sendMovementPackets 自然会带上正确角度。
+        // 延迟角度重算: 此时位置已定型 (post-physics), 从真实眼位重算精确角度
+        if (active != null && active.targetPos != null && mc.player != null) {
+            float exactYaw = (float) getYaw(active.targetPos);
+            float exactPitch = (float) getPitch(active.targetPos);
+            mc.player.setYaw(exactYaw);
+            mc.player.setPitch(exactPitch);
+            active.yaw = exactYaw;
+            active.pitch = exactPitch;
+            serverYaw = exactYaw;
+            serverPitch = exactPitch;
+        }
     }
 
     @EventHandler(priority = EventPriority.LOWEST)
@@ -428,17 +458,19 @@ public class Rotations {
     // ==================== 内部数据结构 ====================
 
     private static class RotationRequest {
-        final float yaw, pitch;
+        float yaw, pitch;
         final int priority;
         final Runnable callback;
         boolean deferred; // 本 tick 未入选, 留到下一 tick
+        final Vec3d targetPos; // 延迟重算目标点, null = 不重算 (兼容旧 API)
 
-        RotationRequest(float yaw, float pitch, int priority, Runnable callback, boolean deferred) {
+        RotationRequest(float yaw, float pitch, int priority, Runnable callback, boolean deferred, Vec3d targetPos) {
             this.yaw = yaw;
             this.pitch = pitch;
             this.priority = priority;
             this.callback = callback;
             this.deferred = deferred;
+            this.targetPos = targetPos;
         }
     }
 }

@@ -161,6 +161,23 @@ public class KillAura extends Module {
         .build()
     );
 
+    private final Setting<Boolean> predictMovement = sgTargeting.add(new BoolSetting.Builder()
+        .name("predict-movement")
+        .description("Predicts target movement based on relative velocity, aiming ahead for better hit accuracy on moving targets.")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Integer> predictionTicks = sgTargeting.add(new IntSetting.Builder()
+        .name("prediction-ticks")
+        .description("How many ticks ahead to predict target position. Higher values lead targets more aggressively.")
+        .defaultValue(2)
+        .min(1)
+        .sliderRange(1, 5)
+        .visible(predictMovement::get)
+        .build()
+    );
+
     private final Setting<Boolean> ignoreNamed = sgTargeting.add(new BoolSetting.Builder()
         .name("ignore-named")
         .description("Whether or not to attack mobs with a name.")
@@ -341,19 +358,17 @@ public class KillAura extends Module {
         if (delayCheck()) {
             // Ready to attack: compute aim and submit one attack this tick
             Vec3d aim = computeAimPoint(primary);
-            double yaw = Rotations.getYaw(aim);
-            double pitch = Rotations.getPitch(aim);
 
             if (rotation.get() != RotationMode.None) {
                 // Attack in rotation callback — server sees correct angle before attack packet
-                Rotations.rotate(yaw, pitch, 100, () -> commitAttack(primary));
+                Rotations.rotateToward(aim, 100, () -> commitAttack(primary));
             } else {
                 commitAttack(primary);
             }
         } else if (rotation.get() == RotationMode.Always) {
             // Not attacking yet, softly track the target
             Vec3d aim = computeAimPoint(primary);
-            Rotations.rotate(Rotations.getYaw(aim), Rotations.getPitch(aim), 50);
+            Rotations.rotateToward(aim, 50, null);
         }
     }
 
@@ -479,6 +494,14 @@ public class KillAura extends Module {
     private Vec3d computeAimPoint(Entity entity) {
         Vec3d eyePos = mc.player.getEyePos();
         Box box = entity.getBoundingBox();
+
+        // Apply relative velocity prediction: offset AABB by (targetVel - playerVel) * ticks
+        if (predictMovement.get()) {
+            Vec3d relVel = entity.getVelocity().subtract(mc.player.getVelocity());
+            int ticks = predictionTicks.get();
+            box = box.offset(relVel.x * ticks, relVel.y * ticks, relVel.z * ticks);
+        }
+
         // Closest point on AABB to eye — minimal rotation cost
         double aimX = MathHelper.clamp(eyePos.x, box.minX, box.maxX);
         double aimY = MathHelper.clamp(eyePos.y, box.minY, box.maxY);
