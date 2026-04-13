@@ -6,13 +6,17 @@
 package meteordevelopment.meteorclient.systems.modules.combat;
 
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
+import meteordevelopment.meteorclient.events.render.Render2DEvent;
+import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.pathing.PathManagers;
+import meteordevelopment.meteorclient.renderer.text.TextRenderer;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.friends.Friends;
 import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
+import meteordevelopment.meteorclient.utils.Utils;
 import meteordevelopment.meteorclient.utils.entity.EntityUtils;
 import meteordevelopment.meteorclient.utils.entity.SortPriority;
 import meteordevelopment.meteorclient.utils.entity.TargetUtils;
@@ -20,8 +24,12 @@ import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.PlayerUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
+import meteordevelopment.meteorclient.utils.render.NametagUtils;
+import meteordevelopment.meteorclient.utils.render.color.Color;
+import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.meteorclient.utils.world.TickRate;
 import meteordevelopment.orbit.EventHandler;
+import org.joml.Vector3d;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.LivingEntity;
@@ -48,6 +56,7 @@ public class KillAura extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgTargeting = settings.createGroup("Targeting");
     private final SettingGroup sgTiming = settings.createGroup("Timing");
+    private final SettingGroup sgRender = settings.createGroup("渲染");
 
     // General
 
@@ -252,6 +261,50 @@ public class KillAura extends Module {
         .defaultValue(0)
         .min(0)
         .sliderMax(10)
+        .build()
+    );
+
+    // 渲染
+
+    private final Setting<Boolean> renderTrajectory = sgRender.add(new BoolSetting.Builder()
+        .name("render-trajectory")
+        .description("开启预测运动后, 渲染目标未来 1 秒的预测轨迹线。")
+        .defaultValue(true)
+        .visible(predictMovement::get)
+        .build()
+    );
+
+    private final Setting<SettingColor> trajectoryStartColor = sgRender.add(new ColorSetting.Builder()
+        .name("trajectory-start-color")
+        .description("轨迹线起点颜色。")
+        .defaultValue(new SettingColor(0, 255, 255, 255))
+        .visible(() -> predictMovement.get() && renderTrajectory.get())
+        .build()
+    );
+
+    private final Setting<SettingColor> trajectoryEndColor = sgRender.add(new ColorSetting.Builder()
+        .name("trajectory-end-color")
+        .description("轨迹线终点颜色 (渐变到此)。")
+        .defaultValue(new SettingColor(0, 255, 255, 25))
+        .visible(() -> predictMovement.get() && renderTrajectory.get())
+        .build()
+    );
+
+    private final Setting<Boolean> renderSpeed = sgRender.add(new BoolSetting.Builder()
+        .name("render-speed")
+        .description("在目标头顶显示其移动速度 (m/s)。")
+        .defaultValue(true)
+        .visible(predictMovement::get)
+        .build()
+    );
+
+    private final Setting<Double> speedTextScale = sgRender.add(new DoubleSetting.Builder()
+        .name("speed-text-scale")
+        .description("速度文字缩放比例。")
+        .defaultValue(1.0)
+        .min(0.5)
+        .sliderRange(0.5, 3.0)
+        .visible(() -> predictMovement.get() && renderSpeed.get())
         .build()
     );
 
@@ -602,6 +655,108 @@ public class KillAura extends Module {
         aimY += (cy - aimY) * 0.3;
 
         return new Vec3d(aimX, aimY, aimZ);
+    }
+
+    // --- 渲染 ---
+
+    private final Color gradientA = new Color();
+    private final Color gradientB = new Color();
+    private final Vector3d vec3 = new Vector3d();
+
+    /**
+     * 渲染目标未来 1 秒 (20 tick) 的预测轨迹线。
+     * <p>
+     * 使用 α-β 滤波器的平滑速度 + 加速度进行二阶外推,
+     * 线段颜色从 trajectoryStartColor 渐变到 trajectoryEndColor。
+     */
+    @EventHandler
+    private void onRender3D(Render3DEvent event) {
+        if (!predictMovement.get() || !renderTrajectory.get()) return;
+        if (trackedEntity == null || !targets.contains(trackedEntity)) return;
+
+        Entity entity = trackedEntity;
+
+        // 插值当前渲染位置
+        double baseX = entity.prevX + (entity.getX() - entity.prevX) * event.tickDelta;
+        double baseY = entity.prevY + (entity.getY() - entity.prevY) * event.tickDelta;
+        double baseZ = entity.prevZ + (entity.getZ() - entity.prevZ) * event.tickDelta;
+
+        // 目标绝对速度 ≈ filteredRelVel + selfVel
+        Vec3d selfVel = mc.player.getVelocity();
+        double vx = trackedVel.x + selfVel.x;
+        double vy = trackedVel.y + selfVel.y;
+        double vz = trackedVel.z + selfVel.z;
+
+        // 目标绝对加速度 ≈ filteredRelAcc (忽略自身加速度, 渲染用足够)
+        double ax = trackedAcc.x, ay = trackedAcc.y, az = trackedAcc.z;
+
+        Color start = trajectoryStartColor.get();
+        Color end = trajectoryEndColor.get();
+        int segments = 20;
+
+        double prevX = baseX, prevY = baseY, prevZ = baseZ;
+
+        for (int i = 1; i <= segments; i++) {
+            double t = i;
+            double nextX = baseX + vx * t + 0.5 * ax * t * t;
+            double nextY = baseY + vy * t + 0.5 * ay * t * t;
+            double nextZ = baseZ + vz * t + 0.5 * az * t * t;
+
+            float f1 = (i - 1) / (float) segments;
+            float f2 = i / (float) segments;
+            lerpColor(gradientA, start, end, f1);
+            lerpColor(gradientB, start, end, f2);
+
+            event.renderer.line(prevX, prevY, prevZ, nextX, nextY, nextZ, gradientA, gradientB);
+
+            prevX = nextX;
+            prevY = nextY;
+            prevZ = nextZ;
+        }
+    }
+
+    /**
+     * 在目标头顶渲染移动速度 (m/s)。
+     * 使用 NametagUtils 将世界坐标投影到屏幕后绘制文字。
+     */
+    @EventHandler
+    private void onRender2D(Render2DEvent event) {
+        if (!predictMovement.get() || !renderSpeed.get()) return;
+        if (trackedEntity == null || !targets.contains(trackedEntity)) return;
+
+        Entity entity = trackedEntity;
+
+        // 目标绝对速度
+        Vec3d selfVel = mc.player.getVelocity();
+        double vx = trackedVel.x + selfVel.x;
+        double vy = trackedVel.y + selfVel.y;
+        double vz = trackedVel.z + selfVel.z;
+        double speedMps = Math.sqrt(vx * vx + vy * vy + vz * vz) * 20.0; // blocks/tick → m/s
+
+        // 投影实体头顶到屏幕坐标
+        Utils.set(vec3, entity, event.tickDelta);
+        double height = entity.getBoundingBox().maxY - entity.getBoundingBox().minY;
+        vec3.y += height + 0.5;
+
+        if (NametagUtils.to2D(vec3, speedTextScale.get())) {
+            NametagUtils.begin(vec3);
+            TextRenderer text = TextRenderer.get();
+            text.begin(1, false, true);
+            String speedText = String.format("%.1f m/s", speedMps);
+            double w = text.getWidth(speedText) / 2;
+            text.render(speedText, -w, 0, trajectoryStartColor.get(), true);
+            text.end();
+            NametagUtils.end();
+        }
+    }
+
+    private void lerpColor(Color out, Color a, Color b, float f) {
+        out.set(
+            (int) (a.r + (b.r - a.r) * f),
+            (int) (a.g + (b.g - a.g) * f),
+            (int) (a.b + (b.b - a.b) * f),
+            (int) (a.a + (b.a - a.a) * f)
+        );
     }
 
     private boolean itemInHand() {
