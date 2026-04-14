@@ -90,15 +90,15 @@ public class CrystalAura extends Module {
 
     private final Setting<Boolean> predictMovement = sgGeneral.add(new BoolSetting.Builder()
         .name("预测移动")
-        .description("将目标的速度向量叠加到当前位置上，预估下一 tick 的实际位置。对高速移动的目标可显著提高伤害计算精度。")
-        .defaultValue(false)
+        .description("将目标的速度向量叠加到当前位置上，预估下一 tick 的实际位置。提高对移动目标的伤害计算精度，减少无效水晶。")
+        .defaultValue(true)
         .build()
     );
 
     private final Setting<Double> minDamage = sgGeneral.add(new DoubleSetting.Builder()
         .name("最低伤害")
-        .description("水晶对目标造成的最低伤害阈值。低于此值的放置位置将被跳过。贴脸放置时此阈值会自动降至 1.5。")
-        .defaultValue(6)
+        .description("水晶对目标造成的最低伤害阈值。低于此值的放置位置将被跳过。4=更多候选位（减少空 tick），6=更精准（可能空扫描）。贴脸放置时自动降至 1.5。")
+        .defaultValue(4)
         .min(0)
         .build()
     );
@@ -249,14 +249,14 @@ public class CrystalAura extends Module {
 
     private final Setting<SupportMode> support = sgPlace.add(new EnumSetting.Builder<SupportMode>()
         .name("支撑放置")
-        .description("找不到直接基座时，在空中先放置黑曜石作为支撑方块。Disabled=关闭，Fast=仅对第一目标计算伤害，Normal=对所有目标计算。")
-        .defaultValue(SupportMode.Disabled)
+        .description("找不到直接基座时，在空中先放置黑曜石作为支撑方块。Fast=仅第一目标计算伤害（最快），Normal=所有目标。GrimAC 安全（need supportDelay≥1 避免 MultiPlace）。")
+        .defaultValue(SupportMode.Fast)
         .build()
     );
 
     private final Setting<Integer> supportDelay = sgPlace.add(new IntSetting.Builder()
         .name("支撑延迟")
-        .description("放置支撑黑曜石后等待多少 tick 再放置水晶。值=0 时同 tick 放置（发包最快但单 tick 3次切槽）；值=1 最稳定。")
+        .description("放置支撑黑曜石后等待多少 tick 再放置水晶。GrimAC MultiPlace 限 1 放置/tick：=0 同 tick 发 2 包→IMMEDIATE FLAG；≥1 安全。1=最优（cost: 1 extra tick per support cycle）。")
         .defaultValue(1)
         .min(0)
         .visible(() -> support.get() != SupportMode.Disabled)
@@ -315,8 +315,8 @@ public class CrystalAura extends Module {
 
     private final Setting<Boolean> facePlaceArmor = sgFacePlace.add(new BoolSetting.Builder()
         .name("缺少护甲触发")
-        .description("目标缺少任一护甲部件（头盔/胸甲/护腿/靴子）时自动启用贴脸放置。")
-        .defaultValue(false)
+        .description("目标缺少任一护甲部件（头盔/胸甲/护腿/靴子）时自动启用贴脸放置。缺护甲=极脆弱，降低伤害阈值到 1.5 可覆盖更多放置位置。")
+        .defaultValue(true)
         .visible(facePlace::get)
         .build()
     );
@@ -380,8 +380,8 @@ public class CrystalAura extends Module {
 
     private final Setting<Integer> breakAttempts = sgBreak.add(new IntSetting.Builder()
         .name("最大攻击次数")
-        .description("对同一颗水晶的最大攻击尝试次数。超过此数后放弃该水晶，避免对已经爆炸但未消失的水晶重复攻击。")
-        .defaultValue(2)
+        .description("对同一颗水晶的最大攻击尝试次数。GrimAC MultiInteractA 限 1 entity/tick，多次尝试浪费 tick。1=最高效（丢包后下 tick 扫描重试），高延迟服可设 2。")
+        .defaultValue(1)
         .sliderMin(1)
         .sliderMax(5)
         .build()

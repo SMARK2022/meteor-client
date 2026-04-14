@@ -68,7 +68,7 @@ public class KillAura extends Module {
 
     private final Setting<RotationMode> rotation = sgGeneral.add(new EnumSetting.Builder<RotationMode>()
         .name("rotate")
-        .description("Determines when you should rotate towards the target.")
+        .description("Determines when you should rotate towards the target. GrimAC validates attack direction — Always recommended.")
         .defaultValue(RotationMode.Always)
         .build()
     );
@@ -146,7 +146,7 @@ public class KillAura extends Module {
 
     private final Setting<Double> range = sgTargeting.add(new DoubleSetting.Builder()
         .name("range")
-        .description("The maximum range the entity can be to attack it.")
+        .description("The maximum range the entity can be to attack it. Clamped to vanilla getEntityInteractionRange() (3.0 survival). GrimAC Reach checks eye→AABB surface ≤ 3.03.")
         .defaultValue(4.5)
         .min(0)
         .sliderMax(6)
@@ -155,8 +155,8 @@ public class KillAura extends Module {
 
     private final Setting<Double> wallsRange = sgTargeting.add(new DoubleSetting.Builder()
         .name("walls-range")
-        .description("The maximum range the entity can be attacked through walls.")
-        .defaultValue(3.5)
+        .description("The maximum range the entity can be attacked through walls. GrimAC has no wall detection — set equal to range. Clamped to min(this, effectiveRange).")
+        .defaultValue(4.5)
         .min(0)
         .sliderMax(6)
         .build()
