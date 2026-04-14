@@ -128,14 +128,14 @@ public class CrystalAura extends Module {
 
     private final Setting<Boolean> rotate = sgGeneral.add(new BoolSetting.Builder()
         .name("服务端旋转")
-        .description("发送视角旋转包使服务端认为玩家朝向水晶方向。关闭后放置/破坏不发送旋转包，可能被反作弊检测。")
+        .description("发送视角旋转包使服务端认为玩家朝向水晶方向。GrimAC RotationPlace/RotationBreak 会验证看向方向，必须开启。")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<YawStepMode> yawStepMode = sgGeneral.add(new EnumSetting.Builder<YawStepMode>()
         .name("偏航步进模式")
-        .description("控制偏航步进（每 tick 限制旋转角度）的生效时机。Break=仅破坏时检查，Both=放置和破坏都检查。")
+        .description("控制偏航步进（每 tick 限制旋转角度）的生效时机。Break=仅破坏时检查，Both=放置和破坏都检查。GrimAC 不检测转头速度，可设为 Break。")
         .defaultValue(YawStepMode.Break)
         .visible(rotate::get)
         .build()
@@ -143,7 +143,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Double> yawSteps = sgGeneral.add(new DoubleSetting.Builder()
         .name("偏航步长")
-        .description("每 tick 允许的最大偏航旋转角度（度）。180°=无限制；较低值可绕过部分反作弊的转头速度检测。")
+        .description("每 tick 允许的最大偏航旋转角度（度）。GrimAC 不检测转头速度，180°=无限制最快。NCP 服可降低到 45-90。")
         .defaultValue(180)
         .range(1, 180)
         .visible(rotate::get)
@@ -162,14 +162,14 @@ public class CrystalAura extends Module {
 
     private final Setting<AutoSwitchMode> autoSwitch = sgSwitch.add(new EnumSetting.Builder<AutoSwitchMode>()
         .name("自动切换")
-        .description("发现目标时自动切换到快捷栏上的末地水晶。Normal=普通切换，Silent=服务器端静默切换，None=不自动切换。")
-        .defaultValue(AutoSwitchMode.Normal)
+        .description("发现目标时自动切换到快捷栏上的末地水晶。Normal=普通切换，Silent=服务器端静默切换（GrimAC 不检测），None=不自动切换。Silent 避免视觉切槽干扰，最高效。")
+        .defaultValue(AutoSwitchMode.Silent)
         .build()
     );
 
     private final Setting<Integer> switchDelay = sgSwitch.add(new IntSetting.Builder()
         .name("切换延迟")
-        .description("切换快捷栏槽位后等待多少 tick 再破坏水晶。用于避免部分反作弊的切槽后立即攻击检测。")
+        .description("切换快捷栏槽位后等待多少 tick 再破坏水晶。GrimAC 不检测切槽后延迟，设为 0 最快。")
         .defaultValue(0)
         .min(0)
         .build()
@@ -208,7 +208,7 @@ public class CrystalAura extends Module {
 
     public final Setting<Integer> placeDelay = sgPlace.add(new IntSetting.Builder()
         .name("放置延迟")
-        .description("上一次放置后等待多少 tick 再放置下一个水晶。值越大放置节奏越慢，低 TPS 时会自动额外加 1-2 tick。")
+        .description("上一次放置后等待多少 tick 再放置下一个水晶。GrimAC MultiPlace 限制 1 放置/tick，0=每 tick 尝试放置（已是极限）。低 TPS 自动+1~2。")
         .defaultValue(0)
         .min(0)
         .sliderMax(20)
@@ -226,7 +226,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Double> placeWallsRange = sgPlace.add(new DoubleSetting.Builder()
         .name("穿墙放置范围")
-        .description("透过墙壁放置水晶的最远距离（格）。视线被阻挡时使用此范围而非普通放置范围。")
+        .description("透过墙壁放置水晶的最远距离（格）。视线被阻挡时使用此范围而非普通放置范围。GrimAC 无壁检测，与普通范围相同即可。")
         .defaultValue(4.5)
         .min(0)
         .sliderMax(6)
@@ -235,7 +235,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Boolean> strictPlaceLOS = sgPlace.add(new BoolSetting.Builder()
         .name("严格视线检查")
-        .description("对放置面执行 OUTLINE 射线遮挡检测。关闭后仅检查距离和 NCP 方向（与 GrimAC 检测等级对齐），大幅增加可放置位置。")
+        .description("对放置面执行 OUTLINE 射线遮挡检测。GrimAC 仅检查 RotationPlace（看向方块方向），不检查中间遮挡，关闭即可。NCP 服务器建议开启。")
         .defaultValue(false)
         .build()
     );
@@ -256,7 +256,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Integer> supportDelay = sgPlace.add(new IntSetting.Builder()
         .name("支撑延迟")
-        .description("放置支撑黑曜石后等待多少 tick 再放置水晶。用于等待服务器确认方块放置。")
+        .description("放置支撑黑曜石后等待多少 tick 再放置水晶。值=0 时同 tick 放置（发包最快但单 tick 3次切槽）；值=1 最稳定。")
         .defaultValue(1)
         .min(0)
         .visible(() -> support.get() != SupportMode.Disabled)
@@ -339,7 +339,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Integer> breakDelay = sgBreak.add(new IntSetting.Builder()
         .name("破坏延迟")
-        .description("水晶放置后等待多少 tick 再尝试破坏。可用于规避部分反作弊的交互节奏检测。")
+        .description("水晶放置后等待多少 tick 再尝试破坏。GrimAC 无此限制，0=最快。但 PacketOrderI 禁止同 tick attack+place，attackedThisTick 已守护。")
         .defaultValue(0)
         .min(0)
         .sliderMax(20)
@@ -348,14 +348,14 @@ public class CrystalAura extends Module {
 
     private final Setting<Boolean> smartDelay = sgBreak.add(new BoolSetting.Builder()
         .name("智能延迟")
-        .description("仅在目标无受伤 CD（hurtTime=0）时才破坏水晶，除非爆炸能击杀目标。避免浪费水晶在目标无敌帧上。")
-        .defaultValue(false)
+        .description("仅在目标无受伤 CD（hurtTime=0）时才破坏水晶，除非爆炸能击杀目标。避免浪费水晶在目标无敌帧上，每颗水晶都能造成有效伤害。")
+        .defaultValue(true)
         .build()
     );
 
     private final Setting<Double> breakRange = sgBreak.add(new DoubleSetting.Builder()
         .name("破坏范围")
-        .description("破坏水晶的最远距离（格）。注：Grim 实体交互距离 3.0 + 水晶碰撞箱 1.0 = 有效极限 ~4.0。")
+        .description("破坏水晶的最远距离（格）。Grim Reach 检测纯距离: 眼→AABB 表面 ≤ 3.03。水晶 2×2×2 AABB → 中心距有效极限 ~4.0。")
         .defaultValue(4.0)
         .min(0)
         .sliderMax(6)
@@ -364,7 +364,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Double> breakWallsRange = sgBreak.add(new DoubleSetting.Builder()
         .name("穿墙破坏范围")
-        .description("透过墙壁破坏水晶的最远距离（格）。视线被阻挡时使用此范围。")
+        .description("透过墙壁破坏水晶的最远距离（格）。GrimAC 无壁检测，与普通范围相同即可；NCP 服务器可调低。")
         .defaultValue(4.0)
         .min(0)
         .sliderMax(6)
@@ -389,7 +389,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Integer> ticksExisted = sgBreak.add(new IntSetting.Builder()
         .name("最小存在时间")
-        .description("水晶需要存在至少多少 tick 后才能被攻击。用于避免攻击刚生成但未被服务器确认的幽灵水晶。")
+        .description("水晶需要存在至少多少 tick 后才能被攻击。GrimAC 无此限制。设 0=生成即攻击，最大化 DPS。")
         .defaultValue(0)
         .min(0)
         .build()
@@ -397,7 +397,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Integer> attackFrequency = sgBreak.add(new IntSetting.Builder()
         .name("每秒攻击上限")
-        .description("每秒允许的最大水晶攻击次数。防止因过快攻击被反作弊检测。默认 25 次/秒。")
+        .description("每秒允许的最大水晶攻击次数。GrimAC 无此限制（无 CPS 检测），但过高会加重服务器负载。")
         .defaultValue(25)
         .min(1)
         .sliderRange(1, 30)
@@ -406,7 +406,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Boolean> fastBreak = sgBreak.add(new BoolSetting.Builder()
         .name("新生即破")
-        .description("水晶实体生成后立即尝试破坏，无视破坏延迟设置。在击杀型伤害时还会无视智能延迟。")
+        .description("水晶实体生成后立即尝试破坏，无视破坏延迟设置。GrimAC 不检测攻击时机，开启可最大化 DPS。")
         .defaultValue(true)
         .build()
     );
@@ -1032,7 +1032,7 @@ public class CrystalAura extends Module {
      */
     @EventHandler
     private void onInteractItem(InteractItemEvent event) {
-        planner.clearResults();
+        planner.consumeResult(); // 废弃旧结果
         hasProposal = false;
     }
 
@@ -1246,8 +1246,9 @@ public class CrystalAura extends Module {
             return false;
         }
 
-        // 修正 1: support 候选必须通过 obsidian resolver 预验证
-        if (proposalIsSupport && resolveSupportHit(proposalPos) == null) {
+        // 修正 1: support 候选必须通过 obsidian resolver 预验证, 保存 plan 供旋转使用
+        SupportPlan supportPlan = proposalIsSupport ? resolveSupportHit(proposalPos) : null;
+        if (proposalIsSupport && supportPlan == null) {
             hasProposal = false;
             return false;
         }
@@ -1257,11 +1258,17 @@ public class CrystalAura extends Module {
 
         BlockPos supportBlock = proposalIsSupport ? proposalPos.toImmutable() : null;
 
-        ((IVec3d) vec3d).meteor$set(
-            result.getBlockPos().getX() + 0.5 + result.getSide().getVector().getX() * 0.5,
-            result.getBlockPos().getY() + 0.5 + result.getSide().getVector().getY() * 0.5,
-            result.getBlockPos().getZ() + 0.5 + result.getSide().getVector().getZ() * 0.5
-        );
+        // F8: support 时旋转目标必须朝向邻居方块放置面 (与 placeSupportSafe 发包方向一致)
+        // 非 support 时朝向水晶放置面
+        if (supportPlan != null) {
+            ((IVec3d) vec3d).meteor$set(supportPlan.hitVec().x, supportPlan.hitVec().y, supportPlan.hitVec().z);
+        } else {
+            ((IVec3d) vec3d).meteor$set(
+                result.getBlockPos().getX() + 0.5 + result.getSide().getVector().getX() * 0.5,
+                result.getBlockPos().getY() + 0.5 + result.getSide().getVector().getY() * 0.5,
+                result.getBlockPos().getZ() + 0.5 + result.getSide().getVector().getZ() * 0.5
+            );
+        }
 
         if (rotate.get()) {
             double yaw = Rotations.getYaw(vec3d);
@@ -1272,13 +1279,13 @@ public class CrystalAura extends Module {
                 Vec3d hitTarget = new Vec3d(vec3d.x, vec3d.y, vec3d.z);
                 // W2 修正: placeTimer 仅在 placeCrystal 成功时递增
                 Rotations.rotateToward(hitTarget, 50, () -> {
-                    if (placeCrystal(result, proposalDamage, supportBlock))
+                    if (placeCrystal(result, proposalDamage, supportBlock) && supportBlock == null)
                         placeTimer += getEffectivePlaceDelay();
                 });
             }
             // yawStep 阻塞时 doYawSteps 已发送步进旋转包 → 属于有效动作
         } else {
-            if (placeCrystal(result, proposalDamage, supportBlock))
+            if (placeCrystal(result, proposalDamage, supportBlock) && supportBlock == null)
                 placeTimer += getEffectivePlaceDelay();
         }
         return true;
@@ -1319,10 +1326,10 @@ public class CrystalAura extends Module {
         }
 
         // === Async 结果消费 → 仅写入 proposal（不直接放置，伤害排序基于过时快照） ===
-        CrystalPlanner.PlaceResult directRes = planner.getDirectResult();
-        CrystalPlanner.PlaceResult supportRes = planner.getSupportResult();
-        if (directRes != null || supportRes != null) {
-            planner.clearResults();
+        CrystalPlanner.ResultSet asyncRes = planner.consumeResult();
+        if (asyncRes != null) {
+            CrystalPlanner.PlaceResult directRes = asyncRes.direct();
+            CrystalPlanner.PlaceResult supportRes = asyncRes.support();
 
             CrystalPlanner.PlaceResult chosen = null;
             boolean isSup = false;
@@ -1346,7 +1353,7 @@ public class CrystalAura extends Module {
         }
 
         // Proposal 快速路径：实时重算伤害 + 实时 LOS 验证（2 次伤害计算 vs 80+）
-        if (hasProposal && proposalAge < 3) {
+        if (hasProposal && proposalAge < 6) {
             if (quickValidateProposal()) {
                 proposalAge++;
                 // W1 修正: executeProposal 成功才跳过同步扫描；失败则回落全量扫描
@@ -1424,8 +1431,6 @@ public class CrystalAura extends Module {
 
         // 放置 —— 同步扫描的全局最优结果，已 LOS 验证
         BlockIterator.after(() -> {
-            if (attackedThisTick) return;
-
             boolean isSup = false;
             BlockHitResult result;
             BlockPos pos;
@@ -1461,10 +1466,18 @@ public class CrystalAura extends Module {
 
             BlockPos supportBlock = isSup ? pos : null;
 
-            ((IVec3d) vec3d).meteor$set(
-                result.getBlockPos().getX() + 0.5 + result.getSide().getVector().getX() * 0.5,
-                result.getBlockPos().getY() + 0.5 + result.getSide().getVector().getY() * 0.5,
-                result.getBlockPos().getZ() + 0.5 + result.getSide().getVector().getZ() * 0.5);
+            // F8: support 时旋转目标必须朝向邻居方块放置面 (与 placeSupportSafe 发包方向一致)
+            SupportPlan syncSupportPlan = isSup ? resolveSupportHit(pos) : null;
+            if (isSup && syncSupportPlan == null) return; // support 放置面消失
+
+            if (syncSupportPlan != null) {
+                ((IVec3d) vec3d).meteor$set(syncSupportPlan.hitVec().x, syncSupportPlan.hitVec().y, syncSupportPlan.hitVec().z);
+            } else {
+                ((IVec3d) vec3d).meteor$set(
+                    result.getBlockPos().getX() + 0.5 + result.getSide().getVector().getX() * 0.5,
+                    result.getBlockPos().getY() + 0.5 + result.getSide().getVector().getY() * 0.5,
+                    result.getBlockPos().getZ() + 0.5 + result.getSide().getVector().getZ() * 0.5);
+            }
 
             if (rotate.get()) {
                 double yaw = Rotations.getYaw(vec3d);
@@ -1474,12 +1487,12 @@ public class CrystalAura extends Module {
                     Vec3d hitTarget = new Vec3d(vec3d.x, vec3d.y, vec3d.z);
                     // W2 修正: placeTimer 仅在 placeCrystal 成功时递增
                     Rotations.rotateToward(hitTarget, 50, () -> {
-                        if (placeCrystal(result, dmg, supportBlock))
+                        if (placeCrystal(result, dmg, supportBlock) && supportBlock == null)
                             placeTimer += getEffectivePlaceDelay();
                     });
                 }
             } else {
-                if (placeCrystal(result, dmg, supportBlock))
+                if (placeCrystal(result, dmg, supportBlock) && supportBlock == null)
                     placeTimer += getEffectivePlaceDelay();
             }
         });
@@ -1545,18 +1558,23 @@ public class CrystalAura extends Module {
         }
     }
 
+    private boolean placeCrystal(BlockHitResult result, double damage, BlockPos supportBlock) {
+        return placeCrystal(result, damage, supportBlock, -1);
+    }
+
     /**
      * 放置水晶或 support 方块。
+     * @param restoreSlot 0-tick 递归时由外层传入的原始槽位 (避免 prevSlot 污染), -1=不指定
      * @return true = 成功发包, false = 某环节失败（物品/手/support 放置等）
      */
-    private boolean placeCrystal(BlockHitResult result, double damage, BlockPos supportBlock) {
+    private boolean placeCrystal(BlockHitResult result, double damage, BlockPos supportBlock, int restoreSlot) {
         // Switch
         Item targetItem = supportBlock == null ? Items.END_CRYSTAL : Items.OBSIDIAN;
 
         FindItemResult item = InvUtils.findInHotbar(targetItem);
         if (!item.found()) return false;
 
-        int prevSlot = mc.player.getInventory().selectedSlot;
+        int prevSlot = restoreSlot >= 0 ? restoreSlot : mc.player.getInventory().selectedSlot;
 
         if (autoSwitch.get() != AutoSwitchMode.None && !item.isOffhand()) InvUtils.swap(item.slot(), false);
 
@@ -1616,7 +1634,7 @@ public class CrystalAura extends Module {
             // 这样后台线程下一轮扫描会把此位置视为有效基座
             planner.updateBlock(supportBlock.getX(), supportBlock.getY(), supportBlock.getZ(), 1200.0f);
 
-            if (supportDelay.get() == 0) return placeCrystal(result, damage, null);
+            if (supportDelay.get() == 0) return placeCrystal(result, damage, null, prevSlot);
             // support 放置成功但 delay > 0: 等待下 tick 放水晶
         }
 
@@ -1801,7 +1819,9 @@ public class CrystalAura extends Module {
                 || result.getBlockPos().getY() != baseY
                 || result.getBlockPos().getZ() != blockPos.getZ();
         } else {
-            behindWall = !result.getBlockPos().equals(blockPos);
+            // 破坏: 射线命中水晶方块或脚下基座 = 直视
+            behindWall = !result.getBlockPos().equals(blockPos)
+                && !result.getBlockPos().equals(blockPos.down());
         }
 
         double effectiveRange = behindWall ? wallsRange : range;
@@ -1913,11 +1933,7 @@ public class CrystalAura extends Module {
         renderDamage = damage;
         renderIsSupport = isSupport;
         // 持续刷新 timer 保证渲染不中断 —— 下一 tick 无候选时自然倒计时消失
-        if (renderMode.get() == RenderMode.Normal) {
-            placeRenderTimer = Math.max(placeRenderTimer, 2);
-        } else {
-            placeRenderTimer = Math.max(placeRenderTimer, 2);
-        }
+        placeRenderTimer = Math.max(placeRenderTimer, 2);
     }
 
     @EventHandler

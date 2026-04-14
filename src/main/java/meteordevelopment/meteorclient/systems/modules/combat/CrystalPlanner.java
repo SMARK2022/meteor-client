@@ -67,7 +67,9 @@ public class CrystalPlanner {
     });
 
     // ====== 结果（后台线程写入，主线程通过 volatile 读取）======
-    private volatile PlaceResult directResult, supportResult;
+    /** 组合结果 —— 后台线程原子赋值, 主线程原子消费, 消除竞态窗口 */
+    public record ResultSet(PlaceResult direct, PlaceResult support) {}
+    private volatile ResultSet latestResult;
     private volatile boolean busy;
 
     // ====== 数据结构 ======
@@ -135,11 +137,16 @@ public class CrystalPlanner {
     // ============================== 扫描提交 ==============================
 
     public boolean isBusy() { return busy; }
-    /** 获取 direct 最佳候选，可能为 null。 */
-    public PlaceResult getDirectResult() { return directResult; }
-    /** 获取 support 最佳候选，可能为 null。 */
-    public PlaceResult getSupportResult() { return supportResult; }
-    public void clearResults() { directResult = null; supportResult = null; }
+
+    /**
+     * 原子消费扫描结果 —— 读取并清空。消除独立 volatile 读+清空之间的竞态窗口。
+     * @return 最新结果, 无新结果时返回 null
+     */
+    public ResultSet consumeResult() {
+        ResultSet res = latestResult;
+        latestResult = null;
+        return res;
+    }
 
     /**
      * 提交候选位置到后台线程进行伤害评估。
@@ -206,8 +213,7 @@ public class CrystalPlanner {
             }
         }
 
-        directResult = bestDirect;
-        supportResult = bestSupport;
+        latestResult = new ResultSet(bestDirect, bestSupport);
     }
 
     // ------ 纯数学伤害计算（线程安全，不访问 mc.world）------
@@ -335,8 +341,7 @@ public class CrystalPlanner {
 
     /** 模块激活时调用，重置所有状态。 */
     public void reset() {
-        directResult = null;
-        supportResult = null;
+        latestResult = null;
         busy = false;
         snapshotReady = false;
     }
