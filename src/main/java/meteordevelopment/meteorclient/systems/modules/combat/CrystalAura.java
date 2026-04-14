@@ -107,7 +107,7 @@ public class CrystalAura extends Module {
     private final Setting<Double> maxDamage = sgGeneral.add(new DoubleSetting.Builder()
         .name("自伤上限")
         .description("水晶爆炸对自己造成的最大允许伤害。超过此值的位置不会被选中。低 TPS（<18）时自动放宽 15%。")
-        .defaultValue(6)
+        .defaultValue(8)
         .range(0, 36)
         .sliderMax(36)
         .build()
@@ -117,6 +117,25 @@ public class CrystalAura extends Module {
         .name("防自杀")
         .description("当水晶爆炸伤害大于等于自身总血量（生命+吸收）时，跳过该位置的放置和破坏。")
         .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Double> safetyMargin = sgGeneral.add(new DoubleSetting.Builder()
+        .name("安全缓冲血量")
+        .description("防自杀余量。自伤后若剩余血量低于此值则拒绝放置/破坏。2.0=一颗心，覆盖射线采样与浮点计算误差。高延迟可增至 4.0。")
+        .defaultValue(2.0)
+        .min(0.0)
+        .sliderMax(10.0)
+        .visible(antiSuicide::get)
+        .build()
+    );
+
+    private final Setting<Double> minDamageRatio = sgGeneral.add(new DoubleSetting.Builder()
+        .name("最低伤害交换率")
+        .description("每次引爆的 (对敌伤害 / 自身伤害) 最低比例。当自伤 ≥ 1.0 时生效。1.0=炸自己 6 血须至少换对面 6 血。防止无效换血、FacePlace 血亏。设为 0 禁用。")
+        .defaultValue(0.8)
+        .min(0.0)
+        .sliderMax(3.0)
         .build()
     );
 
@@ -899,10 +918,10 @@ public class CrystalAura extends Module {
         // Check damage to self and anti suicide
         // Low TPS safety margin: 15% reduction on maxDamage threshold
         blockPos.set(entity.getBlockPos()).move(0, -1, 0);
-        float selfDamage = DamageUtils.crystalDamage(mc.player, entity.getPos(), predictMovement.get(), blockPos);
+        float selfDamage = DamageUtils.crystalDamage(mc.player, entity.getPos(), false, blockPos);
         float effectiveMaxDmg = maxDamage.get().floatValue();
         if (TickRate.INSTANCE.getTickRate() < 18) effectiveMaxDmg *= 0.85f;
-        if (selfDamage > effectiveMaxDmg || (antiSuicide.get() && selfDamage >= EntityUtils.getTotalHealth(mc.player))) return 0;
+        if (selfDamage > effectiveMaxDmg || (antiSuicide.get() && selfDamage >= (EntityUtils.getTotalHealth(mc.player) - safetyMargin.get()))) return 0;
 
         // Check damage to targets and face place
         float damage = getDamageToTargets(entity.getPos(), blockPos, true, false);
@@ -910,6 +929,9 @@ public class CrystalAura extends Module {
         double minimumDamage = shouldFacePlace ? Math.min(minDamage.get(), 1.5d) : minDamage.get();
 
         if (damage < minimumDamage) return 0f;
+
+        // Damage ratio check — reject if self takes too much relative to target
+        if (minDamageRatio.get() > 0 && selfDamage >= 1.0f && damage / selfDamage < minDamageRatio.get()) return 0f;
 
         return damage;
     }
@@ -1137,7 +1159,7 @@ public class CrystalAura extends Module {
         boolean predict = predictMovement.get();
         CrystalPlanner.TargetSnap[] tSnaps = new CrystalPlanner.TargetSnap[targets.size()];
         for (int i = 0; i < targets.size(); i++) tSnaps[i] = CrystalPlanner.snapshotTarget(targets.get(i), predict);
-        CrystalPlanner.TargetSnap selfSnap = CrystalPlanner.snapshotTarget(mc.player, predict);
+        CrystalPlanner.TargetSnap selfSnap = CrystalPlanner.snapshotTarget(mc.player, false);
 
         // 3. Collect valid bases + pre-filter (range, entity overlap — all on main thread; LOS deferred to consumption)
         List<CrystalPlanner.Candidate> candidates = new ArrayList<>();
@@ -1165,9 +1187,9 @@ public class CrystalAura extends Module {
             candidates.toArray(new CrystalPlanner.Candidate[0]),
             tSnaps, selfSnap,
             new CrystalPlanner.ScanSettings(
-                maxDamage.get(), antiSuicide.get(), minDamage.get(), smartDelay.get(),
+                maxDamage.get(), antiSuicide.get(), safetyMargin.get(), minDamage.get(), smartDelay.get(),
                 shouldFacePlace(), support.get() == SupportMode.Fast, TickRate.INSTANCE.getTickRate(),
-                mc.world.getDifficulty())
+                mc.world.getDifficulty(), minDamageRatio.get())
         );
     }
 
@@ -1191,15 +1213,18 @@ public class CrystalAura extends Module {
         if (isOutOfRange(vec3d, blockPos, true)) return false;
 
         // Self-damage still safe?
-        float selfDamage = DamageUtils.crystalDamage(mc.player, vec3d, predictMovement.get(), proposalPos);
+        float selfDamage = DamageUtils.crystalDamage(mc.player, vec3d, false, proposalPos);
         float effectiveMaxDmg = maxDamage.get().floatValue();
         if (TickRate.INSTANCE.getTickRate() < 18) effectiveMaxDmg *= 0.85f;
-        if (selfDamage > effectiveMaxDmg || (antiSuicide.get() && selfDamage >= EntityUtils.getTotalHealth(mc.player))) return false;
+        if (selfDamage > effectiveMaxDmg || (antiSuicide.get() && selfDamage >= (EntityUtils.getTotalHealth(mc.player) - safetyMargin.get()))) return false;
 
         // Target damage still meets threshold?
         float damage = getDamageToTargets(vec3d, proposalPos, false, proposalIsSupport && support.get() == SupportMode.Fast);
         double minimumDamage = shouldFacePlace() ? Math.min(minDamage.get(), 1.5) : minDamage.get();
         if (damage < minimumDamage) return false;
+
+        // Damage ratio check
+        if (minDamageRatio.get() > 0 && selfDamage >= 1.0f && damage / selfDamage < minDamageRatio.get()) return false;
 
         // Entity intersection — support 时额外检查 Y 层（黑曜石放置位置）
         if (proposalIsSupport) {
@@ -1376,16 +1401,19 @@ public class CrystalAura extends Module {
             if (hit == null) return;
 
             // 自伤检测
-            float selfDamage = DamageUtils.crystalDamage(mc.player, vec3d, predictMovement.get(), bp);
+            float selfDamage = DamageUtils.crystalDamage(mc.player, vec3d, false, bp);
             float effectiveMaxDmg = maxDamage.get().floatValue();
             if (TickRate.INSTANCE.getTickRate() < 18) effectiveMaxDmg *= 0.85f;
-            if (selfDamage > effectiveMaxDmg || (antiSuicide.get() && selfDamage >= EntityUtils.getTotalHealth(mc.player))) return;
+            if (selfDamage > effectiveMaxDmg || (antiSuicide.get() && selfDamage >= (EntityUtils.getTotalHealth(mc.player) - safetyMargin.get()))) return;
 
             // 目标伤害
             float damage = getDamageToTargets(vec3d, bp, false, !hasBlock && support.get() == SupportMode.Fast);
             boolean shouldFacePlace = shouldFacePlace();
             double minimumDamage = Math.min(minDamage.get(), shouldFacePlace ? 1.5 : minDamage.get());
             if (damage < minimumDamage) return;
+
+            // Damage ratio check
+            if (minDamageRatio.get() > 0 && selfDamage >= 1.0f && damage / selfDamage < minDamageRatio.get()) return;
 
             // 碰撞检测
             double x = bp.getX();

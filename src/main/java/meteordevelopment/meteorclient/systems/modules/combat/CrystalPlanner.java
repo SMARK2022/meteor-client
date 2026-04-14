@@ -98,8 +98,8 @@ public class CrystalPlanner {
 
     /** 扫描配置快照 —— 在主线程捕获的设置值，确保后台线程读取的是一致性快照。 */
     public record ScanSettings(
-        double maxDmg, boolean antiSui, double minDmg, boolean smart,
-        boolean facePlace, boolean supportFast, float tps, Difficulty difficulty) {}
+        double maxDmg, boolean antiSui, double safetyMargin, double minDmg, boolean smart,
+        boolean facePlace, boolean supportFast, float tps, Difficulty difficulty, double damageRatio) {}
 
     // ============================== 快照管理 ==============================
 
@@ -184,24 +184,26 @@ public class CrystalPlanner {
 
             // 自伤检测
             float selfDmg = crystalDamage(snap, cx, cy, cz, self, expX, expY, expZ, cand.x, cand.y, cand.z, s.difficulty);
-            if (selfDmg > effectiveMaxDmg || (s.antiSui && selfDmg >= self.health)) continue;
+            if (selfDmg > effectiveMaxDmg || (s.antiSui && selfDmg >= (self.health - s.safetyMargin))) continue;
 
-            // 目标伤害 —— 对所有目标进行完整评估
+            // 目标伤害 —— 对所有目标进行完整评估（异步只做 place，不受 smartDelay 限制）
             double damage = 0;
             boolean useFast = !cand.hasBlock && s.supportFast;
             if (useFast && targets.length > 0) {
                 float dmg = crystalDamage(snap, cx, cy, cz, targets[0], expX, expY, expZ, cand.x, cand.y, cand.z, s.difficulty);
-                if (!s.smart || targets[0].hurtTime <= 0 || dmg >= targets[0].health) damage = dmg;
+                damage = dmg;
             } else {
                 for (TargetSnap t : targets) {
                     float dmg = crystalDamage(snap, cx, cy, cz, t, expX, expY, expZ, cand.x, cand.y, cand.z, s.difficulty);
-                    if (s.smart && t.hurtTime > 0 && dmg < t.health) continue;
                     damage = Math.max(damage, dmg);
                 }
             }
 
             double minDamage = s.facePlace ? Math.min(s.minDmg, 1.5) : s.minDmg;
             if (damage < minDamage) continue;
+
+            // Damage ratio check
+            if (s.damageRatio > 0 && selfDmg >= 1.0f && damage / selfDmg < s.damageRatio) continue;
 
             PlaceResult pr = new PlaceResult(cand.x, cand.y, cand.z, damage);
 
