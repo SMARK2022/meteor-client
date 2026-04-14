@@ -18,6 +18,7 @@ import meteordevelopment.meteorclient.events.world.BlockUpdateEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.mixininterface.IBox;
 import meteordevelopment.meteorclient.mixininterface.IMiningToolItem;
+import meteordevelopment.meteorclient.mixininterface.IPlayerInteractEntityC2SPacket;
 import meteordevelopment.meteorclient.mixininterface.IRaycastContext;
 import meteordevelopment.meteorclient.mixininterface.IVec3d;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
@@ -348,7 +349,7 @@ public class CrystalAura extends Module {
 
     private final Setting<Boolean> smartDelay = sgBreak.add(new BoolSetting.Builder()
         .name("智能延迟")
-        .description("仅在目标无受伤 CD（hurtTime=0）时才破坏水晶，除非爆炸能击杀目标。避免浪费水晶在目标无敌帧上，每颗水晶都能造成有效伤害。")
+        .description("仅在目标无受伤 CD（hurtTime=0）时才破坏水晶。严格遵守无敌帧——因为客户端无法获取 lastDamageTaken，在 hurtTime 期间攻击大概率被服务端豁免或只造成极低差值伤害。等 hurtTime 自然过期（~10 tick）后攻击，确保每颗水晶全额命中。")
         .defaultValue(true)
         .build()
     );
@@ -820,10 +821,6 @@ public class CrystalAura extends Module {
         // Respects switchTimer for anti-cheat packet ordering
         if (fastBreak.get() && !attackedThisTick && switchTimer <= 0 && attacks < attackFrequency.get()) {
             float damage = getBreakDamage(event.entity, !isOwnCrystal);
-            // 致命覆盖：新生水晶若能击杀目标，无视 smartDelay 限制
-            if (damage <= 0 && smartDelay.get()) {
-                damage = getBreakDamageLethalOverride(event.entity, !isOwnCrystal);
-            }
             if (damage > 0) doBreak(event.entity);
         }
     }
@@ -891,7 +888,7 @@ public class CrystalAura extends Module {
         if (removed.contains(entity.getId())) return 0;
 
         // Check attempted breaks
-        if (attemptedBreaks.get(entity.getId()) > breakAttempts.get()) return 0;
+        if (attemptedBreaks.get(entity.getId()) >= breakAttempts.get()) return 0;
 
         // Check crystal age
         if (checkCrystalAge && entity.age < ticksExisted.get()) return 0;
@@ -915,33 +912,6 @@ public class CrystalAura extends Module {
         if (damage < minimumDamage) return 0f;
 
         return damage;
-    }
-
-    /**
-     * 致命覆盖版 getBreakDamage —— 仅在新生窗口使用。
-     * 忽略 smartDelay（hurtTime）限制，但仅当伤害能击杀任一目标时才返回非零值。
-     * 其余检查（age、range、self-damage、anti-suicide）与标准版一致。
-     */
-    private float getBreakDamageLethalOverride(Entity entity, boolean checkCrystalAge) {
-        if (!(entity instanceof EndCrystalEntity)) return 0;
-        if (onlyBreakOwn.get() && !placedCrystals.contains(entity.getId())) return 0;
-        if (removed.contains(entity.getId())) return 0;
-        if (attemptedBreaks.get(entity.getId()) > breakAttempts.get()) return 0;
-        if (checkCrystalAge && entity.age < ticksExisted.get()) return 0;
-        if (isOutOfRange(entity.getPos(), entity.getBlockPos(), false)) return 0;
-
-        blockPos.set(entity.getBlockPos()).move(0, -1, 0);
-        float selfDamage = DamageUtils.crystalDamage(mc.player, entity.getPos(), predictMovement.get(), blockPos);
-        float effectiveMaxDmg = maxDamage.get().floatValue();
-        if (TickRate.INSTANCE.getTickRate() < 18) effectiveMaxDmg *= 0.85f;
-        if (selfDamage > effectiveMaxDmg || (antiSuicide.get() && selfDamage >= EntityUtils.getTotalHealth(mc.player))) return 0;
-
-        // 仅检查致命伤害（无视 hurtTime）
-        for (LivingEntity target : targets) {
-            float dmg = DamageUtils.crystalDamage(target, entity.getPos(), predictMovement.get(), blockPos);
-            if (dmg >= EntityUtils.getTotalHealth(target)) return dmg;
-        }
-        return 0;
     }
 
     private void doBreak(Entity crystal) {
@@ -1007,14 +977,13 @@ public class CrystalAura extends Module {
     }
 
     private void attackCrystal(Entity entity) {
-        // Attack
-        mc.player.networkHandler.sendPacket(PlayerInteractEntityC2SPacket.attack(entity, mc.player.isSneaking()));
-
         Hand hand = InvUtils.findInHotbar(Items.END_CRYSTAL).getHand();
         if (hand == null) hand = Hand.MAIN_HAND;
 
-        if (swingMode.get().client()) mc.player.swingHand(hand);
+        // MC 1.9+ 原版顺序: ANIMATION → ATTACK (GrimAC PacketOrderB 检查此顺序)
         if (swingMode.get().packet()) mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(hand));
+        mc.player.networkHandler.sendPacket(PlayerInteractEntityC2SPacket.attack(entity, mc.player.isSneaking()));
+        if (swingMode.get().client()) mc.player.swingHand(hand);
 
         attacks++;
     }
@@ -1023,6 +992,12 @@ public class CrystalAura extends Module {
     private void onPacketSend(PacketEvent.Send event) {
         if (event.packet instanceof UpdateSelectedSlotC2SPacket) {
             switchTimer = switchDelay.get();
+        }
+        // 拦截手动攻击包: 标记 attackedThisTick 防止同 tick 内 CA 再发 place 包
+        // (PacketOrderJ: 同 tick attack+place = FLAG)
+        if (event.packet instanceof IPlayerInteractEntityC2SPacket pkt
+            && pkt.meteor$getType() == PlayerInteractEntityC2SPacket.InteractType.ATTACK) {
+            attackedThisTick = true;
         }
     }
 
@@ -1226,7 +1201,13 @@ public class CrystalAura extends Module {
         double minimumDamage = shouldFacePlace() ? Math.min(minDamage.get(), 1.5) : minDamage.get();
         if (damage < minimumDamage) return false;
 
-        // Entity intersection?
+        // Entity intersection — support 时额外检查 Y 层（黑曜石放置位置）
+        if (proposalIsSupport) {
+            double sx = proposalPos.getX(), sy = proposalPos.getY(), sz = proposalPos.getZ();
+            ((IBox) box).meteor$set(sx, sy, sz, sx + 1, sy + 1, sz + 1);
+            if (intersectsWithEntities(box)) return false;
+        }
+
         double x = proposalPos.getX(), y = proposalPos.getY() + 1, z = proposalPos.getZ();
         ((IBox) box).meteor$set(x, y, z, x + 1, y + (placement112.get() ? 1 : 2), z + 1);
         if (intersectsWithEntities(box)) return false;
@@ -1279,6 +1260,7 @@ public class CrystalAura extends Module {
                 Vec3d hitTarget = new Vec3d(vec3d.x, vec3d.y, vec3d.z);
                 // W2 修正: placeTimer 仅在 placeCrystal 成功时递增
                 Rotations.rotateToward(hitTarget, 50, () -> {
+                    if (!hasProposal) return; // proposal 已被后续 tick 失效
                     if (placeCrystal(result, proposalDamage, supportBlock) && supportBlock == null)
                         placeTimer += getEffectivePlaceDelay();
                 });
@@ -1584,7 +1566,8 @@ public class CrystalAura extends Module {
         // Place
         if (supportBlock == null) {
             // Place crystal
-            mc.player.networkHandler.sendPacket(new PlayerInteractBlockC2SPacket(hand, result, 0));
+            int seq = mc.world.getPendingUpdateManager().incrementSequence().getSequence();
+            mc.player.networkHandler.sendPacket(new PlayerInteractBlockC2SPacket(hand, result, seq));
 
             if (swingMode.get().client()) mc.player.swingHand(hand);
             if (swingMode.get().packet()) mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(hand));
@@ -1672,7 +1655,8 @@ public class CrystalAura extends Module {
         // 直接发包 —— 此方法在 Rotations callback 内调用（Post 阶段），
         // 嵌套 Rotations.rotate() 会被 defer 到下一 tick，导致方块包先于旋转包。
         // NCP/LOS 验证已由 ResolverRegistry.resolve 完成，hitVec 合法即可。
-        mc.player.networkHandler.sendPacket(new PlayerInteractBlockC2SPacket(hand, hitResult, 0));
+        int seq = mc.world.getPendingUpdateManager().incrementSequence().getSequence();
+        mc.player.networkHandler.sendPacket(new PlayerInteractBlockC2SPacket(hand, hitResult, seq));
         if (swingMode.get().client()) mc.player.swingHand(hand);
         if (swingMode.get().packet()) mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(hand));
 
@@ -1813,11 +1797,13 @@ public class CrystalAura extends Module {
         if (result.getType() == net.minecraft.util.hit.HitResult.Type.MISS) {
             behindWall = false; // 无遮挡 (对 support 空气位尤其重要)
         } else if (place) {
-            // 射线命中基座方块 = 直视 (基座在水晶中心正下方)
+            // 射线命中基座方块或其下方同列方块 = 直视
+            // support 位基座是空气, 射线穿透后打到地板仍算直视 (同 X/Z 列, Y <= baseY)
             int baseY = blockPos.getY() - 1;
-            behindWall = result.getBlockPos().getX() != blockPos.getX()
-                || result.getBlockPos().getY() != baseY
-                || result.getBlockPos().getZ() != blockPos.getZ();
+            BlockPos hitPos = result.getBlockPos();
+            behindWall = hitPos.getX() != blockPos.getX()
+                || hitPos.getZ() != blockPos.getZ()
+                || hitPos.getY() > baseY;
         } else {
             // 破坏: 射线命中水晶方块或脚下基座 = 直视
             behindWall = !result.getBlockPos().equals(blockPos)
@@ -1851,8 +1837,8 @@ public class CrystalAura extends Module {
             LivingEntity target = getNearestTarget();
             if (target != null) {
                 float dmg = DamageUtils.crystalDamage(target, vec3d, predictMovement.get(), obsidianPos);
-                // Smart delay lethal override: break even with hurtTime if damage would kill
-                if (!breaking || !smartDelay.get() || target.hurtTime <= 0 || dmg >= EntityUtils.getTotalHealth(target)) {
+                // smartDelay: hurtTime > 0 时严格跳过 (客户端不知 lastDamageTaken, 不做致死赌博)
+                if (!breaking || !smartDelay.get() || target.hurtTime <= 0) {
                     damage = dmg;
                 }
             }
@@ -1861,8 +1847,8 @@ public class CrystalAura extends Module {
             for (LivingEntity target : targets) {
                 float dmg = DamageUtils.crystalDamage(target, vec3d, predictMovement.get(), obsidianPos);
 
-                // Smart delay lethal override: skip hurtTime targets UNLESS this would kill them
-                if (breaking && smartDelay.get() && target.hurtTime > 0 && dmg < EntityUtils.getTotalHealth(target)) continue;
+                // smartDelay: hurtTime > 0 时严格跳过 (客户端不知 lastDamageTaken, 不做致死赌博)
+                if (breaking && smartDelay.get() && target.hurtTime > 0) continue;
 
                 // Update best target
                 if (dmg > bestTargetDamage) {

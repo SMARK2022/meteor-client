@@ -24,6 +24,7 @@ import net.minecraft.world.Difficulty;
 import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 异步水晶放置扫描器。
@@ -66,10 +67,10 @@ public class CrystalPlanner {
         return t;
     });
 
-    // ====== 结果（后台线程写入，主线程通过 volatile 读取）======
-    /** 组合结果 —— 后台线程原子赋值, 主线程原子消费, 消除竞态窗口 */
+    // ====== 结果（后台线程写入，主线程原子消费）======
+    /** 组合结果 —— AtomicReference 保证读取+清空的原子性 */
     public record ResultSet(PlaceResult direct, PlaceResult support) {}
-    private volatile ResultSet latestResult;
+    private final AtomicReference<ResultSet> latestResult = new AtomicReference<>();
     private volatile boolean busy;
 
     // ====== 数据结构 ======
@@ -139,13 +140,11 @@ public class CrystalPlanner {
     public boolean isBusy() { return busy; }
 
     /**
-     * 原子消费扫描结果 —— 读取并清空。消除独立 volatile 读+清空之间的竞态窗口。
+     * 原子消费扫描结果 —— 读取并清空。AtomicReference.getAndSet 保证无竞态窗口。
      * @return 最新结果, 无新结果时返回 null
      */
     public ResultSet consumeResult() {
-        ResultSet res = latestResult;
-        latestResult = null;
-        return res;
+        return latestResult.getAndSet(null);
     }
 
     /**
@@ -213,7 +212,7 @@ public class CrystalPlanner {
             }
         }
 
-        latestResult = new ResultSet(bestDirect, bestSupport);
+        latestResult.set(new ResultSet(bestDirect, bestSupport));
     }
 
     // ------ 纯数学伤害计算（线程安全，不访问 mc.world）------
@@ -341,7 +340,7 @@ public class CrystalPlanner {
 
     /** 模块激活时调用，重置所有状态。 */
     public void reset() {
-        latestResult = null;
+        latestResult.set(null);
         busy = false;
         snapshotReady = false;
     }
