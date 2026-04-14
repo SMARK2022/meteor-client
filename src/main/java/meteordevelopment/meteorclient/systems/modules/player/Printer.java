@@ -1000,12 +1000,16 @@ public class Printer extends Module {
         ActionPlan.Interaction inter = plan.interaction();
         Vec3d currentEye = mc.player.getEyePos();
 
-        // 1. 通用几何验证：Reach
-        if (currentEye.distanceTo(inter.hitVec()) > placeRange.get() + 0.1) return false;
+        // 1. 通用几何验证：Reach (对齐 GrimAC FarPlace: 眼→AABB 最近点距离)
+        BlockPos ip = inter.interactPos();
+        double dx = Math.max(ip.getX() - currentEye.x, Math.max(0, currentEye.x - (ip.getX() + 1)));
+        double dy = Math.max(ip.getY() - currentEye.y, Math.max(0, currentEye.y - (ip.getY() + 1)));
+        double dz = Math.max(ip.getZ() - currentEye.z, Math.max(0, currentEye.z - (ip.getZ() + 1)));
+        if (dx * dx + dy * dy + dz * dz > placeRange.get() * placeRange.get()) return false;
 
         // 2. 通用几何验证：NCP + LOS (STRICT mode)
         if (placeMode.get() == PlaceMode.STRICT) {
-            if (!BlockUtilHelper.getPlaceDirectionsNCP(currentEye, inter.hitVec())
+            if (!BlockUtilHelper.getPlaceDirectionsNCP(currentEye, inter.interactPos())
                     .contains(inter.clickedFace())) {
                 return false;
             }

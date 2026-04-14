@@ -170,30 +170,31 @@ public class BlockUtilHelper {
     // ==================== 工具方法 ====================
 
     /**
-     * 获取NCP风格的放置方向（基于视点相对位置）
-     * 限制玩家只能从特定方向放置方块
+     * 获取合法的放置面方向 —— 对齐 GrimAC PositionPlace 语义。
+     *
+     * GrimAC 判定: 眼睛必须在被点击面的正确一侧（使用方块 AABB 边界）。
+     * 如果眼睛在方块 AABB 内部，所有面都合法（与 GrimAC 的 isIntersected 豁免一致）。
+     *
+     * @param eyePos      玩家眼睛位置
+     * @param interactPos 被点击方块的位置（用其 AABB 边界判断）
      */
-    public static Set<Direction> getPlaceDirectionsNCP(Vec3d eyePos, Vec3d blockCenter) {
-        double dx = eyePos.x - blockCenter.x;
-        double dy = eyePos.y - blockCenter.y;
-        double dz = eyePos.z - blockCenter.z;
+    public static Set<Direction> getPlaceDirectionsNCP(Vec3d eyePos, BlockPos interactPos) {
+        double bx = interactPos.getX(), by = interactPos.getY(), bz = interactPos.getZ();
 
         Set<Direction> dirs = new HashSet<>(6);
 
-        // Y轴
-        if (dy > 0.5) dirs.add(Direction.UP);
-        else if (dy < -0.5) dirs.add(Direction.DOWN);
-        else { dirs.add(Direction.UP); dirs.add(Direction.DOWN); }
+        // 眼睛在方块面的正确一侧才允许点击该面 (满方块 AABB = [bx, bx+1] × [by, by+1] × [bz, bz+1])
+        if (eyePos.y >= by + 1) dirs.add(Direction.UP);
+        if (eyePos.y <= by)     dirs.add(Direction.DOWN);
+        if (eyePos.x >= bx + 1) dirs.add(Direction.EAST);
+        if (eyePos.x <= bx)     dirs.add(Direction.WEST);
+        if (eyePos.z >= bz + 1) dirs.add(Direction.SOUTH);
+        if (eyePos.z <= bz)     dirs.add(Direction.NORTH);
 
-        // X轴
-        if (dx > 0.5) dirs.add(Direction.EAST);
-        else if (dx < -0.5) dirs.add(Direction.WEST);
-        else { dirs.add(Direction.EAST); dirs.add(Direction.WEST); }
-
-        // Z轴
-        if (dz > 0.5) dirs.add(Direction.SOUTH);
-        else if (dz < -0.5) dirs.add(Direction.NORTH);
-        else { dirs.add(Direction.SOUTH); dirs.add(Direction.NORTH); }
+        // 眼睛在方块内部 → 所有面都合法 (GrimAC: eyePositions.isIntersected(combined) → exempt)
+        if (dirs.isEmpty()) {
+            for (Direction d : Direction.values()) dirs.add(d);
+        }
 
         return dirs;
     }
@@ -412,12 +413,16 @@ public class BlockUtilHelper {
         boolean strict, boolean checkLos, double maxReach,
         BlockPos placementTargetPos
     ) {
-        // 距离检查
-        if (eyePos.distanceTo(hitVec) > maxReach + 0.1) return false;
+        // 距离检查 —— 对齐 GrimAC FarPlace: 眼→方块 AABB 最近表面点距离
+        double bx = interactPos.getX(), by = interactPos.getY(), bz = interactPos.getZ();
+        double dx = Math.max(bx - eyePos.x, Math.max(0, eyePos.x - (bx + 1)));
+        double dy = Math.max(by - eyePos.y, Math.max(0, eyePos.y - (by + 1)));
+        double dz = Math.max(bz - eyePos.z, Math.max(0, eyePos.z - (bz + 1)));
+        if (dx * dx + dy * dy + dz * dz > maxReach * maxReach) return false;
 
         // NCP 方向检查
         if (strict) {
-            Set<Direction> validDirs = getPlaceDirectionsNCP(eyePos, hitVec);
+            Set<Direction> validDirs = getPlaceDirectionsNCP(eyePos, interactPos);
             if (!validDirs.contains(face)) return false;
         }
 

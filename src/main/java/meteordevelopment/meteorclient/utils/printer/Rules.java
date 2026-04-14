@@ -334,9 +334,8 @@ public final class Rules {
     public static final CandidateFilter NCP_STRICT = (ctx, opt) -> {
         if (!ctx.strict()) return true; // 非严格模式，全部通过
 
-        // 如果 hitVec 已经计算过，使用精确坐标；否则回退到方块中心
-        Vec3d targetPos = (opt.hitVec() != null) ? opt.hitVec() : ctx.targetCenter();
-        Set<Direction> validDirs = BlockUtilHelper.getPlaceDirectionsNCP(ctx.eyePos(), targetPos);
+        BlockPos interactPos = opt.getInteractPos(ctx.targetPos());
+        Set<Direction> validDirs = BlockUtilHelper.getPlaceDirectionsNCP(ctx.eyePos(), interactPos);
         // 我们要点击的是 opt.getClickedFace() 面
         return validDirs.contains(opt.getClickedFace());
     };

@@ -1512,6 +1512,9 @@ public class CrystalAura extends Module {
      * 安全解析水晶放置的 HitResult —— NCP 方向检查 + LOS 视线检查 + 距离检查。
      * 优先尝试 UP（最常用的基座顶面），然后其余方向。
      *
+     * hitVec 使用眼到面的最近点（clamped 到面边界内 [0.01, 0.99]），
+     * 而非面死中心，以最小化旋转角度和到面距离。
+     *
      * @return 验证通过的 BlockHitResult，不可放置时返回 null
      */
     private BlockHitResult resolveCrystalHit(BlockPos blockPos) {
@@ -1521,12 +1524,18 @@ public class CrystalAura extends Module {
         // 优先序：UP（最常见的水晶放置面）→ 其余
         Direction[] tryOrder = { Direction.UP, Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST, Direction.DOWN };
 
+        double bx = blockPos.getX(), by = blockPos.getY(), bz = blockPos.getZ();
+
         for (Direction face : tryOrder) {
-            Vec3d hitVec = new Vec3d(
-                blockPos.getX() + 0.5 + face.getVector().getX() * 0.5,
-                blockPos.getY() + 0.5 + face.getVector().getY() * 0.5,
-                blockPos.getZ() + 0.5 + face.getVector().getZ() * 0.5
-            );
+            // 眼投影到面上的最近点，clamped 到面边界内 (避免 FabricatedPlace [0,1] 边界判定)
+            Vec3d hitVec = switch (face) {
+                case UP    -> new Vec3d(MathHelper.clamp(eyePos.x, bx + 0.01, bx + 0.99), by + 1.0,  MathHelper.clamp(eyePos.z, bz + 0.01, bz + 0.99));
+                case DOWN  -> new Vec3d(MathHelper.clamp(eyePos.x, bx + 0.01, bx + 0.99), by,        MathHelper.clamp(eyePos.z, bz + 0.01, bz + 0.99));
+                case NORTH -> new Vec3d(MathHelper.clamp(eyePos.x, bx + 0.01, bx + 0.99), MathHelper.clamp(eyePos.y, by + 0.01, by + 0.99), bz);
+                case SOUTH -> new Vec3d(MathHelper.clamp(eyePos.x, bx + 0.01, bx + 0.99), MathHelper.clamp(eyePos.y, by + 0.01, by + 0.99), bz + 1.0);
+                case EAST  -> new Vec3d(bx + 1.0,  MathHelper.clamp(eyePos.y, by + 0.01, by + 0.99), MathHelper.clamp(eyePos.z, bz + 0.01, bz + 0.99));
+                case WEST  -> new Vec3d(bx,        MathHelper.clamp(eyePos.y, by + 0.01, by + 0.99), MathHelper.clamp(eyePos.z, bz + 0.01, bz + 0.99));
+            };
 
             if (BlockUtilHelper.isPointValid(hitVec, face, blockPos, eyePos, mc.world, mc.player,
                 true, strictPlaceLOS.get(), reach, null)) {
