@@ -8,7 +8,6 @@ package meteordevelopment.meteorclient.systems.modules.combat;
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
-import meteordevelopment.meteorclient.mixin.DirectionAccessor;
 import meteordevelopment.meteorclient.mixin.WorldRendererAccessor;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
@@ -256,7 +255,7 @@ public class Surround extends Module {
         // Below
         if (renderBelow.get()) draw(playerPos.down(), event, 0);
 
-        for (Direction direction : DirectionAccessor.meteor$getHorizontal()) {
+        for (Direction direction : Direction.HORIZONTAL) {
             BlockPos renderPos = playerPos.offset(direction);
 
             // Regular surround positions
@@ -331,7 +330,7 @@ public class Surround extends Module {
         BlockPos playerPos = mc.player.getBlockPos();
 
         // Placing feet blocks
-        for (Direction direction : DirectionAccessor.meteor$getHorizontal()) {
+        for (Direction direction : Direction.HORIZONTAL) {
             BlockPos placePos = playerPos.offset(direction);
 
             // Place support blocks if air place is disabled
@@ -348,7 +347,7 @@ public class Surround extends Module {
 
         // Placing head blocks
         if (doubleHeight.get() && complete) {
-            for (Direction direction : DirectionAccessor.meteor$getHorizontal()) {
+            for (Direction direction : Direction.HORIZONTAL) {
                 BlockPos placePos = playerPos.offset(direction).up();
                 if (place(placePos, block) && ++placedCount >= blocksPerTick.get()) break;
 

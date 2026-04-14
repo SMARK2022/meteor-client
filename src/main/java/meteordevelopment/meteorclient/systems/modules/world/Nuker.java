@@ -367,23 +367,23 @@ public class Nuker extends Module {
             // I messed with it
             Direction direction = mc.player.getHorizontalFacing();
             switch (direction) {
-                case Direction.SOUTH -> {
+                case SOUTH -> {
                     pZ_ += 1;
                     pX_ += 1;
                     pos1.set(pX_ - (range_right.get() + 1), Math.ceil(pY) - range_down.get(), pZ_ - (range_back.get() + 1)); // down
                     pos2.set(pX_ + range_left.get(), Math.ceil(pY + range_up.get() + 1), pZ_ + range_forward.get()); // up
                 }
-                case Direction.WEST -> {
+                case WEST -> {
                     pos1.set(pX_ - range_forward.get(), Math.ceil(pY) - range_down.get(), pZ_ - range_right.get()); // down
                     pos2.set(pX_ + range_back.get() + 1, Math.ceil(pY + range_up.get() + 1), pZ_ + range_left.get() + 1); // up
                 }
-                case Direction.NORTH -> {
+                case NORTH -> {
                     pX_ += 1;
                     pZ_ += 1;
                     pos1.set(pX_ - (range_left.get() + 1), Math.ceil(pY) - range_down.get(), pZ_ - (range_forward.get() + 1)); // down
                     pos2.set(pX_ + range_right.get(), Math.ceil(pY + range_up.get() + 1), pZ_ + range_back.get()); // up
                 }
-                case Direction.EAST -> {
+                case EAST -> {
                     pX_ += 1;
                     pos1.set(pX_ - (range_back.get() + 1), Math.ceil(pY) - range_down.get(), pZ_ - range_left.get()); // down
                     pos2.set(pX_ + range_forward.get(), Math.ceil(pY + range_up.get() + 1), pZ_ + range_right.get() + 1); // up
@@ -501,12 +501,12 @@ public class Nuker extends Module {
             interacted.add(blockPos);
         } else if (packetMine.get()) {
             // Packet mine mode
-            mc.interactionManager.sendSequencedPacket(mc.world, (sequence) -> new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, blockPos, BlockUtils.getDirection(blockPos), sequence));
+            mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, blockPos, BlockUtils.getDirection(blockPos), 0));
 
             if (swing.get()) mc.player.swingHand(Hand.MAIN_HAND);
             else mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(Hand.MAIN_HAND));
 
-            mc.interactionManager.sendSequencedPacket(mc.world, (sequence) -> new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, blockPos, BlockUtils.getDirection(blockPos), sequence));
+            mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, blockPos, BlockUtils.getDirection(blockPos), 0));
         } else {
             // Legit mine mode
             BlockUtils.breakBlock(blockPos, swing.get());

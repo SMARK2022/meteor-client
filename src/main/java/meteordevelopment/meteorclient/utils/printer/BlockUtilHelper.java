@@ -1,11 +1,8 @@
 package meteordevelopment.meteorclient.utils.printer;
 
 import net.minecraft.block.*;
-import net.minecraft.block.enums.BlockHalf;
-import net.minecraft.block.enums.SlabType;
 import net.minecraft.entity.player.PlayerEntity;
 import net.minecraft.registry.Registries;
-import net.minecraft.state.property.Properties;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.hit.BlockHitResult;
@@ -173,30 +170,31 @@ public class BlockUtilHelper {
     // ==================== 工具方法 ====================
 
     /**
-     * 获取NCP风格的放置方向（基于视点相对位置）
-     * 限制玩家只能从特定方向放置方块
+     * 获取合法的放置面方向 —— 对齐 GrimAC PositionPlace 语义。
+     *
+     * GrimAC 判定: 眼睛必须在被点击面的正确一侧（使用方块 AABB 边界）。
+     * 如果眼睛在方块 AABB 内部，所有面都合法（与 GrimAC 的 isIntersected 豁免一致）。
+     *
+     * @param eyePos      玩家眼睛位置
+     * @param interactPos 被点击方块的位置（用其 AABB 边界判断）
      */
-    public static Set<Direction> getPlaceDirectionsNCP(Vec3d eyePos, Vec3d blockCenter) {
-        double dx = eyePos.x - blockCenter.x;
-        double dy = eyePos.y - blockCenter.y;
-        double dz = eyePos.z - blockCenter.z;
+    public static Set<Direction> getPlaceDirectionsNCP(Vec3d eyePos, BlockPos interactPos) {
+        double bx = interactPos.getX(), by = interactPos.getY(), bz = interactPos.getZ();
 
         Set<Direction> dirs = new HashSet<>(6);
 
-        // Y轴
-        if (dy > 0.5) dirs.add(Direction.UP);
-        else if (dy < -0.5) dirs.add(Direction.DOWN);
-        else { dirs.add(Direction.UP); dirs.add(Direction.DOWN); }
+        // 眼睛在方块面的正确一侧才允许点击该面 (满方块 AABB = [bx, bx+1] × [by, by+1] × [bz, bz+1])
+        if (eyePos.y >= by + 1) dirs.add(Direction.UP);
+        if (eyePos.y <= by)     dirs.add(Direction.DOWN);
+        if (eyePos.x >= bx + 1) dirs.add(Direction.EAST);
+        if (eyePos.x <= bx)     dirs.add(Direction.WEST);
+        if (eyePos.z >= bz + 1) dirs.add(Direction.SOUTH);
+        if (eyePos.z <= bz)     dirs.add(Direction.NORTH);
 
-        // X轴
-        if (dx > 0.5) dirs.add(Direction.EAST);
-        else if (dx < -0.5) dirs.add(Direction.WEST);
-        else { dirs.add(Direction.EAST); dirs.add(Direction.WEST); }
-
-        // Z轴
-        if (dz > 0.5) dirs.add(Direction.SOUTH);
-        else if (dz < -0.5) dirs.add(Direction.NORTH);
-        else { dirs.add(Direction.SOUTH); dirs.add(Direction.NORTH); }
+        // 眼睛在方块内部 → 所有面都合法 (GrimAC: eyePositions.isIntersected(combined) → exempt)
+        if (dirs.isEmpty()) {
+            for (Direction d : Direction.values()) dirs.add(d);
+        }
 
         return dirs;
     }
@@ -313,14 +311,13 @@ public class BlockUtilHelper {
                                            BlockPos placementTargetPos) {
         if (targetPoint == null || world == null || player == null) return false;
 
-        // 关键：向被点击方块内部轻微缩进，避免"刚好在面上"导致 MISS
-        final double EPS = 1.0e-3;
+        // 直接信任 targetPoint 作为精确的面点。
+        // 为了确保射线引擎能完整穿透到目标面（避免浮点边界 MISS），
+        // 沿眼睐→目标方向将射线终点延伸微量。
         Vec3d start = player.getEyePos();
-        Vec3d end = targetPoint.add(
-            -face.getOffsetX() * EPS,
-            -face.getOffsetY() * EPS,
-            -face.getOffsetZ() * EPS
-        );
+        Vec3d rayDir = targetPoint.subtract(start);
+        double len = rayDir.length();
+        Vec3d end = len > 0 ? targetPoint.add(rayDir.multiply(0.01 / len)) : targetPoint;
 
         // 使用 BlockView.raycast 自定义逐方块射线检测：
         // - 对每个经过的 BlockPos 查询 outline shape
@@ -385,6 +382,92 @@ public class BlockUtilHelper {
         if (state.isAir()) return true;
         if (state.getBlock() instanceof FluidBlock) return true;
         return state.isReplaceable();
+    }
+
+    // ==================== 点击点可行性验证 ====================
+
+    /**
+     * 验证点击点是否满足 reach / NCP / LOS 约束。
+     *
+     * 此方法统一了 InteractionPlanner（自身交互）和 HitVecCalculator（放置交互）
+     * 中相同的三重检查逻辑：
+     * 1. 距离检查：眼睛到点击点的距离不超过最大交互距离
+     * 2. NCP 方向检查（strict 模式）：反作弊方向验证
+     * 3. LOS 视线检查：射线检测目标面上的目标点是否可见
+     *
+     * @param hitVec           点击坐标
+     * @param face             点击面
+     * @param interactPos      要交互的方块位置
+     * @param eyePos           玩家眼睛位置
+     * @param world            游戏世界
+     * @param player           玩家实体
+     * @param strict           是否启用 NCP 方向检查
+     * @param checkLos         是否检查视线
+     * @param maxReach         最大交互距离
+     * @param placementTargetPos 放置目标位置（LOS 豁免 replaceable 方块），自身交互传 null
+     * @return 是否所有约束都满足
+     */
+    public static boolean isPointValid(
+        Vec3d hitVec, Direction face, BlockPos interactPos,
+        Vec3d eyePos, World world, PlayerEntity player,
+        boolean strict, boolean checkLos, double maxReach,
+        BlockPos placementTargetPos
+    ) {
+        // 距离检查 —— 对齐 GrimAC FarPlace: 眼→方块 AABB 最近表面点距离
+        double bx = interactPos.getX(), by = interactPos.getY(), bz = interactPos.getZ();
+        double dx = Math.max(bx - eyePos.x, Math.max(0, eyePos.x - (bx + 1)));
+        double dy = Math.max(by - eyePos.y, Math.max(0, eyePos.y - (by + 1)));
+        double dz = Math.max(bz - eyePos.z, Math.max(0, eyePos.z - (bz + 1)));
+        if (dx * dx + dy * dy + dz * dz > maxReach * maxReach) return false;
+
+        // NCP 方向检查
+        if (strict) {
+            Set<Direction> validDirs = getPlaceDirectionsNCP(eyePos, interactPos);
+            if (!validDirs.contains(face)) return false;
+        }
+
+        // 视线检查
+        if (checkLos && !canSeeFacePoint(interactPos, face, hitVec, world, player, placementTargetPos)) {
+            return false;
+        }
+
+        return true;
+    }
+
+    // ==================== 属性比较工具 ====================
+
+    /**
+     * 比较 PrinterTask 中 desiredState 和 currentState 的指定属性值是否一致。
+     *
+     * 如果任一状态不包含该属性，返回 false。
+     * 此方法被多个行为使用（如 Trapdoor、Door、FenceGate 等），统一在此定义以避免重复。
+     *
+     * @param task 打印任务
+     * @param prop 要比较的方块属性
+     * @param <T>  属性值类型
+     * @return 两个状态中该属性值是否相等
+     */
+    public static <T extends Comparable<T>> boolean propertiesMatch(PrinterTask task, net.minecraft.state.property.Property<T> prop) {
+        if (!task.desiredState().contains(prop) || !task.currentState().contains(prop)) return false;
+        return task.desiredState().get(prop).equals(task.currentState().get(prop));
+    }
+
+    // ==================== 潜行策略判定 ====================
+
+    /**
+     * 根据交互方块确定潜行策略。
+     *
+     * 如果交互目标是 SNEAK_BLOCKS 中的方块（容器、按钮、门等），
+     * 则需要潜行来绕过方块自身的交互行为。
+     * 此逻辑被 BlockPlacementBehavior 和 WaterBehavior 共用。
+     *
+     * @param interactState 要交互的方块状态
+     * @return REQUIRE_SNEAK 或 KEEP_CURRENT
+     */
+    public static ActionPlan.SneakPolicy determineSneakPolicy(net.minecraft.block.BlockState interactState) {
+        return SNEAK_BLOCKS.contains(interactState.getBlock())
+            ? ActionPlan.SneakPolicy.REQUIRE_SNEAK
+            : ActionPlan.SneakPolicy.KEEP_CURRENT;
     }
 
     /**

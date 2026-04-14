@@ -1,7 +1,6 @@
 package meteordevelopment.meteorclient.utils.printer;
 
 import net.minecraft.block.BlockState;
-import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
 
@@ -43,32 +42,22 @@ public record PlacementOption(Direction direction, boolean isSelf, BlockState ac
         return new PlacementOption(face, true, actualTarget, null);
     }
 
-    /**
-     * 创建携带 HitVec 的新实例（流式处理）
-     * 用于 Resolver 在过滤前注入计算好的点击坐标
-     */
+    /** 创建携带 HitVec 的新实例 */
     public PlacementOption withHitVec(Vec3d vec) {
         return new PlacementOption(direction, isSelf, actualTargetState, vec);
     }
 
-    /**
-     * 创建携带实际状态的新实例（流式处理）
-     * 用于处理需要状态转换的场景（如 DOUBLE -> BOTTOM/TOP）
-     */
+    /** 创建携带实际状态的新实例（如 DOUBLE -> BOTTOM/TOP） */
     public PlacementOption withState(BlockState state) {
         return new PlacementOption(direction, isSelf, state, hitVec);
     }
 
-    /**
-     * 获取实际要点击的那个方块的坐标
-     */
-    public BlockPos getInteractPos(BlockPos targetPos) {
+    /** 获取实际要点击的那个方块的坐标 */
+    public net.minecraft.util.math.BlockPos getInteractPos(net.minecraft.util.math.BlockPos targetPos) {
         return isSelf ? targetPos : targetPos.offset(direction);
     }
 
-    /**
-     * 获取实际要点击的那个面
-     */
+    /** 获取实际要点击的那个面 */
     public Direction getClickedFace() {
         return isSelf ? direction : direction.getOpposite();
     }

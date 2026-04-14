@@ -14,6 +14,7 @@ import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.modules.render.Xray;
 import meteordevelopment.meteorclient.systems.modules.world.InfinityMiner;
+import meteordevelopment.meteorclient.systems.modules.world.PacketMine;
 import meteordevelopment.meteorclient.utils.Utils;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
@@ -22,9 +23,7 @@ import meteordevelopment.orbit.EventPriority;
 import net.minecraft.block.*;
 import net.minecraft.component.DataComponentTypes;
 import net.minecraft.enchantment.Enchantments;
-import net.minecraft.item.Item;
-import net.minecraft.item.ItemStack;
-import net.minecraft.item.ShearsItem;
+import net.minecraft.item.*;
 import net.minecraft.registry.tag.BlockTags;
 import net.minecraft.registry.tag.ItemTags;
 
@@ -127,6 +126,16 @@ public class AutoTool extends Module {
     private void onTick(TickEvent.Post event) {
         if (Modules.get().isActive(InfinityMiner.class)) return;
 
+        // PacketMine 接管工具选择期间，清空 AutoTool 的 pending 状态，防止后续暗中切槽
+        PacketMine packetMine = Modules.get().get(PacketMine.class);
+        if (packetMine.shouldOwnToolSelection()) {
+            shouldSwitch = false;
+            ticks = 0;
+            bestSlot = -1;
+            wasPressed = mc.options.attackKey.isPressed();
+            return;
+        }
+
         if (switchBack.get() && !mc.options.attackKey.isPressed() && wasPressed && InvUtils.previousSlot != -1) {
             InvUtils.swapBack();
             wasPressed = false;
@@ -146,7 +155,10 @@ public class AutoTool extends Module {
     @EventHandler(priority = EventPriority.HIGH)
     private void onStartBreakingBlock(StartBreakingBlockEvent event) {
         if (Modules.get().isActive(InfinityMiner.class)) return;
-        if (mc.player.isCreative()) return;
+
+        // PacketMine 接管工具选择时，AutoTool 完全让位（包括第一块开始前）
+        PacketMine packetMine = Modules.get().get(PacketMine.class);
+        if (packetMine.shouldOwnToolSelection()) return;
 
         // Get blockState
         BlockState blockState = mc.world.getBlockState(event.blockPos);
@@ -176,7 +188,7 @@ public class AutoTool extends Module {
         if ((bestSlot != -1 && (bestScore > getScore(currentStack, blockState, silkTouchForEnderChest.get(), fortuneForOresCrops.get(), prefer.get(), itemStack -> !shouldStopUsing(itemStack))) || shouldStopUsing(currentStack) || !isTool(currentStack))) {
             ticks = switchDelay.get();
 
-            if (ticks == 0) InvUtils.swap(bestSlot, true);
+            if (ticks == 0) InvUtils.swap(bestSlot, switchBack.get());
             else shouldSwitch = true;
         }
 
@@ -189,16 +201,45 @@ public class AutoTool extends Module {
         }
     }
 
+    /**
+     * 为指定方块状态找到热栏中的最佳工具槽位。
+     * 复用 AutoTool 的全部设置（附魔偏好、精准/时运、耐久保护、黑白名单）。
+     *
+     * @return 最佳槽位（0~8），或 -1 表示没有合适工具
+     */
+    public int findBestSlot(BlockState state) {
+        if (mc.player == null) return -1;
+
+        double bestScore = -1;
+        int best = -1;
+
+        for (int i = 0; i < 9; i++) {
+            ItemStack stack = mc.player.getInventory().getStack(i);
+
+            if (listMode.get() == ListMode.Whitelist && !whitelist.get().contains(stack.getItem())) continue;
+            if (listMode.get() == ListMode.Blacklist && blacklist.get().contains(stack.getItem())) continue;
+
+            double score = getScore(stack, state,
+                silkTouchForEnderChest.get(), fortuneForOresCrops.get(),
+                prefer.get(), item -> !shouldStopUsing(item));
+            if (score < 0) continue;
+
+            if (score > bestScore) {
+                bestScore = score;
+                best = i;
+            }
+        }
+
+        return best;
+    }
+
     private boolean shouldStopUsing(ItemStack itemStack) {
         return antiBreak.get() && (itemStack.getMaxDamage() - itemStack.getDamage()) < (itemStack.getMaxDamage() * breakDurability.get() / 100);
     }
 
     public static double getScore(ItemStack itemStack, BlockState state, boolean silkTouchEnderChest, boolean fortuneOre, EnchantPreference enchantPreference, Predicate<ItemStack> good) {
         if (!good.test(itemStack) || !isTool(itemStack)) return -1;
-        if (!itemStack.isSuitableFor(state) &&
-            !(itemStack.isIn(ItemTags.SWORDS) && (state.getBlock() instanceof BambooBlock || state.getBlock() instanceof BambooShootBlock)) &&
-            !(itemStack.getItem() instanceof ShearsItem && state.getBlock() instanceof LeavesBlock || state.isIn(BlockTags.WOOL)))
-            return -1;
+        if (!itemStack.isSuitableFor(state) && !(itemStack.isIn(ItemTags.SWORDS) && (state.getBlock() instanceof BambooBlock || state.getBlock() instanceof BambooShootBlock)) && !(itemStack.getItem() instanceof ShearsItem && state.getBlock() instanceof LeavesBlock || state.isIn(BlockTags.WOOL))) return -1;
 
         if (silkTouchEnderChest
             && state.getBlock() == Blocks.ENDER_CHEST
@@ -231,10 +272,10 @@ public class AutoTool extends Module {
     public static boolean isTool(Item item) {
         return isTool(item.getDefaultStack());
     }
-
     public static boolean isTool(ItemStack itemStack) {
         return itemStack.isIn(ItemTags.AXES) || itemStack.isIn(ItemTags.HOES) || itemStack.isIn(ItemTags.PICKAXES) || itemStack.isIn(ItemTags.SHOVELS) || itemStack.getItem() instanceof ShearsItem;
     }
+
 
     private static boolean isFortunable(Block block) {
         if (block == Blocks.ANCIENT_DEBRIS) return false;

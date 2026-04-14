@@ -17,3 +17,5 @@ logs
 .idea/*
 !.idea/copyright/*
 !.idea/scopes/*
+props
+ref

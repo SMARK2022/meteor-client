@@ -15,6 +15,10 @@ import java.util.stream.Stream;
  * 将 Source、Filter、HitVecCalculator 组合成完整的放置策略。
  * 通过链式调用构建，实现声明式的逻辑定义。
  *
+ * 内含两个管道合约接口：
+ * - {@link CandidateSource}: 候选方向来源（生产者）
+ * - {@link CandidateFilter}: 候选方向过滤器（裁决者）
+ *
  * 核心执行流程：
  * 1. 从所有 Source 获取候选选项（取并集）
  * 2. 去重
@@ -36,6 +40,60 @@ import java.util.stream.Stream;
  * </pre>
  */
 public class PlacementResolver {
+
+    // ==================== 管道合约接口 ====================
+
+    /**
+     * CandidateSource - 候选方向来源（生产者）
+     * 定义一种产生候选放置方向的策略，多个 Source 通过取并集组合。
+     */
+    @FunctionalInterface
+    public interface CandidateSource {
+        Stream<PlacementOption> getCandidates(PlacementContext ctx);
+
+        default CandidateSource union(CandidateSource other) {
+            return ctx -> Stream.concat(this.getCandidates(ctx), other.getCandidates(ctx));
+        }
+
+        static CandidateSource empty() {
+            return ctx -> Stream.empty();
+        }
+
+        static CandidateSource of(Direction... directions) {
+            return ctx -> Stream.of(directions).map(PlacementOption::neighbor);
+        }
+    }
+
+    /**
+     * CandidateFilter - 候选方向过滤器（裁决者）
+     * 定义一种判断候选方向是否合法的策略，多个 Filter 通过取交集组合。
+     */
+    @FunctionalInterface
+    public interface CandidateFilter {
+        boolean test(PlacementContext ctx, PlacementOption opt);
+
+        default CandidateFilter and(CandidateFilter other) {
+            return (ctx, opt) -> this.test(ctx, opt) && other.test(ctx, opt);
+        }
+
+        default CandidateFilter or(CandidateFilter other) {
+            return (ctx, opt) -> this.test(ctx, opt) || other.test(ctx, opt);
+        }
+
+        default CandidateFilter negate() {
+            return (ctx, opt) -> !this.test(ctx, opt);
+        }
+
+        static CandidateFilter alwaysPass() {
+            return (ctx, opt) -> true;
+        }
+
+        static CandidateFilter alwaysReject() {
+            return (ctx, opt) -> false;
+        }
+    }
+
+    // ==================== 实例字段 ====================
 
     /** 候选来源列表 */
     private final List<CandidateSource> sources = new ArrayList<>();

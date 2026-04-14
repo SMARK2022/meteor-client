@@ -15,7 +15,6 @@ import net.minecraft.world.BlockView;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Set;
 
 /**
  * HitVecCalculator - 点击位置计算器接口
@@ -128,36 +127,34 @@ public interface HitVecCalculator {
         double y = pos.getY();
         double z = pos.getZ();
 
-        // [Fix] 面坐标轻微内缩，避免精确边界上的面判定抖动
-        final double FACE_EPS = 1.0e-3;
         double cx = x + (minX + maxX) / 2.0;
         double cz = z + (minZ + maxZ) / 2.0;
 
-        // 根据点击的面计算点击点
+        // 根据点击的面计算点击点（直接使用精确的面坐标，不做法线方向内缩）
         switch (side) {
             case UP -> {
-                // 点击顶面：固定在 Shape 最高点（轻微内缩）
-                return new Vec3d(cx, y + Math.max(minY, maxY - FACE_EPS), cz);
+                // 点击顶面：固定在 Shape 最高点
+                return new Vec3d(cx, y + maxY, cz);
             }
             case DOWN -> {
-                // 点击底面：固定在 Shape 最低点（轻微内缩）
-                return new Vec3d(cx, y + Math.min(maxY, minY + FACE_EPS), cz);
+                // 点击底面：固定在 Shape 最低点
+                return new Vec3d(cx, y + minY, cz);
             }
             case NORTH -> {
                 // 点击北面（Z 轴负向）：使用计算出的 finalRelY
-                return new Vec3d(cx, y + finalRelY, z + Math.min(maxZ, minZ + FACE_EPS));
+                return new Vec3d(cx, y + finalRelY, z + minZ);
             }
             case SOUTH -> {
                 // 点击南面（Z 轴正向）
-                return new Vec3d(cx, y + finalRelY, z + Math.max(minZ, maxZ - FACE_EPS));
+                return new Vec3d(cx, y + finalRelY, z + maxZ);
             }
             case WEST -> {
                 // 点击西面（X 轴负向）
-                return new Vec3d(x + Math.min(maxX, minX + FACE_EPS), y + finalRelY, cz);
+                return new Vec3d(x + minX, y + finalRelY, cz);
             }
             case EAST -> {
                 // 点击东面（X 轴正向）
-                return new Vec3d(x + Math.max(minX, maxX - FACE_EPS), y + finalRelY, cz);
+                return new Vec3d(x + maxX, y + finalRelY, cz);
             }
         }
         return Vec3d.ofCenter(pos);
@@ -290,20 +287,11 @@ public interface HitVecCalculator {
                 double u = uv[0], v = uv[1];
                 Vec3d point = patch.toWorld(interactPos, u, v);
 
-                // Reach
-                if (eyePos.distanceTo(point) > maxReach + 0.1) continue;
-
-                // NCP
-                if (strict) {
-                    Set<Direction> validDirs = BlockUtilHelper.getPlaceDirectionsNCP(eyePos, point);
-                    if (!validDirs.contains(face)) continue;
-                }
-
-                // LOS
-                if (checkLos) {
-                    if (!BlockUtilHelper.canSeeFacePoint(
-                            interactPos, face, point,
-                            ctx.world(), ctx.player(), targetPos)) continue;
+                // 统一的 Reach / NCP / LOS 三重检查
+                if (!BlockUtilHelper.isPointValid(
+                    point, face, interactPos, eyePos, ctx.world(), ctx.player(),
+                    strict, checkLos, maxReach, targetPos)) {
+                    continue;
                 }
 
                 // 打分：居中越好 (+)，偏离偏好越差 (-)
@@ -339,6 +327,52 @@ public interface HitVecCalculator {
             return ctx.getProperty(TrapdoorBlock.HALF) == BlockHalf.TOP ? 0.8 : 0.2;
         }
         return 0.5;
+    }
+
+    // ==================== FacePatch 内部记录 ====================
+
+    /**
+     * FacePatch - 方块外露面片
+     *
+     * 描述 VoxelShape 某个面上的一个二维矩形可点击区域。
+     * 由 {@link #getFacePatches} 从 outline shape 的子 box 中抽取。
+     *
+     * 坐标系约定（方块相对坐标 0~1）：
+     * - EAST/WEST:   fixedCoord=x, u=z, v=y
+     * - UP/DOWN:     fixedCoord=y, u=x, v=z
+     * - NORTH/SOUTH: fixedCoord=z, u=x, v=y
+     */
+    record FacePatch(
+        Direction face,
+        double fixedCoord,
+        double minU, double maxU,
+        double minV, double maxV
+    ) {
+        /**
+         * 将 patch 内的 (u, v) 坐标转换为世界坐标。
+         * 直接使用精确的面坐标，不做法线方向内缩。
+         */
+        public Vec3d toWorld(BlockPos pos, double u, double v) {
+            double bx = pos.getX(), by = pos.getY(), bz = pos.getZ();
+            return switch (face) {
+                case EAST, WEST   -> new Vec3d(bx + fixedCoord, by + v, bz + u);
+                case UP, DOWN     -> new Vec3d(bx + u, by + fixedCoord, bz + v);
+                case NORTH, SOUTH -> new Vec3d(bx + u, by + v, bz + fixedCoord);
+            };
+        }
+
+        /**
+         * 计算 (u, v) 距 patch 边缘的最小归一化距离。
+         * 返回 0（在边缘）到 1（在正中心）。
+         */
+        public double centerMargin(double u, double v) {
+            double uRange = maxU - minU;
+            double vRange = maxV - minV;
+            if (uRange <= 0 && vRange <= 0) return 0;
+            double uM = uRange > 0 ? Math.min(u - minU, maxU - u) / (uRange / 2.0) : 1.0;
+            double vM = vRange > 0 ? Math.min(v - minV, maxV - v) / (vRange / 2.0) : 1.0;
+            return Math.min(Math.max(uM, 0), Math.max(vM, 0));
+        }
     }
 
 }

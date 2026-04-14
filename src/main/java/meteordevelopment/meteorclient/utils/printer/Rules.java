@@ -3,7 +3,6 @@ package meteordevelopment.meteorclient.utils.printer;
 import net.minecraft.block.*;
 import net.minecraft.block.enums.BlockHalf;
 import net.minecraft.block.enums.SlabType;
-import net.minecraft.block.enums.BlockFace; // 必须导入这个枚举
 import net.minecraft.block.enums.Orientation; // 必须导入
 
 import net.minecraft.state.property.Properties;
@@ -15,8 +14,8 @@ import java.util.Set;
 import java.util.stream.Stream;
 import net.minecraft.util.math.MathHelper;
 
-import meteordevelopment.meteorclient.utils.printer.BlockUtilHelper;
-import meteordevelopment.meteorclient.utils.printer.PlacementOption;
+import meteordevelopment.meteorclient.utils.printer.PlacementResolver.CandidateSource;
+import meteordevelopment.meteorclient.utils.printer.PlacementResolver.CandidateFilter;
 import meteordevelopment.meteorclient.utils.player.Rotations; // 确保这个也在
 
 /**
@@ -335,9 +334,8 @@ public final class Rules {
     public static final CandidateFilter NCP_STRICT = (ctx, opt) -> {
         if (!ctx.strict()) return true; // 非严格模式，全部通过
 
-        // 如果 hitVec 已经计算过，使用精确坐标；否则回退到方块中心
-        Vec3d targetPos = (opt.hitVec() != null) ? opt.hitVec() : ctx.targetCenter();
-        Set<Direction> validDirs = BlockUtilHelper.getPlaceDirectionsNCP(ctx.eyePos(), targetPos);
+        BlockPos interactPos = opt.getInteractPos(ctx.targetPos());
+        Set<Direction> validDirs = BlockUtilHelper.getPlaceDirectionsNCP(ctx.eyePos(), interactPos);
         // 我们要点击的是 opt.getClickedFace() 面
         return validDirs.contains(opt.getClickedFace());
     };
@@ -369,7 +367,12 @@ public final class Rules {
         // 回退方案（理论上不应该走到这里，因为 Resolver 已经注入了 hitVec）
         BlockPos clickPos = opt.getInteractPos(ctx.targetPos());
         Direction face = opt.getClickedFace();
-        return BlockUtilHelper.canSeeBlock(clickPos, face, ctx.world(), ctx.player());
+        Vec3d faceCenter = Vec3d.ofCenter(clickPos).add(
+            face.getOffsetX() * 0.5,
+            face.getOffsetY() * 0.5,
+            face.getOffsetZ() * 0.5
+        );
+        return BlockUtilHelper.canSeePoint(faceCenter, ctx.world(), ctx.player());
     };
 
     /**
@@ -562,11 +565,13 @@ public final class Rules {
     /**
      * 计算玩家看向目标时的 3D 朝向 (含 UP/DOWN)
      * 用于 6 轴方块 (Piston, Observer, Dropper)
+     *
+     * <p>Pitch 优先从 opt.hitVec() 计算——这与 Rotations 系统实际发送的
+     * 角度一致。若 hitVec 不可用则回退到 targetCenter。
      */
-    private static Direction getTheoreticalPlayerLookDirection(PlacementContext ctx) {
-        // 1. 计算 Pitch 和 Yaw
+    private static Direction getTheoreticalPlayerLookDirection(PlacementContext ctx, PlacementOption opt) {
         Vec3d eye = ctx.eyePos();
-        Vec3d target = ctx.targetCenter();
+        Vec3d target = (opt != null && opt.hitVec() != null) ? opt.hitVec() : ctx.targetCenter();
 
         double dX = target.x - eye.x;
         double dY = target.y - eye.y;
@@ -751,7 +756,7 @@ public final class Rules {
         if (!ctx.hasProperty(Properties.FACING))
             return true;
         Direction target = ctx.getProperty(Properties.FACING);
-        Direction playerLook = getTheoreticalPlayerLookDirection(ctx);
+        Direction playerLook = getTheoreticalPlayerLookDirection(ctx, opt);
         return target == playerLook;
     };
 
@@ -765,7 +770,7 @@ public final class Rules {
         if (!ctx.hasProperty(Properties.FACING))
             return true;
         Direction target = ctx.getProperty(Properties.FACING);
-        Direction playerLook = getTheoreticalPlayerLookDirection(ctx);
+        Direction playerLook = getTheoreticalPlayerLookDirection(ctx, opt);
         return target == playerLook.getOpposite();
     };
 
@@ -844,7 +849,7 @@ public final class Rules {
 
         // 2. 检查主朝向 (Facing) - 必须背对玩家视线
         // 例如：目标朝 UP，玩家必须看 DOWN
-        Direction playerLook3D = getTheoreticalPlayerLookDirection(ctx);
+        Direction playerLook3D = getTheoreticalPlayerLookDirection(ctx, opt);
         if (targetFacing != playerLook3D.getOpposite()) {
             return false;
         }
@@ -953,6 +958,63 @@ public final class Rules {
         }
 
         return true;
+    };
+
+    // ==================== 多格方块扩展检查 ====================
+
+    /**
+     * 过滤器：门放置扩展检查 (DOOR_EXPANSION_CHECK)
+     *
+     * 门是两格高方块，放置时：
+     * - lower 锚点需要下方有实心支撑（已由 canPlaceAt 检查）
+     * - upper（锚点上方一格）必须可替换（空气/流体等）
+     *
+     * 原版 DoorBlock.getPlacementState() 中的检查：
+     *   blockPos.getY() < world.getTopYInclusive() &&
+     *   world.getBlockState(blockPos.up()).canReplace(ctx)
+     *
+     * 此 filter 模拟该检查，确保上方一格不被占用。
+     */
+    public static final CandidateFilter DOOR_EXPANSION_CHECK = (ctx, opt) -> {
+        BlockPos targetPos = ctx.targetPos();
+        BlockPos upperPos = targetPos.up();
+
+        // 检查高度上限
+        if (targetPos.getY() >= ctx.world().getTopYInclusive()) return false;
+
+        // 检查上方一格是否可替换（空气、流体等可被覆盖的方块）
+        BlockState upperState = ctx.world().getBlockState(upperPos);
+        return upperState.isReplaceable();
+    };
+
+    /**
+     * 过滤器：床放置扩展检查 (BED_EXPANSION_CHECK)
+     *
+     * 床是两格长方块，放置时：
+     * - foot 在选中位置（placementPos）
+     * - head 在玩家朝向（FACING 属性）前方一格
+     * - head 位置必须可替换
+     *
+     * 原版 BedBlock.getPlacementState() 中的检查：
+     *   world.getBlockState(blockPos2).canReplace(ctx) &&
+     *   world.getWorldBorder().contains(blockPos2)
+     * 其中 blockPos2 = blockPos.offset(playerFacing)
+     *
+     * 此 filter 模拟该检查，确保 head 位置不被占用。
+     * 注意：FACING 属性指向床头方向，即玩家放置时的朝向。
+     */
+    public static final CandidateFilter BED_EXPANSION_CHECK = (ctx, opt) -> {
+        if (!ctx.hasProperty(BedBlock.FACING)) return true;
+
+        Direction facing = ctx.getProperty(BedBlock.FACING);
+        BlockPos headPos = ctx.targetPos().offset(facing);
+
+        // 检查 head 位置是否可替换
+        BlockState headState = ctx.world().getBlockState(headPos);
+        if (!headState.isReplaceable()) return false;
+
+        // 检查世界边界（原版也做了这个检查）
+        return ctx.world().getWorldBorder().contains(headPos);
     };
 
     // ==================== HitVecCalculators (点击位置计算器) ====================

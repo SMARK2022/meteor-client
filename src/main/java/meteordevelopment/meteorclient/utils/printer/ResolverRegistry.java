@@ -1,10 +1,15 @@
 package meteordevelopment.meteorclient.utils.printer;
 
-import meteordevelopment.meteorclient.utils.printer.PlacementOption;
 import net.minecraft.block.*;
+import net.minecraft.block.enums.ChestType;
 import net.minecraft.block.enums.SlabType;
 import net.minecraft.state.property.Properties;
 import net.minecraft.block.WallRedstoneTorchBlock;
+import net.minecraft.util.math.BlockPos;
+import net.minecraft.util.math.Direction;
+import net.minecraft.util.math.Vec3d;
+
+import java.util.List;
 
 /**
  * ResolverRegistry - 策略注册表
@@ -301,6 +306,48 @@ public final class ResolverRegistry {
             .hitVec(Rules.CENTER);
 
     /**
+     * 门放置策略（DoorBlock 专用）
+     *
+     * 门是两格高方块，放置时：
+     * - 朝向 = 玩家视线反方向（Opposite）
+     * - lower 位置下方需要实心支撑（由 canPlaceAt 保证）
+     * - upper 位置（锚点上方一格）必须可替换
+     *
+     * 相比通用 HORIZONTAL_OPPOSITE，增加了 DOOR_EXPANSION_CHECK。
+     */
+    public static final PlacementResolver DOOR_RESOLVER = PlacementResolver.create("door")
+            .addSource(Rules.ALL_DIRECTIONS)
+            .addFilter(Rules.CLICKABLE_NEIGHBOR)
+            .addFilter(Rules.ROTATION_CHECK_OPPOSITE) // 反向旋转
+            .addFilter(Rules.DOOR_EXPANSION_CHECK) // 检查上方一格可替换
+            .addFilter(Rules.PLACEABILITY_CHECK)
+            .addFilter(Rules.NCP_STRICT)
+            .addFilter(Rules.LINE_OF_SIGHT)
+            .addFilter(Rules.REACH_CHECK)
+            .hitVec(Rules.CENTER);
+
+    /**
+     * 床放置策略（BedBlock 专用）
+     *
+     * 床是两格长方块，放置时：
+     * - 朝向 = 玩家视线方向（Same），即 FACING 指向床头
+     * - foot 在 placementPos（选中的格子）
+     * - head 在 FACING 方向前方一格，该位置必须可替换
+     *
+     * 相比通用 HORIZONTAL_SAME，增加了 BED_EXPANSION_CHECK。
+     */
+    public static final PlacementResolver BED_RESOLVER = PlacementResolver.create("bed")
+            .addSource(Rules.ALL_DIRECTIONS)
+            .addFilter(Rules.CLICKABLE_NEIGHBOR)
+            .addFilter(Rules.ROTATION_CHECK_SAME) // 同向旋转
+            .addFilter(Rules.BED_EXPANSION_CHECK) // 检查 head 位置可替换
+            .addFilter(Rules.PLACEABILITY_CHECK)
+            .addFilter(Rules.NCP_STRICT)
+            .addFilter(Rules.LINE_OF_SIGHT)
+            .addFilter(Rules.REACH_CHECK)
+            .hitVec(Rules.CENTER);
+
+    /**
      * 默认方块放置策略
      *
      * 来源：
@@ -384,6 +431,15 @@ public final class ResolverRegistry {
             return WALL_DEGENERATE_RESOLVER;
         }
 
+        // ==================== 多格方块专用策略 ====================
+        // 门和床是多格方块，需要额外的扩展位置检查
+        if (block instanceof DoorBlock) {
+            return DOOR_RESOLVER;
+        }
+        if (block instanceof BedBlock) {
+            return BED_RESOLVER;
+        }
+
         // ==================== 1. 水平反向类 (Opposite) ====================
         // 特征：FACING 属性，且放置时背对玩家 (Face towards player)
         if (block instanceof AbstractChestBlock // 箱子, 陷阱箱, 末影箱
@@ -391,15 +447,10 @@ public final class ResolverRegistry {
                 || block instanceof ComparatorBlock // 红石比较器
                 || block instanceof AbstractFurnaceBlock // 熔炉, 高炉, 烟熏炉
                 || block instanceof FenceGateBlock // 栅栏门
-                || block instanceof DoorBlock // 门 (虽有多重属性，但水平逻辑一致)
                 || block instanceof CarvedPumpkinBlock // 雕刻南瓜, 南瓜灯 (Jack o Lantern)
                 || block instanceof BeehiveBlock // 蜂箱, 蜂巢
                 || block instanceof LoomBlock // 织布机
-                || block instanceof BarrelBlock // 木桶 (注：木桶其实是6面的，但很多人当箱子用。如果你的木桶是6面逻辑，移到
-                                                // FACE_EXTEND_RESOLVER；如果是强制水平，放这里。原版木桶是6面的，建议移走，或者这里只处理水平情况)
-                // *修正*：原版 Barrel 是 6 面朝向 (Look-based)，不属于
-                // HorizontalFacingBlock。它应该归类到"活塞/发射器"类(Look Based)，或者 FACE_EXTEND。
-                // 这里我们先不放 Barrel。
+                // BarrelBlock 已移至 LOOK_6_SAME（原版木桶是 6 面朝向）
 
                 || block instanceof LecternBlock // 讲台
                 || block instanceof StonecutterBlock // 切石机
@@ -414,9 +465,9 @@ public final class ResolverRegistry {
         // ==================== 2. 水平同向类 (Same) ====================
         // 特征：FACING 属性，且放置时面向玩家视线 (Face with player)
         if (block instanceof AnvilBlock // 铁砧 (所有损坏程度)
-                || block instanceof BedBlock // 床
-                || block instanceof GrindstoneBlock // 砂轮 (注：砂轮有 Wall/Floor/Ceiling 状态，但水平逻辑是 Same)
-                || block instanceof BellBlock // 钟 (同上)
+                // BedBlock 已移至 BED_RESOLVER（需要床头位置扩展检查）
+                // GrindstoneBlock 已移至 FACE_ATTACHED（砂轮有 Wall/Floor/Ceiling 附着面状态）
+                // BellBlock 已移至 FACE_ATTACHED（钟有 Wall/Floor/Ceiling 附着面状态）
         ) {
             return HORIZONTAL_SAME_RESOLVER;
         }
@@ -425,7 +476,7 @@ public final class ResolverRegistry {
         // 特征：6面 FACING，朝向 = 玩家视线
         if (block instanceof ObserverBlock // 侦测器 (输出端朝向玩家视线)
                 || block instanceof CommandBlock // 命令方块
-                || block instanceof BarrelBlock // 木桶 (通常是6轴 Look-based，虽然很多人以为是箱子)
+                || block instanceof BarrelBlock // 木桶（原版是 6 面朝向）
         ) {
             return LOOK_6_SAME_RESOLVER;
         }
@@ -445,8 +496,8 @@ public final class ResolverRegistry {
         // 特征：有 FACE (Wall/Floor/Ceiling) 和 HORIZONTAL_FACING 属性
         if (block instanceof ButtonBlock // 所有按钮 (木/石/黑石/铜)
                 || block instanceof LeverBlock // 拉杆
-                || block instanceof GrindstoneBlock // 砂轮
-                || block instanceof BellBlock // 钟 (注：钟的放置逻辑与此类似)
+                || block instanceof GrindstoneBlock // 砂轮（Wall/Floor/Ceiling 附着面状态）
+                || block instanceof BellBlock // 钟（Wall/Floor/Ceiling 附着面状态）
         // || block instanceof SwitchBlock // (如果模组有类似 Switch 的类)
         ) {
             return FACE_ATTACHED_RESOLVER;
@@ -522,6 +573,15 @@ public final class ResolverRegistry {
             return WALL_DEGENERATE_RESOLVER;
         }
 
+        // ==================== 多格方块专用策略 ====================
+        // 门和床是多格方块，需要额外的扩展位置检查
+        if (block instanceof DoorBlock) {
+            return DOOR_RESOLVER;
+        }
+        if (block instanceof BedBlock) {
+            return BED_RESOLVER;
+        }
+
         // ==================== 1. 水平反向类 (Opposite) ====================
         // 特征：FACING 属性，且放置时背对玩家 (Face towards player)
         if (block instanceof AbstractChestBlock // 箱子, 陷阱箱, 末影箱
@@ -529,15 +589,10 @@ public final class ResolverRegistry {
                 || block instanceof ComparatorBlock // 红石比较器
                 || block instanceof AbstractFurnaceBlock // 熔炉, 高炉, 烟熏炉
                 || block instanceof FenceGateBlock // 栅栏门
-                || block instanceof DoorBlock // 门 (虽有多重属性，但水平逻辑一致)
                 || block instanceof CarvedPumpkinBlock // 雕刻南瓜, 南瓜灯 (Jack o Lantern)
                 || block instanceof BeehiveBlock // 蜂箱, 蜂巢
                 || block instanceof LoomBlock // 织布机
-                || block instanceof BarrelBlock // 木桶 (注：木桶其实是6面的，但很多人当箱子用。如果你的木桶是6面逻辑，移到
-                                                // FACE_EXTEND_RESOLVER；如果是强制水平，放这里。原版木桶是6面的，建议移走，或者这里只处理水平情况)
-                // *修正*：原版 Barrel 是 6 面朝向 (Look-based)，不属于
-                // HorizontalFacingBlock。它应该归类到"活塞/发射器"类(Look Based)，或者 FACE_EXTEND。
-                // 这里我们先不放 Barrel。
+                // BarrelBlock 已移至 LOOK_6_SAME（原版木桶是 6 面朝向）
 
                 || block instanceof LecternBlock // 讲台
                 || block instanceof StonecutterBlock // 切石机
@@ -552,9 +607,9 @@ public final class ResolverRegistry {
         // ==================== 2. 水平同向类 (Same) ====================
         // 特征：FACING 属性，且放置时面向玩家视线 (Face with player)
         if (block instanceof AnvilBlock // 铁砧 (所有损坏程度)
-                || block instanceof BedBlock // 床
-                || block instanceof GrindstoneBlock // 砂轮 (注：砂轮有 Wall/Floor/Ceiling 状态，但水平逻辑是 Same)
-                || block instanceof BellBlock // 钟 (同上)
+                // BedBlock 已移至 BED_RESOLVER（需要床头位置扩展检查）
+                // GrindstoneBlock 已移至 FACE_ATTACHED（砂轮有 Wall/Floor/Ceiling 附着面状态）
+                // BellBlock 已移至 FACE_ATTACHED（钟有 Wall/Floor/Ceiling 附着面状态）
         ) {
             return HORIZONTAL_SAME_RESOLVER;
         }
@@ -563,7 +618,7 @@ public final class ResolverRegistry {
         // 特征：6面 FACING，朝向 = 玩家视线
         if (block instanceof ObserverBlock // 侦测器 (输出端朝向玩家视线)
                 || block instanceof CommandBlock // 命令方块
-                || block instanceof BarrelBlock // 木桶 (通常是6轴 Look-based，虽然很多人以为是箱子)
+                || block instanceof BarrelBlock // 木桶（原版是 6 面朝向）
         ) {
             return LOOK_6_SAME_RESOLVER;
         }
@@ -583,8 +638,8 @@ public final class ResolverRegistry {
         // 特征：有 FACE (Wall/Floor/Ceiling) 和 HORIZONTAL_FACING 属性
         if (block instanceof ButtonBlock // 所有按钮 (木/石/黑石/铜)
                 || block instanceof LeverBlock // 拉杆
-                || block instanceof GrindstoneBlock // 砂轮
-                || block instanceof BellBlock // 钟 (注：钟的放置逻辑与此类似)
+                || block instanceof GrindstoneBlock // 砂轮（Wall/Floor/Ceiling 附着面状态）
+                || block instanceof BellBlock // 钟（Wall/Floor/Ceiling 附着面状态）
         // || block instanceof SwitchBlock // (如果模组有类似 Switch 的类)
         ) {
             return FACE_ATTACHED_RESOLVER;
@@ -665,9 +720,101 @@ public final class ResolverRegistry {
             }
         }
 
-        // 其他方块类型或单层半砖目标：直接解析
+        // 其他方块类型：直接解析
         PlacementResolver resolver = get(ctx.targetState());
         return resolver.resolve(ctx);
+    }
+
+    // ==================== 双箱子 per-cell 解析 helpers ====================
+
+    /**
+     * 双箱子放置解析
+     *
+    /**
+     * 安全放置：在当前格位放置独立 SINGLE 箱子，不触发意外合并
+     *
+     * 仅过滤 pair 范围（clockwise + counterclockwise）内同种同向 SINGLE 箱子的水平侧面，
+     * 防止规则1误合并。其他面（不同朝向箱子、非 pair 范围箱子、任意方块顶底面）均可用。
+     *
+     * @param ctx    以 singleState 构造的放置上下文（targetPos = 当前格位）
+     * @param facing 箱子朝向
+     */
+    public static PlacementOption resolveChestSingleSafe(PlacementContext ctx, Direction facing) {
+        BlockState singleState = ctx.targetState();
+        List<PlacementOption> candidates = get(singleState).resolveAll(ctx);
+
+        BlockPos cwPos = ctx.targetPos().offset(facing.rotateYClockwise());
+        BlockPos ccwPos = ctx.targetPos().offset(facing.rotateYCounterclockwise());
+
+        for (PlacementOption opt : candidates) {
+            BlockPos interactPos = opt.getInteractPos(ctx.targetPos());
+
+            // 仅过滤 pair 范围内同种同向 SINGLE 的水平侧面（规则1触发条件）
+            if ((interactPos.equals(cwPos) || interactPos.equals(ccwPos))
+                && isSingleChest(ctx.world().getBlockState(interactPos), singleState, facing)
+                && opt.getClickedFace().getAxis().isHorizontal()) {
+                continue;
+            }
+            return opt;
+        }
+        return null;
+    }
+
+    /**
+     * 合并放置：在当前格位放置箱子，使其与 partnerDir 方向的 SINGLE 合并
+     *
+     * 双重策略：
+     * - Plan A（规则1）：直接点击 partner 箱体水平侧面 + sneak → 强制合并
+     *   走统一的 placeability + isPointValid 验证，与执行前复验一致
+     * - Plan B（规则3）：非 SNEAK_BLOCKS 面 + 不 sneak → 自动合并（完整 pipeline）
+     *
+     * @param ctx        以 singleState 构造的放置上下文（targetPos = 当前格位）
+     * @param facing     箱子朝向
+     * @param partnerDir 从当前格位指向 partner SINGLE 的方向
+     */
+    public static PlacementOption resolveChestMerge(PlacementContext ctx, Direction facing, Direction partnerDir) {
+        BlockState singleState = ctx.targetState();
+        BlockPos partnerPos = ctx.targetPos().offset(partnerDir);
+
+        // Plan A: 点击 partner 水平侧面，走统一几何验证（placeability + NCP + LOS + reach）
+        if (singleState.canPlaceAt(ctx.world(), ctx.targetPos())) {
+            Direction clickFace = partnerDir.getOpposite();
+            Vec3d hitVec = Vec3d.ofCenter(partnerPos).add(
+                clickFace.getOffsetX() * 0.5, 0, clickFace.getOffsetZ() * 0.5);
+            PlacementOption planA = new PlacementOption(partnerDir, false, singleState, hitVec);
+            BlockPos interactPos = planA.getInteractPos(ctx.targetPos());
+            if (BlockUtilHelper.isPointValid(hitVec, planA.getClickedFace(), interactPos,
+                ctx.eyePos(), ctx.world(), ctx.player(),
+                ctx.strict(), ctx.checkLos(), ctx.maxReach(), ctx.targetPos())) {
+                return planA;
+            }
+        }
+
+        // Plan B: 非 SNEAK_BLOCKS 面 + 规则3自动合并
+        // 安全条件：clockwise 方向无干扰同向 SINGLE（否则规则3先合并到错误目标）
+        List<PlacementOption> candidates = get(singleState).resolveAll(ctx);
+        BlockPos firstCheckPos = ctx.targetPos().offset(facing.rotateYClockwise());
+        boolean planBSafe = !isSingleChest(ctx.world().getBlockState(firstCheckPos), singleState, facing)
+            || firstCheckPos.equals(partnerPos);
+
+        if (planBSafe) {
+            for (PlacementOption opt : candidates) {
+                BlockPos interactPos = opt.getInteractPos(ctx.targetPos());
+                BlockState interactState = ctx.world().getBlockState(interactPos);
+                if (BlockUtilHelper.SNEAK_BLOCKS.contains(interactState.getBlock())) continue;
+                return opt;
+            }
+        }
+        return null;
+    }
+
+    /** 判断给定状态是否为同种同向 SINGLE 箱子 */
+    public static boolean isSingleChest(BlockState state, BlockState targetState, Direction facing) {
+        return state.getBlock() instanceof ChestBlock
+            && state.getBlock() == targetState.getBlock()
+            && state.contains(ChestBlock.CHEST_TYPE)
+            && state.get(ChestBlock.CHEST_TYPE) == ChestType.SINGLE
+            && state.get(Properties.HORIZONTAL_FACING) == facing;
     }
 
     /**
