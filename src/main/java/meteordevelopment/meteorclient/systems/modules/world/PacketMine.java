@@ -158,6 +158,24 @@ public class PacketMine extends Module {
         .build()
     );
 
+    private final Setting<Boolean> doubleMine = sgGrim.add(new BoolSetting.Builder()
+        .name("Double Mine")
+        .description("利用 Y=5480 exploit 污染 GrimAC FastBreak 后，通过服务端 failedToMine 机制实现双方块并行挖掘。会在 AirLiquidBreak 产生 alert（无 kick/ban）。")
+        .defaultValue(false)
+        .visible(grimBypass::get)
+        .build()
+    );
+
+    private final Setting<Integer> doubleMineThreshold = sgGrim.add(new IntSetting.Builder()
+        .name("　Double Mine 阈值")
+        .description("只对挖掘需要 ≥ 此 tick 数的方块启用 Double Mine。低于此值的方块 drain 时间不足以回血，无收益。默认 10 tick (500ms)。")
+        .defaultValue(10)
+        .min(4)
+        .sliderMax(200)
+        .visible(() -> grimBypass.get() && doubleMine.get())
+        .build()
+    );
+
     // ── 渲染 ──
 
     private final Setting<Boolean> render = sgRender.add(new BoolSetting.Builder()
@@ -295,10 +313,14 @@ public class PacketMine extends Module {
     @EventHandler
     private void onTick(TickEvent.Pre event) {
 
-        // 清理已完成的任务，归还对象池
+        // 清理已完成的任务 + secondary 追踪
         Iterator<MyBlock> it = blocks.iterator();
         while (it.hasNext()) {
             MyBlock b = it.next();
+            if (b.secondary) {
+                // secondary: 追踪 failedToMine 自动破坏
+                b.tickSecondary();
+            }
             if (b.phase == Phase.FINISHED) {
                 blockPool.free(b);
                 it.remove();
@@ -310,24 +332,26 @@ public class PacketMine extends Module {
             restoreSlot();
         }
 
+        // 找到队列中第一个非 secondary 的活跃任务
+        MyBlock active = null;
+        for (MyBlock b : blocks) {
+            if (!b.secondary) { active = b; break; }
+        }
+
         // 槽位冲突检测：渐进式响应，区分用户接管和模块干扰
-        if (autoSwitch.get() && !blocks.isEmpty()) {
-            MyBlock active = blocks.getFirst();
+        if (autoSwitch.get() && active != null) {
             if (active.lockedToolSlot != -1 && active.mining
                 && mc.player.getInventory().getSelectedSlot() != active.lockedToolSlot) {
 
                 if (isUserSlotInput()) {
-                    // 用户主动切槽（数字键 / 鼠标滚轮）：中止当前任务，不恢复槽位
                     active.lockedToolSlot = -1;
                     active.phase = Phase.ABORTING;
                     savedSlot = -1;
                     slotConflictTicks = 0;
                     scrolledThisTick = false;
                 } else {
-                    // 模块干扰：ensureTaskToolSelected 会在 tickMining 里尝试重申
                     slotConflictTicks++;
                     if (slotConflictTicks >= 3) {
-                        // 持续对抗 3 tick，放弃当前任务（保留队列其余部分）
                         active.phase = Phase.ABORTING;
                         slotConflictTicks = 0;
                     }
@@ -337,15 +361,15 @@ public class PacketMine extends Module {
             }
         }
 
-        // 每 tick 只驱动队列中第一个活跃任务
-        if (!blocks.isEmpty()) {
-            MyBlock active = blocks.getFirst();
-            // 主动消耗：活跃任务在 PENDING_START 等待时，利用空闲 tick 对周围方块 START+ABORT 衰减 balance
+        // 每 tick 只驱动第一个非 secondary 的活跃任务
+        if (active != null) {
             boolean drained = active.phase == Phase.PENDING_START && shouldDrain() && executeDrainStep();
             if (!drained) active.tick();
+        } else if (shouldDrain()) {
+            // Idle drain: 无活跃任务时也主动衰减 balance
+            executeDrainStep();
         }
 
-        // 消费本 tick 的滚轮标记
         scrolledThisTick = false;
     }
 
@@ -508,6 +532,7 @@ public class PacketMine extends Module {
     /**
      * 在交互范围内搜索最佳 drain 目标。
      * 评分综合：视角偏转（权重 3）+ 距离。排除瞬破方块和正在挖的方块。
+     * doubleMine 启用时允许空气方块作为 drain 目标（AirLiquidBreak flag 已被接受）。
      */
     private DrainTarget findDrainTarget() {
         Vec3d eye = mc.player.getEyePos();
@@ -516,6 +541,7 @@ public class PacketMine extends Module {
         int slot = mc.player.getInventory().getSelectedSlot();
         BlockPos center = mc.player.getBlockPos();
         int r = (int) Math.ceil(range);
+        boolean allowAir = doubleMine.get(); // doubleMine 已接受 AirLiquidBreak flag
 
         DrainTarget best = null;
         for (int dx = -r; dx <= r; dx++) {
@@ -523,7 +549,21 @@ public class PacketMine extends Module {
                 for (int dz = -r; dz <= r; dz++) {
                     BlockPos pos = center.add(dx, dy, dz);
                     BlockState state = mc.world.getBlockState(pos);
-                    if (state.isAir() || !BlockUtils.canBreak(pos)) continue;
+
+                    if (state.isAir()) {
+                        if (!allowAir) continue;
+                        Vec3d anchor = Vec3d.ofCenter(pos);
+                        if (eye.squaredDistanceTo(anchor) > range * range) continue;
+                        Vec3d toBlock = anchor.subtract(eye).normalize();
+                        double anglePenalty = 1.0 - look.dotProduct(toBlock);
+                        double score = anglePenalty * 3.0 + eye.distanceTo(anchor);
+                        if (best == null || score < best.score) {
+                            best = new DrainTarget(pos, Direction.UP, score);
+                        }
+                        continue;
+                    }
+
+                    if (!BlockUtils.canBreak(pos)) continue;
                     if (BlockUtils.getBreakDelta(slot, state) >= 1.0) continue;
                     if (isMiningBlock(pos)) continue;
 
@@ -550,6 +590,7 @@ public class PacketMine extends Module {
      * 对目标方块快速发送 START+ABORT 序列以消耗 delay balance。
      * 每组 START 在 Grim 侧触发 balance *= 0.9（breakDelay >= 275ms 保证衰减路径），
      * CANCELLED_DIGGING 不影响任何 Grim 检查。
+     * pairs 数量由 log 公式精确计算到 drainTarget，上限 30。
      *
      * @return true 如果注册了旋转（占用本 tick），false 如果无可用目标
      */
@@ -560,14 +601,23 @@ public class PacketMine extends Module {
         drainRenderPos = target.pos;
         drainRenderExpiry = System.currentTimeMillis() + 500;
 
+        // 计算最优 pairs: balance * 0.9^n <= drainTarget → n = ceil(log(target/balance) / log(0.9))
+        int optimalPairs;
+        if (localDelayBalance <= drainTarget.get()) {
+            optimalPairs = 0;
+        } else {
+            optimalPairs = (int) Math.ceil(
+                Math.log((double) drainTarget.get() / localDelayBalance) / Math.log(0.9));
+        }
+        int maxPairs = Math.min(Math.max(optimalPairs, 1), 30);
+
         Vec3d anchor = getFaceAnchor(target.pos, target.face);
+        final int pairsToSend = maxPairs;
         Rotations.rotate(Rotations.getYaw(anchor), Rotations.getPitch(anchor), 50, () -> {
-            int pairs = 0;
-            while (localDelayBalance > drainTarget.get() && pairs < 30) {
+            for (int i = 0; i < pairsToSend && localDelayBalance > drainTarget.get(); i++) {
                 sendStartPacket(target.pos, target.face);
                 sendAbortPacket(target.pos, target.face);
                 localDelayBalance *= 0.9;
-                pairs++;
             }
             clampDelayBalance();
         });
@@ -575,6 +625,66 @@ public class PacketMine extends Module {
     }
 
     private record DrainTarget(BlockPos pos, Direction face, double score) {}
+
+    // -------------------- Y=5480 Exploit --------------------
+
+    /** Y=5480: 超出世界高度的 AIR 坐标，用于污染 GrimAC FastBreak.maximumBlockDamage */
+    private static final BlockPos EXPLOIT_POS = new BlockPos(0, 5480, 0);
+
+    /**
+     * 发送 Y=5480 exploit START 包。
+     *
+     * <p>效果链：
+     * <ol>
+     *   <li>AirLiquidBreak: flag + cancel（包不转发到 MC 服务端）</li>
+     *   <li>FastBreak: targetBlockPosition=Y5480, maximumBlockDamage=∞（cancel 前已执行）</li>
+     *   <li>后续所有 STOP 的 predictedTime=ceil(1/∞)*50=0, diff 永远为负</li>
+     * </ol>
+     *
+     * <p>同时更新本地 delay balance 镜像。注意 GrimAC FastBreak 中 lastFinishBreak
+     * 不在 START_DIGGING 时更新，所以同 tick 内多个 START 的 breakDelay 都相同。
+     */
+    private void sendExploitFlood() {
+        // 在合法 START 之前发送 exploit START，确保 lastBlock 被后续合法 START 覆盖
+        // WrongBreak 规则: START → 设 lastBlock。所以 Y5480 START → lastBlock=Y5480，
+        // 然后 real START → lastBlock=realPos → STOP(realPos) 匹配 ✓
+        // 使用 DOWN 面：PositionBreakA 检查 minY > combined.minY，
+        // 玩家 minY≈65 < 5480 → false → 不 flag
+        sendStartPacket(EXPLOIT_POS, Direction.DOWN);
+        commitStartDelayBudget();
+    }
+
+    /**
+     * 判断指定方块是否满足 double mine 的自动阈值条件。
+     *
+     * <p>计算方块的预估挖掘 tick 数（ceil(1/delta)），只有 ≥ doubleMineThreshold 才启用。
+     * 这确保只对 drain 时间足以回血的慢速方块使用 double mine。
+     *
+     * @param state 目标方块状态
+     * @param toolSlot 使用的工具槽位
+     * @return true 如果方块足够慢，值得做 double mine
+     */
+    private boolean meetsDoubleMineThreshold(BlockState state, int toolSlot) {
+        double delta = BlockUtils.getBreakDelta(toolSlot, state);
+        if (delta <= 0 || delta >= 1.0) return false;
+        int ticks = (int) Math.ceil(1.0 / delta);
+        return ticks >= doubleMineThreshold.get();
+    }
+
+    /**
+     * 判断当前是否应该启用 double mine 路径。
+     *
+     * @return true 如果所有前置条件满足（设置开启、exploit 开启、队列有第二个方块、方块满足阈值）
+     */
+    private boolean shouldDoubleMine() {
+        if (!grimBypass.get() || !doubleMine.get()) return false;
+        // 已有 secondary 在等待 failedToMine
+        for (MyBlock b : blocks) if (b.secondary) return false;
+        // 队列中至少需要 2 个非 secondary 方块（当前 + 下一个）
+        int active = 0;
+        for (MyBlock b : blocks) if (!b.secondary) active++;
+        return active >= 2;
+    }
 
     /** 获取 face 中心点的微偏移锚点（用于旋转/距离判断） */
     private static Vec3d getFaceAnchor(BlockPos pos, Direction face) {
@@ -666,6 +776,8 @@ public class PacketMine extends Module {
         b.maxDelta = 0;
         b.pendingSinceMs = System.currentTimeMillis();
         b.activated = false;
+        b.secondary = false;
+        b.expectedFinishMs = 0;
         blocks.add(b);
     }
 
@@ -822,6 +934,12 @@ public class PacketMine extends Module {
         /** 是否已被 tick() 首次驱动（用于延迟初始化 pendingSinceMs） */
         boolean activated;
 
+        /** 是否为 double mine 的 secondary block（已 STOP，等待 failedToMine 自动完成） */
+        boolean secondary;
+
+        /** secondary 预期自动完成的 wall-clock 时间戳（ms），0 = 未设置 */
+        long expectedFinishMs;
+
         public MyBlock set(StartBreakingBlockEvent event) {
             this.blockPos = event.blockPos;
             this.direction = event.direction;
@@ -840,12 +958,39 @@ public class PacketMine extends Module {
             this.maxDelta = 0;
             this.pendingSinceMs = System.currentTimeMillis();
             this.activated = false;
+            this.secondary = false;
+            this.expectedFinishMs = 0;
             return this;
         }
 
         /** 外部契约：是否可以立刻破坏（用于渲染颜色判断） */
         public boolean isReady() {
+            if (secondary) return false; // secondary 还在等 failedToMine，不算 ready
             return canStopNow();
+        }
+
+        /**
+         * Secondary block tick：追踪 failedToMine 自动破坏，估算进度。
+         * 由 onTick 清理循环调用，不参与主驱动。
+         */
+        void tickSecondary() {
+            // 方块已被服务端破坏（failedToMine 完成）
+            if (mc.world.getBlockState(blockPos).getBlock() != block) {
+                phase = Phase.FINISHED;
+                return;
+            }
+
+            // 估算进度（基于 startMs 到现在的时间 vs 预期总 tick）
+            if (expectedFinishMs > 0 && startMs > 0) {
+                long elapsed = System.currentTimeMillis() - startMs;
+                long total = expectedFinishMs - startMs;
+                progress = total > 0 ? Math.min(1.0, (double) elapsed / total) : 1.0;
+            }
+
+            // 超时（预期 + 2s）：放弃追踪
+            if (expectedFinishMs > 0 && System.currentTimeMillis() > expectedFinishMs + 2000) {
+                phase = Phase.FINISHED;
+            }
         }
 
         /** 清除 rotation 排队状态，防止陈旧 callback 卡死后续 phase */
@@ -927,6 +1072,13 @@ public class PacketMine extends Module {
 
             dispatchWithRotation(rotateOnStart.get(), Phase.PENDING_START, blockPos, currentFace, () -> {
                 ensureTaskToolSelected(MyBlock.this);
+
+                // Double Mine: exploit 包含在 doubleMine 中，在合法 START 之前发 Y=5480 START
+                // 污染 GrimAC FastBreak 的 maximumBlockDamage，使后续 STOP 的 diff 永远为负
+                if (doubleMine.get()) {
+                    sendExploitFlood();
+                }
+
                 sendSwing();
                 sendStartPacket(blockPos, currentFace);
                 direction = currentFace; // 记录实际使用的 START face
@@ -960,6 +1112,14 @@ public class PacketMine extends Module {
 
             // 追踪最大 delta（镜像 Grim 的 maximumBlockDamage）
             maxDelta = Math.max(maxDelta, delta);
+
+            // Double Mine 提前 STOP 路径：exploit 保证 GrimAC 侧安全，立即进入 PENDING_STOP
+            if (shouldDoubleMine() && meetsDoubleMineThreshold(blockState, effectiveSlot) && startMs > 0) {
+                phase = Phase.PENDING_STOP;
+                clearRotationState();
+                tickPendingStop();
+                return;
+            }
 
             // 缓存 canStopNow 结果，避免同拍重复计算
             boolean canStop = canStopNow();
@@ -1031,12 +1191,27 @@ public class PacketMine extends Module {
             refreshCurrentFace();
             ensureTaskToolSelected(MyBlock.this);
 
+            boolean useDoubleMine = shouldDoubleMine()
+                && meetsDoubleMineThreshold(blockState, mc.player.getInventory().getSelectedSlot());
+
             dispatchWithRotation(rotateOnStop.get(), Phase.PENDING_STOP, blockPos, currentFace, () -> {
                 ensureTaskToolSelected(MyBlock.this);
                 sendSwing();
                 sendStopPacket(blockPos, currentFace);
                 lastFinishMs = System.currentTimeMillis();
-                phase = Phase.FINISHED;
+
+                if (useDoubleMine) {
+                    // 转为 secondary：保留在 blocks 列表中，由 tickSecondary 追踪 failedToMine
+                    secondary = true;
+                    double delta = BlockUtils.getBreakDelta(mc.player.getInventory().getSelectedSlot(), blockState);
+                    expectedFinishMs = delta > 0
+                        ? startMs + (long) Math.ceil(1.0 / delta) * 50
+                        : 0;
+                    phase = Phase.MINING; // 保持 MINING 使渲染继续显示进度
+                } else {
+                    phase = Phase.FINISHED;
+                }
+
                 clearRotationState();
             });
         }
@@ -1107,5 +1282,6 @@ public class PacketMine extends Module {
                 event.renderer.box(x1, y1, z1, x2, y2, z2, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
             }
         }
+
     }
 }
