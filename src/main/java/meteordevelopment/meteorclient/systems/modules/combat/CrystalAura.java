@@ -32,6 +32,7 @@ import meteordevelopment.meteorclient.utils.entity.Target;
 import meteordevelopment.meteorclient.utils.misc.Keybind;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
+import meteordevelopment.meteorclient.utils.player.SlotUtils;
 import meteordevelopment.meteorclient.utils.player.PlayerUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.render.NametagUtils;
@@ -271,7 +272,7 @@ public class CrystalAura extends Module {
     private final Setting<SupportMode> support = sgPlace.add(new EnumSetting.Builder<SupportMode>()
         .name("支撑放置")
         .description("找不到直接基座时，在空中先放置黑曜石作为支撑方块。Fast=仅第一目标计算伤害（最快），Normal=所有目标。GrimAC 安全（need supportDelay≥1 避免 MultiPlace）。")
-        .defaultValue(SupportMode.Fast)
+        .defaultValue(SupportMode.Accurate)
         .build()
     );
 
@@ -370,6 +371,31 @@ public class CrystalAura extends Module {
     private final Setting<Boolean> smartDelay = sgBreak.add(new BoolSetting.Builder()
         .name("智能延迟")
         .description("仅在目标无受伤 CD（hurtTime=0）时才破坏水晶。严格遵守无敌帧——因为客户端无法获取 lastDamageTaken，在 hurtTime 期间攻击大概率被服务端豁免或只造成极低差值伤害。等 hurtTime 自然过期（~10 tick）后攻击，确保每颗水晶全额命中。")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Integer> targetBreakLimit = sgBreak.add(new IntSetting.Builder()
+        .name("每目标连发上限")
+        .description("对同一目标在进入无敌帧冷却前允许连续破坏水晶的最大次数。2=破两颗后冷却（默认）；1=每次破坏后立即等待。")
+        .defaultValue(2)
+        .min(1)
+        .sliderMax(4)
+        .build()
+    );
+
+    private final Setting<Integer> breakCycleCooldown = sgBreak.add(new IntSetting.Builder()
+        .name("连发后冷却 tick")
+        .description("达到连发上限后对同一目标的冷却 tick 数。\n2=低延迟服务器（hurtTime同步包马上到，靠 smartDelay 兴德免帧拦截）；\n8-10=高延迟或保守模式（完整覆盖 10-tick 无敌帧）。")
+        .defaultValue(2)
+        .min(1)
+        .sliderMax(12)
+        .build()
+    );
+
+    private final Setting<Boolean> autoRefillCrystals = sgBreak.add(new BoolSetting.Builder()
+        .name("自动补充水晶")
+        .description("当快捷栏水晶总数低于阈值时，自动从背包寻找最大水晶堆并将其移入快捷栏。")
         .defaultValue(true)
         .build()
     );
@@ -669,6 +695,13 @@ public class CrystalAura extends Module {
     private boolean attackedThisTick;                                       // 本 tick 已攻击标志，防止重复攻击
     private final Int2LongMap crystalSpawnTimes = new Int2LongOpenHashMap(); // entityId → 生成时间戚，用于新生判定
     private final IntSet handledCrystals = new IntOpenHashSet();             // 已处理的水晶 id，避免重复处理
+    // 双阶段 per-target break 节流
+    // targetBreakCount   : 当前周期内已发送的 break 次数；达到 targetBreakLimit 后进入冷却并清零
+    // targetBreakCooldown: 冷却倒计时（tick）；>0 时跳过对该目标的 break 评估，覆盖服务端 10-tick 无敌帧
+    private final Int2IntMap targetBreakCount    = new Int2IntOpenHashMap();
+    private final Int2IntMap targetBreakCooldown = new Int2IntOpenHashMap();
+    // 自动补充水晶：防止每 tick 频繁执行背包操作的冷却计数器
+    private int crystalRefillCooldown = 0;
 
     // 有效基座位置缓存 —— BlockUpdateEvent 时增量失效，过滤 ~90% 的无效位置
     private final LongSet validBasePosCache = new it.unimi.dsi.fastutil.longs.LongOpenHashSet();
@@ -709,6 +742,8 @@ public class CrystalAura extends Module {
         attackedThisTick = false;
         crystalSpawnTimes.clear();
         handledCrystals.clear();
+        targetBreakCount.clear();
+        targetBreakCooldown.clear();
         baseCacheDirty = true;
         hasProposal = false;
         planner.reset();
@@ -734,6 +769,8 @@ public class CrystalAura extends Module {
         removed.clear();
         crystalSpawnTimes.clear();
         handledCrystals.clear();
+        targetBreakCount.clear();
+        targetBreakCooldown.clear();
         validBasePosCache.clear();
 
         bestTarget = null;
@@ -773,6 +810,20 @@ public class CrystalAura extends Module {
         if (breakTimer > 0) breakTimer--;
         if (placeTimer > 0) placeTimer--;
         if (switchTimer > 0) switchTimer--;
+
+        // 无敌帧冷却：每 tick 递减，归零时结束冷却（开始新周期）
+        for (IntIterator it = targetBreakCooldown.keySet().iterator(); it.hasNext();) {
+            int id = it.nextInt();
+            int ticks = targetBreakCooldown.get(id);
+            if (ticks <= 1) it.remove();
+            else targetBreakCooldown.put(id, ticks - 1);
+        }
+
+        // 自动补充快捷栏水晶
+        if (autoRefillCrystals.get()) {
+            if (crystalRefillCooldown > 0) crystalRefillCooldown--;
+            else tryCrystalRefill();
+        }
 
         // Decrement render timers
         if (placeRenderTimer > 0) placeRenderTimer--;
@@ -986,10 +1037,86 @@ public class CrystalAura extends Module {
             attemptedBreaks.put(crystal.getId(), attemptedBreaks.get(crystal.getId()) + 1);
             waitingToExplode.put(crystal.getId(), 0);
 
+            // 双阶段 per-target break 节流：break 成功后递增计数
+            // 达到 targetBreakLimit 上限 → 进入冷却（覆盖服务端 10-tick 无敌帧），下一周期重新计数
+            LivingEntity victim = findBestVictimFor(crystal);
+            if (victim != null) {
+                int count = targetBreakCount.getOrDefault(victim.getId(), 0) + 1;
+                if (count >= targetBreakLimit.get()) {
+                    // 到达连发上限 → 进入冷却，tick 数由 breakCycleCooldown 设置决定
+                    targetBreakCooldown.put(victim.getId(), (int) breakCycleCooldown.get());
+                    targetBreakCount.remove(victim.getId());
+                } else {
+                    targetBreakCount.put(victim.getId(), count);
+                }
+            }
+
             // Break render
             breakRenderPos.set(crystal.getBlockPos().down());
             breakRenderTimer = breakRenderTime.get();
         }
+    }
+
+    /**
+     * 自动补充快捷栏水晶：当快捷栏水晶总数低于阈值时，
+     * 从背包（主物品栏 9-35）找最大水晶堆，移入快捷栏。
+     * 优先填入已有水晶的快捷栏槽位（合堆），次选空槽位。
+     */
+    private void tryCrystalRefill() {
+        // MultiActionsC (experimental): CLICK_WINDOW + 疾跑会被部分严格服务器检测
+        // 疾跑中跳过补充，等短暂停顿时再执行（精度不重要，只要安全）
+        if (mc.player.isSprinting()) return;
+
+        // 统计快捷栏（0-8）水晶总数
+        int hotbarCount = 0;
+        for (int i = SlotUtils.HOTBAR_START; i <= SlotUtils.HOTBAR_END; i++) {
+            ItemStack stack = mc.player.getInventory().getStack(i);
+            if (stack.getItem() == Items.END_CRYSTAL) hotbarCount += stack.getCount();
+        }
+        if (hotbarCount >= 8) return;
+
+        // 背包中最大水晶堆（槽位 9-35）
+        int invSlot = -1, invMax = 0;
+        for (int i = SlotUtils.MAIN_START; i <= SlotUtils.MAIN_END; i++) {
+            ItemStack stack = mc.player.getInventory().getStack(i);
+            if (stack.getItem() == Items.END_CRYSTAL && stack.getCount() > invMax) {
+                invSlot = i;
+                invMax = stack.getCount();
+            }
+        }
+        if (invSlot == -1) return;
+
+        // 目标快捷栏槽位：优先选已有水晶的槽位（合堆），次选空槽，末选当前槽
+        int targetSlot = -1;
+        for (int i = SlotUtils.HOTBAR_START; i <= SlotUtils.HOTBAR_END; i++) {
+            if (mc.player.getInventory().getStack(i).getItem() == Items.END_CRYSTAL) { targetSlot = i; break; }
+        }
+        if (targetSlot == -1) {
+            for (int i = SlotUtils.HOTBAR_START; i <= SlotUtils.HOTBAR_END; i++) {
+                if (mc.player.getInventory().getStack(i).isEmpty()) { targetSlot = i; break; }
+            }
+        }
+        if (targetSlot == -1) targetSlot = mc.player.getInventory().getSelectedSlot();
+
+        InvUtils.move().from(invSlot).to(targetSlot);
+        crystalRefillCooldown = 5; // 5 tick 内不重复触发，等服务端同步槽位
+    }
+
+    /**
+     * 返回给定水晶爆炸时对当前 targets 中伤害最高的目标实体。
+     * 用于在 break 成功后写入 RTT 盲窗抑制：在服务端 hurtTime 确认到达之前，
+     * 压低对该目标的后续 break 兑现率，防止无效连打。
+     */
+    private LivingEntity findBestVictimFor(Entity crystal) {
+        float bestDmg = 0;
+        LivingEntity best = null;
+        Vec3d pos = crystal.getPos();
+        blockPos.set(crystal.getBlockPos()).move(0, -1, 0);
+        for (LivingEntity target : targets) {
+            float dmg = DamageUtils.crystalDamage(target, pos, predictMovement.get(), blockPos);
+            if (dmg > bestDmg) { bestDmg = dmg; best = target; }
+        }
+        return best;
     }
 
     private boolean isValidWeaknessItem(ItemStack itemStack) {
@@ -1874,9 +2001,10 @@ public class CrystalAura extends Module {
             if (target != null) {
                 float dmg = DamageUtils.crystalDamage(target, vec3d, predictMovement.get(), obsidianPos);
                 // smartDelay: hurtTime > 0 时严格跳过 (客户端不知 lastDamageTaken, 不做致死赌博)
-                if (!breaking || !smartDelay.get() || target.hurtTime <= 0) {
-                    damage = dmg;
-                }
+                if (breaking && smartDelay.get() && target.hurtTime > 0) { /* skip */ }
+                // 无敌帧冷却：达到连发上限后冷却期间跳过对同一目标的 break
+                else if (breaking && targetBreakCooldown.getOrDefault(target.getId(), 0) > 0) { /* skip */ }
+                else damage = dmg;
             }
         }
         else {
@@ -1885,6 +2013,8 @@ public class CrystalAura extends Module {
 
                 // smartDelay: hurtTime > 0 时严格跳过 (客户端不知 lastDamageTaken, 不做致死赌博)
                 if (breaking && smartDelay.get() && target.hurtTime > 0) continue;
+                // 无敌帧冷却：达到连发上限后冷却期间跳过对同一目标的 break
+                if (breaking && targetBreakCooldown.getOrDefault(target.getId(), 0) > 0) continue;
 
                 // Update best target
                 if (dmg > bestTargetDamage) {
@@ -2028,6 +2158,18 @@ public class CrystalAura extends Module {
                     event.renderer.line(x + 1, y, z + 1, x + 1, y - height.get(), z + 1, lc, bottom);
                 }
             }
+
+            case Fading -> {
+                // Fading 模式：按剩余 timer 线性淡出 alpha，目前退化为 Normal 行为
+                if (renderPlace.get() && placeRenderTimer > 0) {
+                    event.renderer.box(placeRenderPos, sc, lc, shapeMode.get(), 0);
+                }
+                if (renderBreak.get() && breakRenderTimer > 0) {
+                    event.renderer.box(breakRenderPos, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
+                }
+            }
+
+            case None -> {} // onRender 入口的 early-return 已处理，此处不可达
         }
     }
 
