@@ -10,6 +10,8 @@ import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.utils.printer.PrinterBehavior;
+import meteordevelopment.meteorclient.utils.printer.PrinterTaskProvider;
 import meteordevelopment.meteorclient.utils.printer.SpawnCheckHelper;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
@@ -34,7 +36,7 @@ import java.util.*;
  * <p>空间索引缓存（4³ cell）持久化所有已知可刷怪位置，实时扫描覆盖写入。
  * 渲染取并集（缓存 ∪ 实时）中最近 N 个，双通道深度（正常+穿透）。
  */
-public class SpawnProof extends Module {
+public class SpawnProof extends Module implements PrinterTaskProvider {
 
     public enum Mode { SLAB, BUTTON, TORCH }
 
@@ -163,6 +165,9 @@ public class SpawnProof extends Module {
         // cellIndex/cachedSet 不清除 — 跨 toggle 保留
         analysisActive = false;
         renderHighlights = Collections.emptyList();
+
+        // 注册为 Printer 输入源
+        Printer.registerProvider(this);
     }
 
     @Override
@@ -196,6 +201,9 @@ public class SpawnProof extends Module {
 
     @Override
     public void onDeactivate() {
+        // 注销 Printer 输入源
+        Printer.unregisterProvider(this);
+
         spawnablePositions.clear();
         torchPlacementPositions.clear();
         analysisActive = false;
@@ -500,6 +508,7 @@ public class SpawnProof extends Module {
     public Mode getMode() { return mode.get(); }
 
     /** Printer 应放置方块的位置集合 */
+    @Override
     public Set<BlockPos> getPlacementPositions() {
         return switch (mode.get()) {
             case TORCH -> Collections.unmodifiableSet(torchPlacementPositions);
@@ -507,7 +516,7 @@ public class SpawnProof extends Module {
         };
     }
 
-    /** 当前模式对应的目标方块状态 */
+    /** 当前模式对应的目标方块状态（位置无关） */
     public BlockState getDesiredState() {
         return switch (mode.get()) {
             case SLAB -> {
@@ -529,5 +538,22 @@ public class SpawnProof extends Module {
     /** 当前模式使用的物品 */
     public net.minecraft.item.Item getRequiredItem() {
         return getDesiredState().getBlock().asItem();
+    }
+
+    // ==================== PrinterTaskProvider ====================
+
+    @Override
+    public BlockState getDesiredState(BlockPos pos) {
+        return getDesiredState();
+    }
+
+    @Override
+    public Set<PrinterBehavior.Group> allowedGroups() {
+        return Set.of(PrinterBehavior.Group.PLACEMENT);
+    }
+
+    @Override
+    public String name() {
+        return "SpawnProof";
     }
 }

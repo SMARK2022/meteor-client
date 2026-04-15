@@ -42,9 +42,8 @@ import meteordevelopment.meteorclient.utils.printer.BlockUtilHelper;
 import meteordevelopment.meteorclient.utils.printer.ContainerFillManager;
 import meteordevelopment.meteorclient.utils.printer.PrinterBehavior;
 import meteordevelopment.meteorclient.utils.printer.PrinterTask;
-import meteordevelopment.meteorclient.utils.printer.SpawnCheckHelper;
+import meteordevelopment.meteorclient.utils.printer.PrinterTaskProvider;
 import meteordevelopment.meteorclient.utils.printer.behavior.*;
-import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.utils.printer.ContainerFillScreen;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.*;
@@ -81,6 +80,31 @@ import java.util.*;
  * 这样 movement 物理、movement packet、place packet 使用同一个角度。
  */
 public class Printer extends Module {
+
+    // ==================== 外挂输入源注册表 ====================
+
+    private static final List<PrinterTaskProvider> providers = new ArrayList<>();
+
+    /** 注册输入源（外挂模块在 onActivate 时调用） */
+    public static void registerProvider(PrinterTaskProvider provider) {
+        if (!providers.contains(provider)) {
+            providers.add(provider);
+            providers.sort(Comparator.comparingInt(p -> -p.priority()));
+        }
+    }
+
+    /** 注销输入源（外挂模块在 onDeactivate 时调用） */
+    public static void unregisterProvider(PrinterTaskProvider provider) {
+        providers.remove(provider);
+    }
+
+    /** 查询指定输入源是否已注册 */
+    public static boolean isProviderRegistered(PrinterTaskProvider provider) {
+        return providers.contains(provider);
+    }
+
+    // ==================== 设置 ====================
+
     private final SettingGroup sgGeneral   = settings.getDefaultGroup();
     private final SettingGroup sgFixes     = settings.createGroup("行为修正");
     private final SettingGroup sgContainer = settings.createGroup("容器填充");
@@ -278,12 +302,6 @@ public class Printer extends Module {
             .description("不破坏蓝图要求空气位的脚手架")
             .defaultValue(true)
             .visible(breakMismatched::get)
-            .build());
-
-    private final Setting<Boolean> enableSpawnProof = sgFixes.add(new BoolSetting.Builder()
-            .name("防刷怪")
-            .description("自动放置 SpawnProof 覆盖层方块，需 SpawnProof 模块启用")
-            .defaultValue(false)
             .build());
 
     // Key → sub-toggle mapping (populated in constructor)
@@ -672,7 +690,8 @@ public class Printer extends Module {
         if (moveStop.get() && isPlayerMoving()) return;     // 移动暂停
 
         WorldSchematic worldSchematic = SchematicWorldHandler.getSchematicWorld();
-        if (worldSchematic == null) {
+        boolean hasProviders = hasActiveProviders();
+        if (worldSchematic == null && !hasProviders) {
             if (isActive()) { error("Litematica schematic not loaded."); toggle(); }
             return;
         }
@@ -681,7 +700,16 @@ public class Printer extends Module {
         tickDelay = 0;
 
         // ── 更新任务列表 ──
-        updateTasks(worldSchematic);
+        if (worldSchematic != null) {
+            updateTasks(worldSchematic);
+        } else {
+            // 无蓝图但有外挂输入源：清空旧蓝图任务
+            tasks.clear();
+            previewCandidates.clear();
+        }
+
+        // ── 外挂输入源统一注入 ──
+        appendProviderTasks(worldSchematic);
 
         if (!tasks.isEmpty()) {
             // 标准打印：构建候选 → 评分 → 准备
@@ -748,10 +776,11 @@ public class Printer extends Module {
     private void buildPreviewCandidates() {
         previewCandidates.clear();
 
-        // 如果本 tick 刚做过背包→热栏转移，跳过
+        // 背包→热栏转移标记：vanilla clickSlot 乐观本地更新 + GrimAC doClick 同步模拟，
+        // 同 tick 内 ClickSlot + HeldItemChange + PlayerMove + InteractBlock 序列完全合法。
+        // 仅重置标记，不跳过。
         if (ItemSwitchHelper.didInventoryTransferThisTick()) {
             ItemSwitchHelper.resetTransferFlag();
-            return;
         }
 
         boolean strict = placeMode.get() == PlaceMode.STRICT;
@@ -1262,11 +1291,6 @@ public class Printer extends Module {
             tasks.add(new PlannedTask(task, behavior));
         }
 
-        // ── SpawnProof 覆盖层任务：蓝图外的可刷怪位置 ──
-        if (enableSpawnProof.get()) {
-            appendSpawnProofTasks(worldSchematic);
-        }
-
         // 按距离排序（最近的优先）
         Vec3d eyePos = mc.player.getEyePos();
         tasks.sort(Comparator.comparingDouble(
@@ -1303,54 +1327,72 @@ public class Printer extends Module {
         }
     }
 
-    /**
-     * 追加 SpawnProof 覆盖层任务到 tasks 列表。
-     *
-     * <p>遍历 SpawnProof 模块的放置候选集（TORCH 模式为 grid-NMS 后的稀疏最优点，
-     * SLAB/BUTTON 模式为全部可刷怪位置），为蓝图未覆盖且仍需防护的位置生成放置任务。
-     *
-     * <p>满足条件用模式级检查而非精确状态匹配：
-     * - SLAB/BUTTON: 几何判定（位置结构上仍可刷怪 → 需要覆盖）
-     * - TORCH: 完整判定（光照已足 → 不需要再插火把）
-     *
-     * <p>蓝图边界内的位置始终由蓝图管辖，不会被 overlay 覆盖。
-     */
-    private void appendSpawnProofTasks(WorldSchematic worldSchematic) {
-        SpawnProof spawnProof = Modules.get().get(SpawnProof.class);
-        if (spawnProof == null || !spawnProof.isActive()) return;
+    // ==================== 外挂输入源统一集成 ====================
 
-        BlockState desired = spawnProof.getDesiredState();
+    /**
+     * 查询是否有任意已注册的输入源当前有待放置位置。
+     */
+    private boolean hasActiveProviders() {
+        for (PrinterTaskProvider p : providers) {
+            if (!p.getPlacementPositions().isEmpty()) return true;
+        }
+        return false;
+    }
+
+    /**
+     * 遍历所有已注册输入源，将其任务注入 tasks 列表。
+     *
+     * <p>每个输入源通过 {@link PrinterTaskProvider#allowedGroups()} 声明允许的 Behavior Group，
+     * Printer 只会匹配在允许集合内的 behavior，防止非蓝图输入源触发 BREAK 等行为。</p>
+     *
+     * <p>对于非 bypass 输入源（如 SpawnProof），蓝图边界内的位置由蓝图管辖，跳过。</p>
+     */
+    private void appendProviderTasks(@org.jetbrains.annotations.Nullable WorldSchematic worldSchematic) {
         double range = placeRange.get();
         double maxDist2 = (range + 1.0) * (range + 1.0);
         Vec3d eye = mc.player.getEyePos();
-        boolean isTorch = spawnProof.getMode() == SpawnProof.Mode.TORCH;
 
-        for (BlockPos pos : spawnProof.getPlacementPositions()) {
-            // 距离检查（仅处理 Printer 可达范围内的位置）
-            double dist2 = eye.squaredDistanceTo(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
-            if (dist2 > maxDist2) continue;
+        for (PrinterTaskProvider provider : providers) {
+            Collection<BlockPos> positions = provider.getPlacementPositions();
+            if (positions.isEmpty()) continue;
 
-            // 蓝图优先：蓝图有非空气方块或位置在蓝图边界内 → 蓝图管辖，跳过
-            BlockState schState = worldSchematic.getBlockState(pos);
-            if (!schState.isAir() || isWithinAnyPlacement(pos)) continue;
+            Set<PrinterBehavior.Group> allowed = provider.allowedGroups();
+            boolean bypass = provider.bypassSchematicCheck();
 
-            // 实时安全检查：即使扫描缓存说可刷，若世界已安全则跳过
-            // SLAB/BUTTON → 几何检查（不看光，因为光源可被移除）
-            // TORCH       → 完整检查（已亮则不插）
-            boolean stillNeedsProtection = isTorch
-                ? !SpawnCheckHelper.isSpawnSafe(mc.world, pos)
-                : SpawnCheckHelper.isGeometricSpawnable(mc.world, pos);
-            if (!stillNeedsProtection) continue;
+            for (BlockPos pos : positions) {
+                double dist2 = eye.squaredDistanceTo(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
+                if (dist2 > maxDist2) continue;
 
-            BlockState current = mc.world.getBlockState(pos);
-            PrinterTask task = new PrinterTask(pos, desired, current);
+                // 非 bypass 输入源：蓝图边界内由蓝图管辖
+                if (!bypass && worldSchematic != null) {
+                    BlockState schState = worldSchematic.getBlockState(pos);
+                    if (!schState.isAir() || isWithinAnyPlacement(pos)) continue;
+                }
 
-            PrinterBehavior behavior = findEnabledBehavior(task);
-            if (behavior == null || behavior.isSatisfied(task)) continue;
-            if (behavior instanceof BlockPlacementBehavior && hasBlockingEntity(pos)) continue;
+                BlockState desired = provider.getDesiredState(pos);
+                BlockState current = mc.world.getBlockState(pos);
 
-            tasks.add(new PlannedTask(task, behavior));
+                PrinterTask task = new PrinterTask(pos, desired, current);
+
+                PrinterBehavior behavior = findEnabledBehaviorForProvider(task, allowed);
+                if (behavior == null || behavior.isSatisfied(task)) continue;
+                if (behavior instanceof BlockPlacementBehavior && hasBlockingEntity(pos)) continue;
+
+                tasks.add(new PlannedTask(task, behavior));
+            }
         }
+    }
+
+    /**
+     * 为输入源的任务查找第一个已启用且在允许 Group 集合内的匹配 behavior。
+     */
+    private PrinterBehavior findEnabledBehaviorForProvider(PrinterTask task, Set<PrinterBehavior.Group> allowed) {
+        for (PrinterBehavior behavior : PrinterBehavior.REGISTRY) {
+            if (!allowed.contains(behavior.group())) continue;
+            if (!isBehaviorEnabled(behavior)) continue;
+            if (behavior.supports(task)) return behavior;
+        }
+        return null;
     }
 
     /**

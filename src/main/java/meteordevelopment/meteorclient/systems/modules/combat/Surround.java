@@ -14,13 +14,19 @@ import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.entity.DamageUtils;
+import meteordevelopment.meteorclient.systems.modules.Modules;
+import meteordevelopment.meteorclient.systems.modules.player.Printer;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.PlayerUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
+import meteordevelopment.meteorclient.utils.printer.PlacementContext;
+import meteordevelopment.meteorclient.utils.printer.PlacementOption;
+import meteordevelopment.meteorclient.utils.printer.PrinterBehavior;
+import meteordevelopment.meteorclient.utils.printer.PrinterTaskProvider;
+import meteordevelopment.meteorclient.utils.printer.ResolverRegistry;
 import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
-import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.meteorclient.utils.world.Dir;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Block;
@@ -30,18 +36,24 @@ import net.minecraft.entity.Entity;
 import net.minecraft.entity.decoration.EndCrystalEntity;
 import net.minecraft.entity.player.BlockBreakingInfo;
 import net.minecraft.network.packet.c2s.play.HandSwingC2SPacket;
+import net.minecraft.network.packet.c2s.play.PlayerInteractBlockC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerInteractEntityC2SPacket;
 import net.minecraft.network.packet.s2c.play.DeathMessageS2CPacket;
 import net.minecraft.util.Hand;
+import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Box;
+import net.minecraft.util.math.Vec3d;
 
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
+import java.util.Set;
 import java.util.function.Predicate;
 
-public class Surround extends Module {
+public class Surround extends Module implements PrinterTaskProvider {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgToggles = settings.createGroup("Toggles");
     private final SettingGroup sgRender = settings.createGroup("Render");
@@ -79,10 +91,17 @@ public class Surround extends Module {
         .build()
     );
 
-    private final Setting<Boolean> doubleHeight = sgGeneral.add(new BoolSetting.Builder()
-        .name("double-height")
-        .description("Places obsidian on top of the original surround blocks to prevent people from face-placing you.")
-        .defaultValue(false)
+    private final Setting<TopMode> headProtection = sgGeneral.add(new EnumSetting.Builder<TopMode>()
+        .name("head-protection")
+        .description("Head-level block protection. AntiFacePlace=4 side blocks at y+1; Top=1 block at y+2; Full=both; None=disabled.")
+        .defaultValue(TopMode.None)
+        .build()
+    );
+
+    private final Setting<BottomMode> belowProtection = sgGeneral.add(new EnumSetting.Builder<BottomMode>()
+        .name("below-protection")
+        .description("Place a block below your feet to prevent crystal placement under you.")
+        .defaultValue(BottomMode.None)
         .build()
     );
 
@@ -259,11 +278,20 @@ public class Surround extends Module {
             BlockPos renderPos = playerPos.offset(direction);
 
             // Regular surround positions
-            draw(renderPos, event, doubleHeight.get() ? Dir.UP : 0);
+            boolean headSides = headProtection.get() == TopMode.AntiFacePlace || headProtection.get() == TopMode.Full;
+            draw(renderPos, event, headSides ? Dir.UP : 0);
 
-            // Double height
-            if (doubleHeight.get()) draw(renderPos.up(), event, Dir.DOWN);
+            // Head-level side blocks (AntiFacePlace / Full)
+            if (headSides) draw(renderPos.up(), event, Dir.DOWN);
         }
+
+        // Head top block (Top / Full)
+        if (headProtection.get() == TopMode.Top || headProtection.get() == TopMode.Full) {
+            draw(playerPos.add(0, 2, 0), event, 0);
+        }
+
+        // Below protection (Single)
+        if (belowProtection.get() == BottomMode.Single) draw(playerPos.down(), event, 0);
     }
 
     private void draw(BlockPos renderPos, Render3DEvent event, int exclude) {
@@ -290,10 +318,16 @@ public class Surround extends Module {
                 }
             }
         }
+
+        // 注册为 Printer 输入源
+        Printer.registerProvider(this);
     }
 
     @Override
     public void onDeactivate() {
+        // 注销 Printer 输入源
+        Printer.unregisterProvider(this);
+
         if (toggleBack.get() && !toActivate.isEmpty() && mc.world != null && mc.player != null) {
             for (Module module : toActivate) {
                 if (!module.isActive()) {
@@ -302,6 +336,95 @@ public class Surround extends Module {
             }
         }
     }
+
+    // ==================== PrinterTaskProvider 接口实现 ====================
+
+    /**
+     * 返回当前需要防御放置的目标位置集合（所有仍为可替换状态的 Surround 位置）。
+     * <p>Printer 模块调用此方法将 Surround 的任务注入其统一管线。</p>
+     */
+    @Override
+    public Collection<BlockPos> getPlacementPositions() {
+        if (mc.player == null || mc.world == null) return Collections.emptyList();
+
+        List<BlockPos> needed = new ArrayList<>();
+        BlockPos playerPos = mc.player.getBlockPos();
+
+        // 四面脚部位置
+        for (Direction dir : Direction.HORIZONTAL) {
+            BlockPos pos = playerPos.offset(dir);
+            if (mc.world.getBlockState(pos).isReplaceable()) needed.add(pos);
+
+            // 空中放置时 support 格
+            if (!airPlace.get() && isAirPlace(pos) && mc.world.getBlockState(pos).isReplaceable()) {
+                BlockPos support = pos.down();
+                if (mc.world.getBlockState(support).isReplaceable()) needed.add(support);
+            }
+        }
+
+        // 头部侧面（AntiFacePlace / Full）
+        boolean doHeadSides = headProtection.get() == TopMode.AntiFacePlace || headProtection.get() == TopMode.Full;
+        if (doHeadSides) {
+            for (Direction dir : Direction.HORIZONTAL) {
+                BlockPos pos = playerPos.offset(dir).up();
+                if (mc.world.getBlockState(pos).isReplaceable()) needed.add(pos);
+            }
+        }
+
+        // 头顶（Top / Full）
+        if (headProtection.get() == TopMode.Top || headProtection.get() == TopMode.Full) {
+            BlockPos pos = playerPos.add(0, 2, 0);
+            if (mc.world.getBlockState(pos).isReplaceable()) needed.add(pos);
+        }
+
+        // 脚下（Single）
+        if (belowProtection.get() == BottomMode.Single) {
+            BlockPos pos = playerPos.down();
+            if (mc.world.getBlockState(pos).isReplaceable()) needed.add(pos);
+        }
+
+        return Collections.unmodifiableList(needed);
+    }
+
+    /**
+     * 返回 Surround 期望放置的方块状态（使用首选方块的默认状态）。
+     */
+    @Override
+    public BlockState getDesiredState(BlockPos pos) {
+        Block b = blocks.get().isEmpty() ? Blocks.OBSIDIAN : blocks.get().getFirst();
+        return b.getDefaultState();
+    }
+
+    /**
+     * Surround 是防御模块，允许在无 Litematica 蓝图时运行。
+     */
+    @Override
+    public boolean bypassSchematicCheck() {
+        return true;
+    }
+
+    /**
+     * Surround 只需要放置行为，不需要 BREAK/REDSTONE 等。
+     */
+    @Override
+    public Set<PrinterBehavior.Group> allowedGroups() {
+        return Set.of(PrinterBehavior.Group.PLACEMENT);
+    }
+
+    /**
+     * 防御模块高优先级，确保在蓝图/SpawnProof 任务之前处理。
+     */
+    @Override
+    public int priority() {
+        return 100;
+    }
+
+    @Override
+    public String name() {
+        return "Surround";
+    }
+
+    // ==================== Tick 处理 ====================
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
@@ -316,6 +439,18 @@ public class Surround extends Module {
 
         // Wait till player is on ground
         if (onlyOnGround.get() && !mc.player.isOnGround()) return;
+
+        // 如果 Printer 已启用且自己已注册为输入源，让出控制权（仅保留 center/complete 逻辑）
+        Printer printer = Modules.get().get(Printer.class);
+        if (printer != null && printer.isActive() && Printer.isProviderRegistered(this)) {
+            // Printer 管线负责实际 place，Surround 只负责 center
+            boolean complete = getPlacementPositions().isEmpty();
+            if (!complete && center.get() == Center.Incomplete) PlayerUtils.centerPlayer();
+            if (complete && center.get() == Center.Always) PlayerUtils.centerPlayer();
+            if (complete && toggleOnComplete.get()) { toggle(); return; }
+            timer = 0;
+            return;
+        }
 
         // Wait until the player has a block available to place
         FindItemResult block = InvUtils.findInHotbar(itemStack -> blocks.get().contains(Block.getBlockFromItem(itemStack.getItem())));
@@ -335,23 +470,42 @@ public class Surround extends Module {
 
             // Place support blocks if air place is disabled
             if (!airPlace.get() && isAirPlace(placePos) && mc.world.getBlockState(placePos).isReplaceable()){
-                if (place(placePos.down(), block) && ++placedCount >= blocksPerTick.get()) break;
+                if (placeSafe(placePos.down(), block) && ++placedCount >= blocksPerTick.get()) break;
 
                 if (mc.world.getBlockState(placePos.down()).isReplaceable()) complete = false;
             }
 
-            if (place(placePos, block) && ++placedCount >= blocksPerTick.get()) break;
+            if (placeSafe(placePos, block) && ++placedCount >= blocksPerTick.get()) break;
 
             if (mc.world.getBlockState(placePos).isReplaceable()) complete = false;
         }
 
-        // Placing head blocks
-        if (doubleHeight.get() && complete) {
+        // Placing head-level side blocks (AntiFacePlace / Full)
+        boolean doHeadSides = headProtection.get() == TopMode.AntiFacePlace || headProtection.get() == TopMode.Full;
+        boolean doHeadTop   = headProtection.get() == TopMode.Top            || headProtection.get() == TopMode.Full;
+
+        if (doHeadSides && complete) {
             for (Direction direction : Direction.HORIZONTAL) {
                 BlockPos placePos = playerPos.offset(direction).up();
-                if (place(placePos, block) && ++placedCount >= blocksPerTick.get()) break;
+                if (placeSafe(placePos, block) && ++placedCount >= blocksPerTick.get()) break;
 
                 if (mc.world.getBlockState(placePos).isReplaceable()) complete = false;
+            }
+        }
+
+        // Placing head top block (Top / Full)
+        if (doHeadTop && complete) {
+            BlockPos placePos = playerPos.add(0, 2, 0);
+            if (mc.world.getBlockState(placePos).isReplaceable()) {
+                if (placeSafe(placePos, block)) { placedCount++; complete = false; }
+            }
+        }
+
+        // Placing below block (Single)
+        if (belowProtection.get() == BottomMode.Single && complete) {
+            BlockPos placePos = playerPos.down();
+            if (mc.world.getBlockState(placePos).isReplaceable()) {
+                if (placeSafe(placePos, block)) { placedCount++; complete = false; }
             }
         }
 
@@ -367,11 +521,49 @@ public class Surround extends Module {
         if (!complete && center.get() == Center.Incomplete) PlayerUtils.centerPlayer();
     }
 
-    private boolean place(BlockPos placePos, FindItemResult block) {
-        // Attempt to place
-        boolean placed = BlockUtils.place(placePos, block, rotate.get(), 100, swing.get(), true);
+    private boolean placeSafe(BlockPos placePos, FindItemResult item) {
+        if (mc.player == null || mc.world == null) return false;
 
-        // Check if the block is being mined
+        boolean placed = false;
+
+        // Try printer-resolver for NCP/GrimAC-safe face selection
+        net.minecraft.item.ItemStack stack = mc.player.getInventory().getStack(item.isOffhand() ? 40 : item.slot());
+        Block blockToPlace = Block.getBlockFromItem(stack.getItem());
+        BlockState state = blockToPlace.getDefaultState();
+
+        PlacementContext ctx = PlacementContext.of(mc.world, placePos, state, mc.player, true, false, 4.5);
+        PlacementOption option = ResolverRegistry.resolve(ctx);
+
+        if (option != null && option.hitVec() != null) {
+            BlockPos interactPos = option.getInteractPos(placePos);
+            Direction clickedFace = option.getClickedFace();
+            BlockHitResult hitResult = new BlockHitResult(option.hitVec(), clickedFace, interactPos, false);
+            Hand hand = item.isOffhand() ? Hand.OFF_HAND : Hand.MAIN_HAND;
+
+            if (rotate.get()) {
+                Vec3d hv = option.hitVec();
+                double dx = hv.x - mc.player.getX();
+                double dy = hv.y - mc.player.getEyeY();
+                double dz = hv.z - mc.player.getZ();
+                double yaw = Math.toDegrees(Math.atan2(-dx, dz));
+                double pitch = Math.toDegrees(Math.atan2(-dy, Math.sqrt(dx * dx + dz * dz)));
+                Hand fHand = hand;
+                BlockHitResult fHit = hitResult;
+                Rotations.rotate(yaw, pitch, () -> {
+                    int seq = mc.world.getPendingUpdateManager().incrementSequence().getSequence();
+                    mc.player.networkHandler.sendPacket(new PlayerInteractBlockC2SPacket(fHand, fHit, seq));
+                });
+            } else {
+                int seq = mc.world.getPendingUpdateManager().incrementSequence().getSequence();
+                mc.player.networkHandler.sendPacket(new PlayerInteractBlockC2SPacket(hand, hitResult, seq));
+            }
+
+            if (swing.get()) mc.player.swingHand(hand);
+            placed = true;
+        }
+        // 无 fallback：ResolverRegistry 未找到有效面时静默跳过（避免 MultiPlace 风险）
+
+        // Check if being mined
         boolean beingMined = false;
         for (BlockBreakingInfo value : ((WorldRendererAccessor) mc.worldRenderer).meteor$getBlockBreakingInfos().values()) {
             if (value.getPos().equals(placePos)) {
@@ -455,6 +647,18 @@ public class Surround extends Module {
 
     private boolean blockFilter(Block block) {
         return block.getBlastResistance() >= 600 && block.getHardness() >= 0 && block != Blocks.REINFORCED_DEEPSLATE;
+    }
+
+    public enum TopMode {
+        None,
+        AntiFacePlace,
+        Top,
+        Full
+    }
+
+    public enum BottomMode {
+        None,
+        Single
     }
 
     public enum Center {
