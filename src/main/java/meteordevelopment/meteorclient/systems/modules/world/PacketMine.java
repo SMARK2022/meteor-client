@@ -554,11 +554,13 @@ public class PacketMine extends Module {
                         if (!allowAir) continue;
                         Vec3d anchor = Vec3d.ofCenter(pos);
                         if (eye.squaredDistanceTo(anchor) > range * range) continue;
+                        // 选择玩家眼睛所在侧的面，避免 PositionBreakA flag
+                        Direction airFace = resolveAirFace(eye, anchor);
                         Vec3d toBlock = anchor.subtract(eye).normalize();
                         double anglePenalty = 1.0 - look.dotProduct(toBlock);
                         double score = anglePenalty * 3.0 + eye.distanceTo(anchor);
                         if (best == null || score < best.score) {
-                            best = new DrainTarget(pos, Direction.UP, score);
+                            best = new DrainTarget(pos, airFace, score);
                         }
                         continue;
                     }
@@ -693,6 +695,22 @@ public class PacketMine extends Module {
             face.getOffsetY() * 0.49,
             face.getOffsetZ() * 0.49
         );
+    }
+
+    /**
+     * 为空气方块选择不会触发 PositionBreakA 的面。
+     * PositionBreakA 检查眼睛是否在方块面的正面方向侧：
+     * UP → maxY < combined.maxY 为 flag, DOWN → minY > combined.minY 为 flag, etc.
+     * 选择眼睛相对方块中心偏移最大的轴对应的面（即眼睛一定在该面的正确侧）。
+     */
+    private static Direction resolveAirFace(Vec3d eye, Vec3d blockCenter) {
+        double dx = eye.x - blockCenter.x;
+        double dy = eye.y - blockCenter.y;
+        double dz = eye.z - blockCenter.z;
+        double ax = Math.abs(dx), ay = Math.abs(dy), az = Math.abs(dz);
+        if (ay >= ax && ay >= az) return dy > 0 ? Direction.UP : Direction.DOWN;
+        if (ax >= az) return dx > 0 ? Direction.EAST : Direction.WEST;
+        return dz > 0 ? Direction.SOUTH : Direction.NORTH;
     }
 
     /**
