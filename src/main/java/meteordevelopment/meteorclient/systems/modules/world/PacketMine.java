@@ -160,7 +160,7 @@ public class PacketMine extends Module {
 
     private final Setting<Boolean> doubleMine = sgGrim.add(new BoolSetting.Builder()
         .name("Double Mine")
-        .description("利用 Y=5480 exploit 污染 GrimAC FastBreak 后，通过服务端 failedToMine 机制实现双方块并行挖掘。会在 AirLiquidBreak 产生 alert（无 kick/ban）。")
+        .description("利用附近瞬破方块 + PositionBreakA 强制取消来污染 GrimAC FastBreak，配合服务端 failedToMine 机制实现双方块并行挖掘。需要附近存在可瞬破的非空气方块。PositionBreakA 产生 Misc alert（无 kick/ban）。")
         .defaultValue(false)
         .visible(grimBypass::get)
         .build()
@@ -275,6 +275,7 @@ public class PacketMine extends Module {
         scrolledThisTick = false;
         slotConflictTicks = 0;
         drainRenderPos = null;
+        cachedExploit = null;
     }
 
     @Override
@@ -286,6 +287,7 @@ public class PacketMine extends Module {
         scrolledThisTick = false;
         slotConflictTicks = 0;
         drainRenderPos = null;
+        cachedExploit = null;
     }
 
     @EventHandler
@@ -532,7 +534,7 @@ public class PacketMine extends Module {
     /**
      * 在交互范围内搜索最佳 drain 目标。
      * 评分综合：视角偏转（权重 3）+ 距离。排除瞬破方块和正在挖的方块。
-     * doubleMine 启用时允许空气方块作为 drain 目标（AirLiquidBreak flag 已被接受）。
+     * 不使用 AIR 方块: GrimAC FastBreak 对 AIR START 直接 return，不更新 balance。
      */
     private DrainTarget findDrainTarget() {
         Vec3d eye = mc.player.getEyePos();
@@ -541,7 +543,6 @@ public class PacketMine extends Module {
         int slot = mc.player.getInventory().getSelectedSlot();
         BlockPos center = mc.player.getBlockPos();
         int r = (int) Math.ceil(range);
-        boolean allowAir = doubleMine.get(); // doubleMine 已接受 AirLiquidBreak flag
 
         DrainTarget best = null;
         for (int dx = -r; dx <= r; dx++) {
@@ -550,20 +551,7 @@ public class PacketMine extends Module {
                     BlockPos pos = center.add(dx, dy, dz);
                     BlockState state = mc.world.getBlockState(pos);
 
-                    if (state.isAir()) {
-                        if (!allowAir) continue;
-                        Vec3d anchor = Vec3d.ofCenter(pos);
-                        if (eye.squaredDistanceTo(anchor) > range * range) continue;
-                        // 选择玩家眼睛所在侧的面，避免 PositionBreakA flag
-                        Direction airFace = resolveAirFace(eye, anchor);
-                        Vec3d toBlock = anchor.subtract(eye).normalize();
-                        double anglePenalty = 1.0 - look.dotProduct(toBlock);
-                        double score = anglePenalty * 3.0 + eye.distanceTo(anchor);
-                        if (best == null || score < best.score) {
-                            best = new DrainTarget(pos, airFace, score);
-                        }
-                        continue;
-                    }
+                    if (state.isAir()) continue;
 
                     if (!BlockUtils.canBreak(pos)) continue;
                     if (BlockUtils.getBreakDelta(slot, state) >= 1.0) continue;
@@ -628,32 +616,120 @@ public class PacketMine extends Module {
 
     private record DrainTarget(BlockPos pos, Direction face, double score) {}
 
-    // -------------------- Y=5480 Exploit --------------------
-
-    /** Y=5480: 超出世界高度的 AIR 坐标，用于污染 GrimAC FastBreak.maximumBlockDamage */
-    private static final BlockPos EXPLOIT_POS = new BlockPos(0, 5480, 0);
+    // -------------------- Exploit: 瞬破方块 + PositionBreakA 强制取消 --------------------
 
     /**
-     * 发送 Y=5480 exploit START 包。
+     * exploit 结果：附近一个可瞬破的非 AIR 方块 + 必定触发 PositionBreakA 的错误面。
      *
-     * <p>效果链：
-     * <ol>
-     *   <li>AirLiquidBreak: flag + cancel（包不转发到 MC 服务端）</li>
-     *   <li>FastBreak: targetBlockPosition=Y5480, maximumBlockDamage=∞（cancel 前已执行）</li>
-     *   <li>后续所有 STOP 的 predictedTime=ceil(1/∞)*50=0, diff 永远为负</li>
-     * </ol>
-     *
-     * <p>同时更新本地 delay balance 镜像。注意 GrimAC FastBreak 中 lastFinishBreak
-     * 不在 START_DIGGING 时更新，所以同 tick 内多个 START 的 breakDelay 都相同。
+     * <p>GrimAC 中 FastBreak 对 AIR 方块直接 return（不更新 maximumBlockDamage），
+     * 但对非 AIR 瞬破方块（hardness=0 或工具足够快使 damage >= 1）正常处理，
+     * 将 maximumBlockDamage 设为极大值（∞ 或 >= 1）。
+     * 同时 PositionBreakA 因错误面 flag + cancel → 包不转发到 MC 服务端。
      */
-    private void sendExploitFlood() {
-        // 在合法 START 之前发送 exploit START，确保 lastBlock 被后续合法 START 覆盖
-        // WrongBreak 规则: START → 设 lastBlock。所以 Y5480 START → lastBlock=Y5480，
-        // 然后 real START → lastBlock=realPos → STOP(realPos) 匹配 ✓
-        // 使用 DOWN 面：PositionBreakA 检查 minY > combined.minY，
-        // 玩家 minY≈65 < 5480 → false → 不 flag
-        sendStartPacket(EXPLOIT_POS, Direction.DOWN);
-        commitStartDelayBudget();
+    private record ExploitTarget(BlockPos pos, Direction wrongFace) {}
+
+    /** 缓存的 exploit 目标，避免每次 START 时重新搜索。null = 未缓存或已失效。 */
+    private ExploitTarget cachedExploit;
+
+    /**
+     * 获取 exploit 目标，优先使用缓存。缓存失效时从玩家位置向外扩展搜索。
+     *
+     * <p>搜索不限于 blockInteractionRange：exploit START 被 PositionBreakA cancel 后
+     * 不到达 MC 服务端，FarBreak 默认关闭（实验性），所以远距离目标也安全。
+     * 但实际搜索半径限 16 格（足够覆盖视野内所有瞬破方块，避免无意义长搜）。
+     *
+     * @return exploit 目标，或 null（附近无可用瞬破方块）
+     */
+    private ExploitTarget findExploitTarget() {
+        // 缓存命中：检查仍有效
+        if (cachedExploit != null) {
+            BlockState state = mc.world.getBlockState(cachedExploit.pos);
+            int slot = mc.player.getInventory().getSelectedSlot();
+            if (!state.isAir() && BlockUtils.getBreakDelta(slot, state) >= 1.0
+                && !isMiningBlock(cachedExploit.pos)) {
+                // 重算 wrongFace（玩家可能移动）
+                Direction wf = findWrongFace(mc.player.getEyePos(), cachedExploit.pos);
+                if (wf != null) {
+                    cachedExploit = new ExploitTarget(cachedExploit.pos, wf);
+                    return cachedExploit;
+                }
+            }
+            cachedExploit = null;
+        }
+
+        // 从玩家位置由内向外一层一层搜索，找到第一个即停
+        Vec3d eye = mc.player.getEyePos();
+        BlockPos center = mc.player.getBlockPos();
+        int slot = mc.player.getInventory().getSelectedSlot();
+        int maxR = 16;
+
+        for (int r = 0; r <= maxR; r++) {
+            ExploitTarget found = searchShell(center, r, eye, slot);
+            if (found != null) {
+                cachedExploit = found;
+                return found;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 在 center 为中心、曼哈顿半径 r 的"壳"上搜索 exploit 目标。
+     * r=0 只检查 center 自身。r>0 检查恰好在该壳上的方块（至少有一个坐标偏移的绝对值等于 r）。
+     */
+    private ExploitTarget searchShell(BlockPos center, int r, Vec3d eye, int slot) {
+        if (r == 0) {
+            return probeExploitAt(center, eye, slot);
+        }
+        // 遍历壳：三层循环但只取 max(|dx|,|dy|,|dz|)==r 的坐标
+        for (int dx = -r; dx <= r; dx++) {
+            for (int dy = -r; dy <= r; dy++) {
+                for (int dz = -r; dz <= r; dz++) {
+                    if (Math.max(Math.abs(dx), Math.max(Math.abs(dy), Math.abs(dz))) != r) continue;
+                    ExploitTarget et = probeExploitAt(center.add(dx, dy, dz), eye, slot);
+                    if (et != null) return et;
+                }
+            }
+        }
+        return null;
+    }
+
+    /** 检查单个位置是否可用作 exploit 目标 */
+    private ExploitTarget probeExploitAt(BlockPos pos, Vec3d eye, int slot) {
+        BlockState state = mc.world.getBlockState(pos);
+        if (state.isAir()) return null;
+        if (state.getFluidState() != null && !state.getFluidState().isEmpty()) return null;
+        if (isMiningBlock(pos)) return null;
+        if (BlockUtils.getBreakDelta(slot, state) < 1.0) return null;
+
+        Direction wrongFace = findWrongFace(eye, pos);
+        return wrongFace != null ? new ExploitTarget(pos, wrongFace) : null;
+    }
+
+    /**
+     * 找到一个使 PositionBreakA 必定 flag 的面（眼睛在该面的错误侧）。
+     *
+     * <p>PositionBreakA 对每个面检查玩家眼睛是否在方块碰撞箱的正确一侧：
+     * 声称 DOWN 面但眼睛在方块上方 → flag。选择这样的"反向面"即可。
+     * REDSTONE_WIRE 被 PositionBreakA 豁免，不可用作 exploit。
+     *
+     * @return 错误面方向，或 null（不可用，如 REDSTONE_WIRE）
+     */
+    private static Direction findWrongFace(Vec3d eye, BlockPos pos) {
+        // PositionBreakA 豁免 REDSTONE_WIRE
+        // 注: 此处不检查 blockState 因为调用点已过滤，且 REDSTONE_WIRE hardness=0
+
+        double cx = pos.getX() + 0.5, cy = pos.getY() + 0.5, cz = pos.getZ() + 0.5;
+
+        // 选择与眼睛偏移方向相反的面（即眼睛在方块的正面侧，声称对面 → 必定 flag）
+        // 优先 DOWN：最常见场景是玩家站在方块上方
+        if (eye.y > cy) return Direction.DOWN;   // 眼睛在上 → 声称底面 → flag
+        if (eye.y < cy) return Direction.UP;     // 眼睛在下 → 声称顶面 → flag
+        if (eye.z > cz) return Direction.NORTH;  // 眼睛在南 → 声称北面 → flag
+        if (eye.z < cz) return Direction.SOUTH;
+        if (eye.x > cx) return Direction.WEST;
+        if (eye.x < cx) return Direction.EAST;
+        return null;
     }
 
     /**
@@ -695,22 +771,6 @@ public class PacketMine extends Module {
             face.getOffsetY() * 0.49,
             face.getOffsetZ() * 0.49
         );
-    }
-
-    /**
-     * 为空气方块选择不会触发 PositionBreakA 的面。
-     * PositionBreakA 检查眼睛是否在方块面的正面方向侧：
-     * UP → maxY < combined.maxY 为 flag, DOWN → minY > combined.minY 为 flag, etc.
-     * 选择眼睛相对方块中心偏移最大的轴对应的面（即眼睛一定在该面的正确侧）。
-     */
-    private static Direction resolveAirFace(Vec3d eye, Vec3d blockCenter) {
-        double dx = eye.x - blockCenter.x;
-        double dy = eye.y - blockCenter.y;
-        double dz = eye.z - blockCenter.z;
-        double ax = Math.abs(dx), ay = Math.abs(dy), az = Math.abs(dz);
-        if (ay >= ax && ay >= az) return dy > 0 ? Direction.UP : Direction.DOWN;
-        if (ax >= az) return dx > 0 ? Direction.EAST : Direction.WEST;
-        return dz > 0 ? Direction.SOUTH : Direction.NORTH;
     }
 
     /**
@@ -795,6 +855,7 @@ public class PacketMine extends Module {
         b.pendingSinceMs = System.currentTimeMillis();
         b.activated = false;
         b.secondary = false;
+        b.exploitUsed = false;
         b.expectedFinishMs = 0;
         blocks.add(b);
     }
@@ -955,6 +1016,9 @@ public class PacketMine extends Module {
         /** 是否为 double mine 的 secondary block（已 STOP，等待 failedToMine 自动完成） */
         boolean secondary;
 
+        /** 本轮启动中是否成功发送了 exploit START（无可用瞬破方块时为 false → 走正常挖掘） */
+        boolean exploitUsed;
+
         /** secondary 预期自动完成的 wall-clock 时间戳（ms），0 = 未设置 */
         long expectedFinishMs;
 
@@ -977,6 +1041,7 @@ public class PacketMine extends Module {
             this.pendingSinceMs = System.currentTimeMillis();
             this.activated = false;
             this.secondary = false;
+            this.exploitUsed = false;
             this.expectedFinishMs = 0;
             return this;
         }
@@ -1091,16 +1156,25 @@ public class PacketMine extends Module {
             dispatchWithRotation(rotateOnStart.get(), Phase.PENDING_START, blockPos, currentFace, () -> {
                 ensureTaskToolSelected(MyBlock.this);
 
-                // Double Mine: exploit 包含在 doubleMine 中，在合法 START 之前发 Y=5480 START
-                // 污染 GrimAC FastBreak 的 maximumBlockDamage，使后续 STOP 的 diff 永远为负
-                if (doubleMine.get()) {
-                    sendExploitFlood();
-                }
-
                 sendSwing();
                 sendStartPacket(blockPos, currentFace);
                 direction = currentFace; // 记录实际使用的 START face
                 commitStartDelayBudget();
+
+                // exploit: 在合法 START(A) 之后发送瞬破方块的 START(E, wrongFace)
+                // 效果: GrimAC FastBreak.maxDmg 被覆盖为 ∞ (或 >= 1)，后续 STOP diff 为负
+                // 同时 PositionBreakA 因错误面 flag + cancel → 包不到 MC 服务端
+                // WrongBreak: 瞬破方块设 lastBlockWasInstantBreak=true → STOP(A) 的 pos 不匹配被豁免
+                exploitUsed = false;
+                if (doubleMine.get()) {
+                    ExploitTarget et = findExploitTarget();
+                    if (et != null) {
+                        sendStartPacket(et.pos, et.wrongFace);
+                        commitStartDelayBudget();
+                        exploitUsed = true;
+                    }
+                }
+
                 mining = true;
                 startMs = System.currentTimeMillis();
 
@@ -1132,7 +1206,8 @@ public class PacketMine extends Module {
             maxDelta = Math.max(maxDelta, delta);
 
             // Double Mine 提前 STOP 路径：exploit 保证 GrimAC 侧安全，立即进入 PENDING_STOP
-            if (shouldDoubleMine() && meetsDoubleMineThreshold(blockState, effectiveSlot) && startMs > 0) {
+            // 仅在 exploit 成功时启用（exploitUsed=true），否则走正常挖掘路径
+            if (exploitUsed && shouldDoubleMine() && meetsDoubleMineThreshold(blockState, effectiveSlot) && startMs > 0) {
                 phase = Phase.PENDING_STOP;
                 clearRotationState();
                 tickPendingStop();
@@ -1209,7 +1284,7 @@ public class PacketMine extends Module {
             refreshCurrentFace();
             ensureTaskToolSelected(MyBlock.this);
 
-            boolean useDoubleMine = shouldDoubleMine()
+            boolean useDoubleMine = exploitUsed && shouldDoubleMine()
                 && meetsDoubleMineThreshold(blockState, mc.player.getInventory().getSelectedSlot());
 
             dispatchWithRotation(rotateOnStop.get(), Phase.PENDING_STOP, blockPos, currentFace, () -> {
