@@ -78,6 +78,7 @@ public class Surround extends Module implements PrinterTaskProvider {
         .description("每次放置之间的间隔（tick）。")
         .min(0)
         .defaultValue(0)
+        .visible(() -> !Printer.isProviderRegistered(this))
         .build()
     );
 
@@ -86,13 +87,14 @@ public class Surround extends Module implements PrinterTaskProvider {
         .description("单个 tick 内最多放置的方块数。")
         .defaultValue(1)
         .min(1)
+        .visible(() -> !Printer.isProviderRegistered(this))
         .build()
     );
 
     private final Setting<Center> center = sgGeneral.add(new EnumSetting.Builder<Center>()
         .name("居中")
         .description("将玩家传送到方块中心。注意：可能触发 GrimAC 移动检测。")
-        .defaultValue(Center.Incomplete)
+        .defaultValue(Center.Never)
         .build()
     );
 
@@ -106,14 +108,14 @@ public class Surround extends Module implements PrinterTaskProvider {
     private final Setting<Boolean> airPlace = sgGeneral.add(new BoolSetting.Builder()
         .name("空中放置")
         .description("允许在无邻面支撑时放置方块。")
-        .defaultValue(true)
-        .build()
+        .defaultValue(false)        .visible(() -> !Printer.isProviderRegistered(this))        .build()
     );
 
     private final Setting<Boolean> rotate = sgGeneral.add(new BoolSetting.Builder()
         .name("旋转")
         .description("放置时自动朝向目标方块。")
         .defaultValue(true)
+        .visible(() -> !Printer.isProviderRegistered(this))
         .build()
     );
 
@@ -131,7 +133,7 @@ public class Surround extends Module implements PrinterTaskProvider {
     private final Setting<HeadMode> headMode = sgHead.add(new EnumSetting.Builder<HeadMode>()
         .name("头部模式")
         .description("头顶保护。Single=y+2 单方块；Full=y+2 十字形 5 方块。")
-        .defaultValue(HeadMode.None)
+        .defaultValue(HeadMode.Full)
         .build()
     );
 
@@ -140,7 +142,7 @@ public class Surround extends Module implements PrinterTaskProvider {
     private final Setting<FootMode> footMode = sgFoot.add(new EnumSetting.Builder<FootMode>()
         .name("脚部模式")
         .description("脚下保护。Single=y-1 单方块；Full=y-1 十字形 5 方块。")
-        .defaultValue(FootMode.None)
+        .defaultValue(FootMode.Full)
         .build()
     );
 
@@ -157,6 +159,7 @@ public class Surround extends Module implements PrinterTaskProvider {
         .name("挥手")
         .description("放置/攻击时渲染挥手动画。")
         .defaultValue(true)
+        .visible(() -> !Printer.isProviderRegistered(this))
         .build()
     );
 
