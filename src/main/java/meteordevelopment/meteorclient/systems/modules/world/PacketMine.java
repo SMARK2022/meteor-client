@@ -8,6 +8,8 @@ package meteordevelopment.meteorclient.systems.modules.world;
 import meteordevelopment.meteorclient.events.entity.player.StartBreakingBlockEvent;
 import meteordevelopment.meteorclient.events.meteor.MouseScrollEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
+import meteordevelopment.meteorclient.events.world.BlockUpdateEvent;
+import meteordevelopment.meteorclient.events.world.ChunkDataEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
@@ -27,19 +29,23 @@ import meteordevelopment.meteorclient.mixininterface.IClientPlayerInteractionMan
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
+import net.minecraft.block.Blocks;
 import net.minecraft.network.packet.c2s.play.HandSwingC2SPacket;
+import net.minecraft.text.Text;
 import net.minecraft.network.packet.c2s.play.PlayerActionC2SPacket;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.Direction;
 import net.minecraft.util.math.Vec3d;
+import net.minecraft.util.math.ChunkPos;
 import net.minecraft.util.shape.VoxelShape;
 import net.minecraft.world.RaycastContext;
+import net.minecraft.world.chunk.ChunkSection;
+import net.minecraft.world.chunk.WorldChunk;
 
-import java.util.ArrayList;
-import java.util.Iterator;
-import java.util.List;
+import java.util.*;
+
 
 /**
  * 发包挖掘模块 —— 合规版
@@ -262,6 +268,23 @@ public class PacketMine extends Module {
     /** drain 渲染过期时间（ms） */
     private long drainRenderExpiry;
 
+    // ── exploit 瞬破方块缓存（事件驱动） ──
+
+    /** 所有已加载 chunk 中 hardness=0 的非 AIR/非流体/非红石线方块位置 */
+    private final Set<BlockPos> instantBlockCache = new HashSet<>();
+    /** 按 chunk key 分组，chunk 卸载时批量清理 */
+    private final Map<Long, Set<BlockPos>> cacheByChunk = new HashMap<>();
+    /** 周期清理计数器 */
+    private int cacheCleanupCounter;
+
+    /** 增量冷启动扫描队列（chunk packed long） */
+    private final Queue<Long> coldScanQueue = new ArrayDeque<>();
+    /** 冷扫描总量（用于进度显示） */
+    private int coldScanTotal;
+
+    /** 每 tick 增量扫描的 chunk 数量（16 chunks × ~5 sections × 4096 blocks ≈ 330K reads → ~16ms） */
+    private static final int SCAN_CHUNKS_PER_TICK = 16;
+
     public PacketMine() {
         super(Categories.World, "packet-mine", "通过发包挖掘方块，无需播放挖掘动画。");
     }
@@ -275,7 +298,14 @@ public class PacketMine extends Module {
         scrolledThisTick = false;
         slotConflictTicks = 0;
         drainRenderPos = null;
-        cachedExploit = null;
+        cacheCleanupCounter = 0;
+        if (instantBlockCache.isEmpty()) {
+            // 首次激活或世界切换后：排队增量扫描
+            enqueueColdScan();
+        } else {
+            // 重复激活：缓存仍在，只清理已卸载的 chunk
+            pruneUnloadedChunks();
+        }
     }
 
     @Override
@@ -287,7 +317,8 @@ public class PacketMine extends Module {
         scrolledThisTick = false;
         slotConflictTicks = 0;
         drainRenderPos = null;
-        cachedExploit = null;
+        // 不清 instantBlockCache / cacheByChunk —— 缓存保留，下次 activate 时复用
+        coldScanQueue.clear();
     }
 
     @EventHandler
@@ -314,6 +345,30 @@ public class PacketMine extends Module {
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
+
+        // 周期清理: 移除已卸载 chunk 的缓存条目
+        if (++cacheCleanupCounter >= 200) {
+            cacheCleanupCounter = 0;
+            pruneUnloadedChunks();
+        }
+
+        // 增量冷启动扫描
+        if (!coldScanQueue.isEmpty()) {
+            int batch = Math.min(SCAN_CHUNKS_PER_TICK, coldScanQueue.size());
+            for (int i = 0; i < batch; i++) {
+                long key = coldScanQueue.poll();
+                int chunkX = ChunkPos.getPackedX(key);
+                int chunkZ = ChunkPos.getPackedZ(key);
+                WorldChunk chunk = mc.world.getChunkManager().getWorldChunk(chunkX, chunkZ);
+                if (chunk != null) scanChunkIntoCache(chunk);
+            }
+            // action bar 进度显示
+            int done = coldScanTotal - coldScanQueue.size();
+            int pct = coldScanTotal > 0 ? done * 100 / coldScanTotal : 100;
+            mc.player.sendMessage(
+                Text.literal("§7[PacketMine] exploit cache: " + pct + "% (" + instantBlockCache.size() + " found)"),
+                true);
+        }
 
         // 清理已完成的任务 + secondary 追踪
         Iterator<MyBlock> it = blocks.iterator();
@@ -379,6 +434,30 @@ public class PacketMine extends Module {
     private void onMouseScroll(MouseScrollEvent event) {
         // 标记本 tick 有滚轮操作，供槽位冲突检测使用
         scrolledThisTick = true;
+    }
+
+    // ── exploit 瞬破方块缓存事件 ──
+
+    @EventHandler
+    private void onChunkData(ChunkDataEvent event) {
+        scanChunkIntoCache(event.chunk());
+    }
+
+    @EventHandler
+    private void onBlockUpdate(BlockUpdateEvent event) {
+        BlockPos pos = event.pos.toImmutable();
+        long key = ChunkPos.toLong(pos.getX() >> 4, pos.getZ() >> 4);
+
+        // 移除旧条目
+        instantBlockCache.remove(pos);
+        Set<BlockPos> inChunk = cacheByChunk.get(key);
+        if (inChunk != null) inChunk.remove(pos);
+
+        // 判断新状态是否为瞬破候选
+        if (isInstantCandidate(event.newState)) {
+            instantBlockCache.add(pos);
+            cacheByChunk.computeIfAbsent(key, k -> new HashSet<>()).add(pos);
+        }
     }
 
     @EventHandler
@@ -616,94 +695,136 @@ public class PacketMine extends Module {
 
     private record DrainTarget(BlockPos pos, Direction face, double score) {}
 
-    // -------------------- Exploit: 瞬破方块 + PositionBreakA 强制取消 --------------------
+    // -------------------- Exploit: 瞬破方块缓存 + PositionBreakA 强制取消 --------------------
 
     /**
-     * exploit 结果：附近一个可瞬破的非 AIR 方块 + 必定触发 PositionBreakA 的错误面。
+     * exploit 结果：一个可瞬破的非 AIR 方块 + 必定触发 PositionBreakA 的错误面。
      *
      * <p>GrimAC 中 FastBreak 对 AIR 方块直接 return（不更新 maximumBlockDamage），
-     * 但对非 AIR 瞬破方块（hardness=0 或工具足够快使 damage >= 1）正常处理，
-     * 将 maximumBlockDamage 设为极大值（∞ 或 >= 1）。
+     * 但对非 AIR 瞬破方块（hardness=0 → damage=∞）正常处理，
+     * 将 maximumBlockDamage 设为极大值。
      * 同时 PositionBreakA 因错误面 flag + cancel → 包不转发到 MC 服务端。
+     * 不需要 LOS 也不需要距离限制（包被 cancel 后不到服务端，FarBreak 默认关闭）。
      */
     private record ExploitTarget(BlockPos pos, Direction wrongFace) {}
 
-    /** 缓存的 exploit 目标，避免每次 START 时重新搜索。null = 未缓存或已失效。 */
-    private ExploitTarget cachedExploit;
+    /**
+     * 判断一个方块状态是否是 exploit 瞬破候选（hardness=0、非 AIR、非流体、非红石线）。
+     * REDSTONE_WIRE 被 PositionBreakA 豁免，不可用作 exploit 目标。
+     */
+    private static boolean isInstantCandidate(BlockState state) {
+        if (state.isAir()) return false;
+        if (!state.getFluidState().isEmpty()) return false;
+        if (state.isOf(Blocks.REDSTONE_WIRE)) return false;
+        return state.getHardness(null, null) == 0.0f;
+    }
 
     /**
-     * 获取 exploit 目标，优先使用缓存。缓存失效时从玩家位置向外扩展搜索。
+     * 从事件驱动的 instantBlockCache 中找最近的 exploit 目标。
+     * 无距离限制：搜索全部已加载 chunk，按距离优先最近。
+     * 不需要 LOS（exploit START 被 PositionBreakA cancel 后不到服务端）。
      *
-     * <p>搜索不限于 blockInteractionRange：exploit START 被 PositionBreakA cancel 后
-     * 不到达 MC 服务端，FarBreak 默认关闭（实验性），所以远距离目标也安全。
-     * 但实际搜索半径限 16 格（足够覆盖视野内所有瞬破方块，避免无意义长搜）。
-     *
-     * @return exploit 目标，或 null（附近无可用瞬破方块）
+     * @return exploit 目标，或 null（无可用瞬破方块）
      */
     private ExploitTarget findExploitTarget() {
-        // 缓存命中：检查仍有效
-        if (cachedExploit != null) {
-            BlockState state = mc.world.getBlockState(cachedExploit.pos);
-            int slot = mc.player.getInventory().getSelectedSlot();
-            if (!state.isAir() && BlockUtils.getBreakDelta(slot, state) >= 1.0
-                && !isMiningBlock(cachedExploit.pos)) {
-                // 重算 wrongFace（玩家可能移动）
-                Direction wf = findWrongFace(mc.player.getEyePos(), cachedExploit.pos);
-                if (wf != null) {
-                    cachedExploit = new ExploitTarget(cachedExploit.pos, wf);
-                    return cachedExploit;
-                }
-            }
-            cachedExploit = null;
-        }
-
-        // 从玩家位置由内向外一层一层搜索，找到第一个即停
         Vec3d eye = mc.player.getEyePos();
-        BlockPos center = mc.player.getBlockPos();
-        int slot = mc.player.getInventory().getSelectedSlot();
-        int maxR = 16;
+        ExploitTarget best = null;
+        double bestDistSq = Double.MAX_VALUE;
 
-        for (int r = 0; r <= maxR; r++) {
-            ExploitTarget found = searchShell(center, r, eye, slot);
-            if (found != null) {
-                cachedExploit = found;
-                return found;
-            }
+        for (BlockPos pos : instantBlockCache) {
+            // 二次校验: 缓存可能有微小延迟（chunk 卸载/block 已变）
+            BlockState state = mc.world.getBlockState(pos);
+            if (!isInstantCandidate(state)) continue;
+            if (isMiningBlock(pos)) continue;
+
+            double distSq = eye.squaredDistanceTo(
+                pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
+            if (distSq >= bestDistSq) continue;
+
+            Direction wrongFace = findWrongFace(eye, pos);
+            if (wrongFace == null) continue;
+
+            bestDistSq = distSq;
+            best = new ExploitTarget(pos, wrongFace);
         }
-        return null;
+        return best;
     }
 
-    /**
-     * 在 center 为中心、曼哈顿半径 r 的"壳"上搜索 exploit 目标。
-     * r=0 只检查 center 自身。r>0 检查恰好在该壳上的方块（至少有一个坐标偏移的绝对值等于 r）。
-     */
-    private ExploitTarget searchShell(BlockPos center, int r, Vec3d eye, int slot) {
-        if (r == 0) {
-            return probeExploitAt(center, eye, slot);
-        }
-        // 遍历壳：三层循环但只取 max(|dx|,|dy|,|dz|)==r 的坐标
-        for (int dx = -r; dx <= r; dx++) {
-            for (int dy = -r; dy <= r; dy++) {
-                for (int dz = -r; dz <= r; dz++) {
-                    if (Math.max(Math.abs(dx), Math.max(Math.abs(dy), Math.abs(dz))) != r) continue;
-                    ExploitTarget et = probeExploitAt(center.add(dx, dy, dz), eye, slot);
-                    if (et != null) return et;
+    /** 扫描单个 chunk 并将 hardness=0 候选方块加入缓存 */
+    private void scanChunkIntoCache(WorldChunk chunk) {
+        long key = chunk.getPos().toLong();
+        Set<BlockPos> found = new HashSet<>();
+
+        ChunkSection[] sections = chunk.getSectionArray();
+        int bottomY = chunk.getBottomY();
+
+        for (int si = 0; si < sections.length; si++) {
+            ChunkSection section = sections[si];
+            if (section == null || section.isEmpty()) continue;
+            int baseY = bottomY + si * 16;
+
+            for (int x = 0; x < 16; x++) {
+                for (int y = 0; y < 16; y++) {
+                    for (int z = 0; z < 16; z++) {
+                        BlockState s = section.getBlockState(x, y, z);
+                        if (isInstantCandidate(s)) {
+                            found.add(new BlockPos(
+                                chunk.getPos().getStartX() + x,
+                                baseY + y,
+                                chunk.getPos().getStartZ() + z));
+                        }
+                    }
                 }
             }
         }
-        return null;
+
+        // 替换该 chunk 的旧数据
+        Set<BlockPos> old = cacheByChunk.remove(key);
+        if (old != null) instantBlockCache.removeAll(old);
+        if (!found.isEmpty()) {
+            cacheByChunk.put(key, found);
+            instantBlockCache.addAll(found);
+        }
     }
 
-    /** 检查单个位置是否可用作 exploit 目标 */
-    private ExploitTarget probeExploitAt(BlockPos pos, Vec3d eye, int slot) {
-        BlockState state = mc.world.getBlockState(pos);
-        if (state.isAir()) return null;
-        if (state.getFluidState() != null && !state.getFluidState().isEmpty()) return null;
-        if (isMiningBlock(pos)) return null;
-        if (BlockUtils.getBreakDelta(slot, state) < 1.0) return null;
+    /** 将所有已加载 chunk 按距离从近到远排入增量扫描队列 */
+    private void enqueueColdScan() {
+        coldScanQueue.clear();
+        if (mc.world == null || mc.player == null) return;
 
-        Direction wrongFace = findWrongFace(eye, pos);
-        return wrongFace != null ? new ExploitTarget(pos, wrongFace) : null;
+        var manager = mc.world.getChunkManager();
+        int cx = mc.player.getBlockPos().getX() >> 4;
+        int cz = mc.player.getBlockPos().getZ() >> 4;
+        int viewDist = mc.options.getViewDistance().getValue();
+
+        List<long[]> chunks = new ArrayList<>();
+        for (int dx = -viewDist; dx <= viewDist; dx++) {
+            for (int dz = -viewDist; dz <= viewDist; dz++) {
+                int x = cx + dx, z = cz + dz;
+                if (manager.getWorldChunk(x, z) != null) {
+                    chunks.add(new long[]{ChunkPos.toLong(x, z), dx * dx + dz * dz});
+                }
+            }
+        }
+        chunks.sort(Comparator.comparingLong(a -> a[1]));
+        for (long[] c : chunks) coldScanQueue.add(c[0]);
+        coldScanTotal = coldScanQueue.size();
+    }
+
+    /** 移除已卸载 chunk 的缓存条目（周期性调用） */
+    private void pruneUnloadedChunks() {
+        if (mc.world == null) return;
+        var it = cacheByChunk.entrySet().iterator();
+        while (it.hasNext()) {
+            var entry = it.next();
+            long key = entry.getKey();
+            int chunkX = ChunkPos.getPackedX(key);
+            int chunkZ = ChunkPos.getPackedZ(key);
+            if (!mc.world.getChunkManager().isChunkLoaded(chunkX, chunkZ)) {
+                instantBlockCache.removeAll(entry.getValue());
+                it.remove();
+            }
+        }
     }
 
     /**
@@ -711,14 +832,10 @@ public class PacketMine extends Module {
      *
      * <p>PositionBreakA 对每个面检查玩家眼睛是否在方块碰撞箱的正确一侧：
      * 声称 DOWN 面但眼睛在方块上方 → flag。选择这样的"反向面"即可。
-     * REDSTONE_WIRE 被 PositionBreakA 豁免，不可用作 exploit。
      *
-     * @return 错误面方向，或 null（不可用，如 REDSTONE_WIRE）
+     * @return 错误面方向，或 null（理论上不可能，因为玩家不可能在方块正中心）
      */
     private static Direction findWrongFace(Vec3d eye, BlockPos pos) {
-        // PositionBreakA 豁免 REDSTONE_WIRE
-        // 注: 此处不检查 blockState 因为调用点已过滤，且 REDSTONE_WIRE hardness=0
-
         double cx = pos.getX() + 0.5, cy = pos.getY() + 0.5, cz = pos.getZ() + 0.5;
 
         // 选择与眼睛偏移方向相反的面（即眼睛在方块的正面侧，声称对面 → 必定 flag）
@@ -1167,11 +1284,16 @@ public class PacketMine extends Module {
                 // WrongBreak: 瞬破方块设 lastBlockWasInstantBreak=true → STOP(A) 的 pos 不匹配被豁免
                 exploitUsed = false;
                 if (doubleMine.get()) {
-                    ExploitTarget et = findExploitTarget();
-                    if (et != null) {
-                        sendStartPacket(et.pos, et.wrongFace);
-                        commitStartDelayBudget();
-                        exploitUsed = true;
+                    // balance 安全检查: 预测第二次 START 后的 balance 不超过 900
+                    // （第一次 commitStartDelayBudget 已更新 localDelayBalance）
+                    double projectedAfterExploit = projectedDelayBalance();
+                    if (projectedAfterExploit <= 900) {
+                        ExploitTarget et = findExploitTarget();
+                        if (et != null) {
+                            sendStartPacket(et.pos, et.wrongFace);
+                            commitStartDelayBudget();
+                            exploitUsed = true;
+                        }
                     }
                 }
 
