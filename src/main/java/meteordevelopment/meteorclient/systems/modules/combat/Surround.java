@@ -54,203 +54,218 @@ import java.util.Set;
 import java.util.function.Predicate;
 
 public class Surround extends Module implements PrinterTaskProvider {
-    private final SettingGroup sgGeneral = settings.getDefaultGroup();
-    private final SettingGroup sgToggles = settings.createGroup("Toggles");
-    private final SettingGroup sgRender = settings.createGroup("Render");
+    private final SettingGroup sgGeneral  = settings.getDefaultGroup();
+    private final SettingGroup sgBody     = settings.createGroup("身体");
+    private final SettingGroup sgHead     = settings.createGroup("头部");
+    private final SettingGroup sgFoot     = settings.createGroup("脚部");
+    private final SettingGroup sgProtect  = settings.createGroup("防护");
+    private final SettingGroup sgLink     = settings.createGroup("联动");
+    private final SettingGroup sgAutoOff  = settings.createGroup("自动关闭");
+    private final SettingGroup sgRender   = settings.createGroup("渲染");
 
-    // General
+    // ── 通用 ──
 
     private final Setting<List<Block>> blocks = sgGeneral.add(new BlockListSetting.Builder()
-        .name("blocks")
-        .description("What blocks to use for surround.")
+        .name("方块列表")
+        .description("包围使用的方块类型。")
         .defaultValue(Blocks.OBSIDIAN, Blocks.CRYING_OBSIDIAN, Blocks.NETHERITE_BLOCK)
         .filter(this::blockFilter)
         .build()
     );
 
     private final Setting<Integer> delay = sgGeneral.add(new IntSetting.Builder()
-        .name("delay")
-        .description("Delay, in ticks, between block placements.")
+        .name("放置延迟")
+        .description("每次放置之间的间隔（tick）。")
         .min(0)
         .defaultValue(0)
         .build()
     );
 
     private final Setting<Integer> blocksPerTick = sgGeneral.add(new IntSetting.Builder()
-        .name("blocks-per-tick")
-        .description("How many blocks to place in one tick.")
+        .name("每 tick 放置数")
+        .description("单个 tick 内最多放置的方块数。")
         .defaultValue(1)
         .min(1)
         .build()
     );
 
     private final Setting<Center> center = sgGeneral.add(new EnumSetting.Builder<Center>()
-        .name("center")
-        .description("Teleports you to the center of the block.")
+        .name("居中")
+        .description("将玩家传送到方块中心。注意：可能触发 GrimAC 移动检测。")
         .defaultValue(Center.Incomplete)
         .build()
     );
 
-    private final Setting<TopMode> headProtection = sgGeneral.add(new EnumSetting.Builder<TopMode>()
-        .name("head-protection")
-        .description("Head-level block protection. AntiFacePlace=4 side blocks at y+1; Top=1 block at y+2; Full=both; None=disabled.")
-        .defaultValue(TopMode.None)
-        .build()
-    );
-
-    private final Setting<BottomMode> belowProtection = sgGeneral.add(new EnumSetting.Builder<BottomMode>()
-        .name("below-protection")
-        .description("Place a block below your feet to prevent crystal placement under you.")
-        .defaultValue(BottomMode.None)
-        .build()
-    );
-
     private final Setting<Boolean> onlyOnGround = sgGeneral.add(new BoolSetting.Builder()
-        .name("only-on-ground")
-        .description("Works only when you are standing on blocks.")
+        .name("仅地面")
+        .description("仅在站立在方块上时工作。")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<Boolean> airPlace = sgGeneral.add(new BoolSetting.Builder()
-        .name("air-place")
-        .description("Allows Surround to place blocks in the air.")
+        .name("空中放置")
+        .description("允许在无邻面支撑时放置方块。")
         .defaultValue(true)
-        .build()
-    );
-
-    private final Setting<Boolean> toggleModules = sgGeneral.add(new BoolSetting.Builder()
-        .name("toggle-modules")
-        .description("Turn off other modules when surround is activated.")
-        .defaultValue(false)
-        .build()
-    );
-
-    private final Setting<Boolean> toggleBack = sgGeneral.add(new BoolSetting.Builder()
-        .name("toggle-back-on")
-        .description("Turn the other modules back on when surround is deactivated.")
-        .defaultValue(false)
-        .visible(toggleModules::get)
-        .build()
-    );
-
-    private final Setting<List<Module>> modules = sgGeneral.add(new ModuleListSetting.Builder()
-        .name("modules")
-        .description("Which modules to disable on activation.")
-        .visible(toggleModules::get)
         .build()
     );
 
     private final Setting<Boolean> rotate = sgGeneral.add(new BoolSetting.Builder()
-        .name("rotate")
-        .description("Automatically faces towards the obsidian being placed.")
+        .name("旋转")
+        .description("放置时自动朝向目标方块。")
         .defaultValue(true)
         .build()
     );
 
-    private final Setting<Boolean> protect = sgGeneral.add(new BoolSetting.Builder()
-        .name("protect")
-        .description("Attempts to break crystals around surround positions to prevent surround break.")
+    // ── 身体 ──
+
+    private final Setting<BodyMode> bodyMode = sgBody.add(new EnumSetting.Builder<BodyMode>()
+        .name("身体模式")
+        .description("身体保护。Lower=下肢 y+0 四面；Upper=上肢 y+1 四面；Full=全身 8 面。")
+        .defaultValue(BodyMode.Full)
+        .build()
+    );
+
+    // ── 头部 ──
+
+    private final Setting<HeadMode> headMode = sgHead.add(new EnumSetting.Builder<HeadMode>()
+        .name("头部模式")
+        .description("头顶保护。Single=y+2 单方块；Full=y+2 十字形 5 方块。")
+        .defaultValue(HeadMode.None)
+        .build()
+    );
+
+    // ── 脚部 ──
+
+    private final Setting<FootMode> footMode = sgFoot.add(new EnumSetting.Builder<FootMode>()
+        .name("脚部模式")
+        .description("脚下保护。Single=y-1 单方块；Full=y-1 十字形 5 方块。")
+        .defaultValue(FootMode.None)
+        .build()
+    );
+
+    // ── 防护 ──
+
+    private final Setting<Boolean> protect = sgProtect.add(new BoolSetting.Builder()
+        .name("防护")
+        .description("在包围位置附近打碎水晶以防止被破围。")
         .defaultValue(true)
         .build()
     );
 
-    // Toggles
-
-    private final Setting<Boolean> toggleOnYChange = sgToggles.add(new BoolSetting.Builder()
-        .name("toggle-on-y-change")
-        .description("Automatically disables when your y level changes (step, jumping, etc).")
+    private final Setting<Boolean> swing = sgProtect.add(new BoolSetting.Builder()
+        .name("挥手")
+        .description("放置/攻击时渲染挥手动画。")
         .defaultValue(true)
         .build()
     );
 
-    private final Setting<Boolean> toggleOnComplete = sgToggles.add(new BoolSetting.Builder()
-        .name("toggle-on-complete")
-        .description("Toggles off when all blocks are placed.")
+    // ── 联动 ──
+
+    private final Setting<Boolean> toggleModules = sgLink.add(new BoolSetting.Builder()
+        .name("联动关闭")
+        .description("激活时关闭其他模块。")
         .defaultValue(false)
         .build()
     );
 
-    private final Setting<Boolean> toggleOnDeath = sgToggles.add(new BoolSetting.Builder()
-        .name("toggle-on-death")
-        .description("Toggles off when you die.")
+    private final Setting<Boolean> toggleBack = sgLink.add(new BoolSetting.Builder()
+        .name("联动恢复")
+        .description("关闭时恢复被联动关闭的模块。")
+        .defaultValue(false)
+        .visible(toggleModules::get)
+        .build()
+    );
+
+    private final Setting<List<Module>> modules = sgLink.add(new ModuleListSetting.Builder()
+        .name("联动模块")
+        .description("激活时需要关闭的模块列表。")
+        .visible(toggleModules::get)
+        .build()
+    );
+
+    // ── 自动关闭 ──
+
+    private final Setting<Boolean> toggleOnYChange = sgAutoOff.add(new BoolSetting.Builder()
+        .name("Y 变化关闭")
+        .description("Y 坐标变化时自动关闭（跳跃、踩高等）。")
         .defaultValue(true)
         .build()
     );
 
-    // Render
+    private final Setting<Boolean> toggleOnComplete = sgAutoOff.add(new BoolSetting.Builder()
+        .name("完成关闭")
+        .description("所有方块放置完成后自动关闭。")
+        .defaultValue(false)
+        .build()
+    );
 
-    private final Setting<Boolean> swing = sgRender.add(new BoolSetting.Builder()
-        .name("swing")
-        .description("Render your hand swinging when placing surround blocks.")
+    private final Setting<Boolean> toggleOnDeath = sgAutoOff.add(new BoolSetting.Builder()
+        .name("死亡关闭")
+        .description("死亡时自动关闭。")
         .defaultValue(true)
         .build()
     );
+
+    // ── 渲染 ──
 
     private final Setting<Boolean> render = sgRender.add(new BoolSetting.Builder()
-        .name("render")
-        .description("Renders a block overlay where the obsidian will be placed.")
+        .name("渲染")
+        .description("渲染方块放置位置的叠加层。")
         .defaultValue(true)
-        .build()
-    );
-
-    private final Setting<Boolean> renderBelow = sgRender.add(new BoolSetting.Builder()
-        .name("below")
-        .description("Renders the block below you.")
-        .defaultValue(false)
         .build()
     );
 
     private final Setting<ShapeMode> shapeMode = sgRender.add(new EnumSetting.Builder<ShapeMode>()
-        .name("shape-mode")
-        .description("How the shapes are rendered.")
+        .name("渲染模式")
+        .description("叠加层的渲染方式。")
         .defaultValue(ShapeMode.Both)
         .build()
     );
 
     private final Setting<SettingColor> safeSideColor = sgRender.add(new ColorSetting.Builder()
-        .name("safe-side-color")
-        .description("The side color for safe blocks.")
+        .name("安全-面颜色")
+        .description("安全方块（基岩等）的面颜色。")
         .defaultValue(new SettingColor(13, 255, 0, 0))
         .visible(() -> render.get() && shapeMode.get() != ShapeMode.Lines)
         .build()
     );
 
     private final Setting<SettingColor> safeLineColor = sgRender.add(new ColorSetting.Builder()
-        .name("safe-line-color")
-        .description("The line color for safe blocks.")
+        .name("安全-线颜色")
+        .description("安全方块（基岩等）的线颜色。")
         .defaultValue(new SettingColor(13, 255, 0, 0))
         .visible(() -> render.get() && shapeMode.get() != ShapeMode.Sides)
         .build()
     );
 
     private final Setting<SettingColor> normalSideColor = sgRender.add(new ColorSetting.Builder()
-        .name("normal-side-color")
-        .description("The side color for normal blocks.")
+        .name("普通-面颜色")
+        .description("普通方块（黑曜石等）的面颜色。")
         .defaultValue(new SettingColor(0, 255, 238, 12))
         .visible(() -> render.get() && shapeMode.get() != ShapeMode.Lines)
         .build()
     );
 
     private final Setting<SettingColor> normalLineColor = sgRender.add(new ColorSetting.Builder()
-        .name("normal-line-color")
-        .description("The line color for normal blocks.")
+        .name("普通-线颜色")
+        .description("普通方块（黑曜石等）的线颜色。")
         .defaultValue(new SettingColor(0, 255, 238, 100))
         .visible(() -> render.get() && shapeMode.get() != ShapeMode.Sides)
         .build()
     );
 
     private final Setting<SettingColor> unsafeSideColor = sgRender.add(new ColorSetting.Builder()
-        .name("unsafe-side-color")
-        .description("The side color for unsafe blocks.")
+        .name("危险-面颜色")
+        .description("危险方块（可破坏方块）的面颜色。")
         .defaultValue(new SettingColor(204, 0, 0, 12))
         .visible(() -> render.get() && shapeMode.get() != ShapeMode.Lines)
         .build()
     );
 
     private final Setting<SettingColor> unsafeLineColor = sgRender.add(new ColorSetting.Builder()
-        .name("unsafe-line-color")
-        .description("The line color for unsafe blocks.")
+        .name("危险-线颜色")
+        .description("危险方块（可破坏方块）的线颜色。")
         .defaultValue(new SettingColor(204, 0, 0, 100))
         .visible(() -> render.get() && shapeMode.get() != ShapeMode.Sides)
         .build()
@@ -271,27 +286,45 @@ public class Surround extends Module implements PrinterTaskProvider {
 
         BlockPos playerPos = mc.player.getBlockPos();
 
-        // Below
-        if (renderBelow.get()) draw(playerPos.down(), event, 0);
-
-        for (Direction direction : Direction.HORIZONTAL) {
-            BlockPos renderPos = playerPos.offset(direction);
-
-            // Regular surround positions
-            boolean headSides = headProtection.get() == TopMode.AntiFacePlace || headProtection.get() == TopMode.Full;
-            draw(renderPos, event, headSides ? Dir.UP : 0);
-
-            // Head-level side blocks (AntiFacePlace / Full)
-            if (headSides) draw(renderPos.up(), event, Dir.DOWN);
+        // Body: 下肢 y+0
+        boolean doLower = bodyMode.get() == BodyMode.Lower || bodyMode.get() == BodyMode.Full;
+        if (doLower) {
+            for (Direction direction : Direction.HORIZONTAL) {
+                draw(playerPos.offset(direction), event, 0);
+            }
         }
 
-        // Head top block (Top / Full)
-        if (headProtection.get() == TopMode.Top || headProtection.get() == TopMode.Full) {
+        // Body: 上肢 y+1
+        boolean doUpper = bodyMode.get() == BodyMode.Upper || bodyMode.get() == BodyMode.Full;
+        if (doUpper) {
+            for (Direction direction : Direction.HORIZONTAL) {
+                draw(playerPos.offset(direction).up(), event, 0);
+            }
+        }
+
+        // Head: 头顶 y+2
+        if (headMode.get() == HeadMode.Single || headMode.get() == HeadMode.Full) {
             draw(playerPos.add(0, 2, 0), event, 0);
         }
 
-        // Below protection (Single)
-        if (belowProtection.get() == BottomMode.Single) draw(playerPos.down(), event, 0);
+        // Head: 十字形 y+2
+        if (headMode.get() == HeadMode.Full) {
+            for (Direction direction : Direction.HORIZONTAL) {
+                draw(playerPos.add(0, 2, 0).offset(direction), event, 0);
+            }
+        }
+
+        // Foot: 脚下 y-1
+        if (footMode.get() == FootMode.Single || footMode.get() == FootMode.Full) {
+            draw(playerPos.down(), event, 0);
+        }
+
+        // Foot: 十字形 y-1
+        if (footMode.get() == FootMode.Full) {
+            for (Direction direction : Direction.HORIZONTAL) {
+                draw(playerPos.down().offset(direction), event, 0);
+            }
+        }
     }
 
     private void draw(BlockPos renderPos, Render3DEvent event, int exclude) {
@@ -350,37 +383,56 @@ public class Surround extends Module implements PrinterTaskProvider {
         List<BlockPos> needed = new ArrayList<>();
         BlockPos playerPos = mc.player.getBlockPos();
 
-        // 四面脚部位置
-        for (Direction dir : Direction.HORIZONTAL) {
-            BlockPos pos = playerPos.offset(dir);
-            if (mc.world.getBlockState(pos).isReplaceable()) needed.add(pos);
+        // Body: 下肢 y+0 四面
+        boolean doLower = bodyMode.get() == BodyMode.Lower || bodyMode.get() == BodyMode.Full;
+        if (doLower) {
+            for (Direction dir : Direction.HORIZONTAL) {
+                BlockPos pos = playerPos.offset(dir);
+                if (mc.world.getBlockState(pos).isReplaceable()) needed.add(pos);
 
-            // 空中放置时 support 格
-            if (!airPlace.get() && isAirPlace(pos) && mc.world.getBlockState(pos).isReplaceable()) {
-                BlockPos support = pos.down();
-                if (mc.world.getBlockState(support).isReplaceable()) needed.add(support);
+                // 空中放置时 support 格
+                if (!airPlace.get() && isAirPlace(pos) && mc.world.getBlockState(pos).isReplaceable()) {
+                    BlockPos support = pos.down();
+                    if (mc.world.getBlockState(support).isReplaceable()) needed.add(support);
+                }
             }
         }
 
-        // 头部侧面（AntiFacePlace / Full）
-        boolean doHeadSides = headProtection.get() == TopMode.AntiFacePlace || headProtection.get() == TopMode.Full;
-        if (doHeadSides) {
+        // Body: 上肢 y+1 四面
+        boolean doUpper = bodyMode.get() == BodyMode.Upper || bodyMode.get() == BodyMode.Full;
+        if (doUpper) {
             for (Direction dir : Direction.HORIZONTAL) {
                 BlockPos pos = playerPos.offset(dir).up();
                 if (mc.world.getBlockState(pos).isReplaceable()) needed.add(pos);
             }
         }
 
-        // 头顶（Top / Full）
-        if (headProtection.get() == TopMode.Top || headProtection.get() == TopMode.Full) {
+        // Head: 头顶 y+2
+        if (headMode.get() == HeadMode.Single || headMode.get() == HeadMode.Full) {
             BlockPos pos = playerPos.add(0, 2, 0);
             if (mc.world.getBlockState(pos).isReplaceable()) needed.add(pos);
         }
 
-        // 脚下（Single）
-        if (belowProtection.get() == BottomMode.Single) {
+        // Head: 十字形 y+2 周围四面（Full 模式）
+        if (headMode.get() == HeadMode.Full) {
+            for (Direction dir : Direction.HORIZONTAL) {
+                BlockPos pos = playerPos.add(0, 2, 0).offset(dir);
+                if (mc.world.getBlockState(pos).isReplaceable()) needed.add(pos);
+            }
+        }
+
+        // Foot: 脚下 y-1
+        if (footMode.get() == FootMode.Single || footMode.get() == FootMode.Full) {
             BlockPos pos = playerPos.down();
             if (mc.world.getBlockState(pos).isReplaceable()) needed.add(pos);
+        }
+
+        // Foot: 十字形 y-1 周围四面（Full 模式）
+        if (footMode.get() == FootMode.Full) {
+            for (Direction dir : Direction.HORIZONTAL) {
+                BlockPos pos = playerPos.down().offset(dir);
+                if (mc.world.getBlockState(pos).isReplaceable()) needed.add(pos);
+            }
         }
 
         return Collections.unmodifiableList(needed);
@@ -463,48 +515,61 @@ public class Surround extends Module implements PrinterTaskProvider {
 
         BlockPos playerPos = mc.player.getBlockPos();
 
-        // Placing feet blocks
-        for (Direction direction : Direction.HORIZONTAL) {
-            BlockPos placePos = playerPos.offset(direction);
-
-            // Place support blocks if air place is disabled
-            if (!airPlace.get() && isAirPlace(placePos) && mc.world.getBlockState(placePos).isReplaceable()){
-                if (placeSafe(placePos.down(), block) && ++placedCount >= blocksPerTick.get()) break;
-
-                if (mc.world.getBlockState(placePos.down()).isReplaceable()) complete = false;
-            }
-
-            if (placeSafe(placePos, block) && ++placedCount >= blocksPerTick.get()) break;
-
-            if (mc.world.getBlockState(placePos).isReplaceable()) complete = false;
-        }
-
-        // Placing head-level side blocks (AntiFacePlace / Full)
-        boolean doHeadSides = headProtection.get() == TopMode.AntiFacePlace || headProtection.get() == TopMode.Full;
-        boolean doHeadTop   = headProtection.get() == TopMode.Top            || headProtection.get() == TopMode.Full;
-
-        if (doHeadSides && complete) {
+        // Body: 下肢 y+0
+        boolean doLower = bodyMode.get() == BodyMode.Lower || bodyMode.get() == BodyMode.Full;
+        if (doLower) {
             for (Direction direction : Direction.HORIZONTAL) {
-                BlockPos placePos = playerPos.offset(direction).up();
-                if (placeSafe(placePos, block) && ++placedCount >= blocksPerTick.get()) break;
+                BlockPos placePos = playerPos.offset(direction);
 
+                if (!airPlace.get() && isAirPlace(placePos) && mc.world.getBlockState(placePos).isReplaceable()) {
+                    if (placeSafe(placePos.down(), block) && ++placedCount >= blocksPerTick.get()) break;
+                    if (mc.world.getBlockState(placePos.down()).isReplaceable()) complete = false;
+                }
+
+                if (placeSafe(placePos, block) && ++placedCount >= blocksPerTick.get()) break;
                 if (mc.world.getBlockState(placePos).isReplaceable()) complete = false;
             }
         }
 
-        // Placing head top block (Top / Full)
-        if (doHeadTop && complete) {
-            BlockPos placePos = playerPos.add(0, 2, 0);
-            if (mc.world.getBlockState(placePos).isReplaceable()) {
-                if (placeSafe(placePos, block)) { placedCount++; complete = false; }
+        // Body: 上肢 y+1
+        boolean doUpper = bodyMode.get() == BodyMode.Upper || bodyMode.get() == BodyMode.Full;
+        if (doUpper && placedCount < blocksPerTick.get()) {
+            for (Direction direction : Direction.HORIZONTAL) {
+                BlockPos placePos = playerPos.offset(direction).up();
+                if (placeSafe(placePos, block) && ++placedCount >= blocksPerTick.get()) break;
+                if (mc.world.getBlockState(placePos).isReplaceable()) complete = false;
             }
         }
 
-        // Placing below block (Single)
-        if (belowProtection.get() == BottomMode.Single && complete) {
+        // Head: 头顶 y+2
+        if ((headMode.get() == HeadMode.Single || headMode.get() == HeadMode.Full) && placedCount < blocksPerTick.get()) {
+            BlockPos placePos = playerPos.add(0, 2, 0);
+            if (placeSafe(placePos, block)) placedCount++;
+            if (mc.world.getBlockState(placePos).isReplaceable()) complete = false;
+        }
+
+        // Head: 十字形 y+2
+        if (headMode.get() == HeadMode.Full && placedCount < blocksPerTick.get()) {
+            for (Direction direction : Direction.HORIZONTAL) {
+                BlockPos placePos = playerPos.add(0, 2, 0).offset(direction);
+                if (placeSafe(placePos, block) && ++placedCount >= blocksPerTick.get()) break;
+                if (mc.world.getBlockState(placePos).isReplaceable()) complete = false;
+            }
+        }
+
+        // Foot: 脚下 y-1
+        if ((footMode.get() == FootMode.Single || footMode.get() == FootMode.Full) && placedCount < blocksPerTick.get()) {
             BlockPos placePos = playerPos.down();
-            if (mc.world.getBlockState(placePos).isReplaceable()) {
-                if (placeSafe(placePos, block)) { placedCount++; complete = false; }
+            if (placeSafe(placePos, block)) placedCount++;
+            if (mc.world.getBlockState(placePos).isReplaceable()) complete = false;
+        }
+
+        // Foot: 十字形 y-1
+        if (footMode.get() == FootMode.Full && placedCount < blocksPerTick.get()) {
+            for (Direction direction : Direction.HORIZONTAL) {
+                BlockPos placePos = playerPos.down().offset(direction);
+                if (placeSafe(placePos, block) && ++placedCount >= blocksPerTick.get()) break;
+                if (mc.world.getBlockState(placePos).isReplaceable()) complete = false;
             }
         }
 
@@ -661,16 +726,23 @@ public class Surround extends Module implements PrinterTaskProvider {
         return block.getBlastResistance() >= 600 && block.getHardness() >= 0 && block != Blocks.REINFORCED_DEEPSLATE;
     }
 
-    public enum TopMode {
+    public enum HeadMode {
         None,
-        AntiFacePlace,
-        Top,
+        Single,
         Full
     }
 
-    public enum BottomMode {
+    public enum BodyMode {
         None,
-        Single
+        Lower,
+        Upper,
+        Full
+    }
+
+    public enum FootMode {
+        None,
+        Single,
+        Full
     }
 
     public enum Center {
