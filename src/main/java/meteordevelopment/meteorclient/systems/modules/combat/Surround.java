@@ -8,12 +8,10 @@ package meteordevelopment.meteorclient.systems.modules.combat;
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
-import meteordevelopment.meteorclient.mixin.WorldRendererAccessor;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
-import meteordevelopment.meteorclient.utils.entity.DamageUtils;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.modules.player.Printer;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
@@ -27,14 +25,12 @@ import meteordevelopment.meteorclient.utils.printer.PrinterTaskProvider;
 import meteordevelopment.meteorclient.utils.printer.ResolverRegistry;
 import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
-import meteordevelopment.meteorclient.utils.world.Dir;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.Block;
 import net.minecraft.block.BlockState;
 import net.minecraft.block.Blocks;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.decoration.EndCrystalEntity;
-import net.minecraft.entity.player.BlockBreakingInfo;
 import net.minecraft.network.packet.c2s.play.HandSwingC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerInteractBlockC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerInteractEntityC2SPacket;
@@ -51,7 +47,6 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
-import java.util.function.Predicate;
 
 public class Surround extends Module implements PrinterTaskProvider {
     private final SettingGroup sgGeneral  = settings.getDefaultGroup();
@@ -73,24 +68,6 @@ public class Surround extends Module implements PrinterTaskProvider {
         .build()
     );
 
-    private final Setting<Integer> delay = sgGeneral.add(new IntSetting.Builder()
-        .name("放置延迟")
-        .description("每次放置之间的间隔（tick）。")
-        .min(0)
-        .defaultValue(0)
-        .visible(() -> !Printer.isProviderRegistered(this))
-        .build()
-    );
-
-    private final Setting<Integer> blocksPerTick = sgGeneral.add(new IntSetting.Builder()
-        .name("每 tick 放置数")
-        .description("单个 tick 内最多放置的方块数。")
-        .defaultValue(1)
-        .min(1)
-        .visible(() -> !Printer.isProviderRegistered(this))
-        .build()
-    );
-
     private final Setting<Center> center = sgGeneral.add(new EnumSetting.Builder<Center>()
         .name("居中")
         .description("将玩家传送到方块中心。注意：可能触发 GrimAC 移动检测。")
@@ -107,15 +84,8 @@ public class Surround extends Module implements PrinterTaskProvider {
 
     private final Setting<Boolean> airPlace = sgGeneral.add(new BoolSetting.Builder()
         .name("空中放置")
-        .description("允许在无邻面支撑时放置方块。")
-        .defaultValue(false)        .visible(() -> !Printer.isProviderRegistered(this))        .build()
-    );
-
-    private final Setting<Boolean> rotate = sgGeneral.add(new BoolSetting.Builder()
-        .name("旋转")
-        .description("放置时自动朝向目标方块。")
-        .defaultValue(true)
-        .visible(() -> !Printer.isProviderRegistered(this))
+        .description("允许在无邻面支撑时放置方块（开启后跳过 support 块计算）。")
+        .defaultValue(false)
         .build()
     );
 
@@ -155,11 +125,19 @@ public class Surround extends Module implements PrinterTaskProvider {
         .build()
     );
 
+    private final Setting<Boolean> aggressiveProtect = sgProtect.add(new BoolSetting.Builder()
+        .name("激进防护")
+        .description("同 tick 内 Attack+Place（消除对手重放水晶窗口，但可能触发 GrimAC MultiActionsF experimental 检测）。关闭时 2-tick 安全模式。")
+        .defaultValue(false)
+        .visible(protect::get)
+        .build()
+    );
+
     private final Setting<Boolean> swing = sgProtect.add(new BoolSetting.Builder()
         .name("挥手")
-        .description("放置/攻击时渲染挥手动画。")
+        .description("攻击水晶时渲染挥手动画。")
         .defaultValue(true)
-        .visible(() -> !Printer.isProviderRegistered(this))
+        .visible(protect::get)
         .build()
     );
 
@@ -275,77 +253,82 @@ public class Surround extends Module implements PrinterTaskProvider {
     );
 
     public ArrayList<Module> toActivate = new ArrayList<>();
-    private int timer;
+
+    /** 水晶防护旋转优先级（高于 Printer 的 50，确保抢占） */
+    private static final int PROTECT_ROTATION_PRIORITY = 200;
+    /** 攻击距离 */
+    private static final double ATTACK_REACH = 3.0;
 
     public Surround() {
         super(Categories.Combat, "surround", "Surrounds you in blocks to prevent massive crystal damage.");
     }
 
-    // Render
+    // ==================== 位置计算（统一来源） ====================
 
-    @EventHandler
-    private void onRender3D(Render3DEvent event) {
-        if (!render.get()) return;
-
+    /**
+     * 计算所有 Surround 目标位置（不含 support 块，不过滤 blockState）。
+     * 由 {@link #getPlacementPositions()} 和 {@link #onRender3D} 共用，消除重复遍历。
+     */
+    private List<BlockPos> computeAllTargetPositions() {
+        List<BlockPos> positions = new ArrayList<>();
         BlockPos playerPos = mc.player.getBlockPos();
 
         // Body: 下肢 y+0
         boolean doLower = bodyMode.get() == BodyMode.Lower || bodyMode.get() == BodyMode.Full;
         if (doLower) {
-            for (Direction direction : Direction.HORIZONTAL) {
-                draw(playerPos.offset(direction), event, 0);
-            }
+            for (Direction dir : Direction.HORIZONTAL) positions.add(playerPos.offset(dir));
         }
 
         // Body: 上肢 y+1
         boolean doUpper = bodyMode.get() == BodyMode.Upper || bodyMode.get() == BodyMode.Full;
         if (doUpper) {
-            for (Direction direction : Direction.HORIZONTAL) {
-                draw(playerPos.offset(direction).up(), event, 0);
-            }
+            for (Direction dir : Direction.HORIZONTAL) positions.add(playerPos.offset(dir).up());
         }
 
         // Head: 头顶 y+2
         if (headMode.get() == HeadMode.Single || headMode.get() == HeadMode.Full) {
-            draw(playerPos.add(0, 2, 0), event, 0);
+            positions.add(playerPos.add(0, 2, 0));
         }
 
-        // Head: 十字形 y+2
+        // Head: 十字形 y+2（Full 模式额外四面）
         if (headMode.get() == HeadMode.Full) {
-            for (Direction direction : Direction.HORIZONTAL) {
-                draw(playerPos.add(0, 2, 0).offset(direction), event, 0);
-            }
+            for (Direction dir : Direction.HORIZONTAL) positions.add(playerPos.add(0, 2, 0).offset(dir));
         }
 
         // Foot: 脚下 y-1
         if (footMode.get() == FootMode.Single || footMode.get() == FootMode.Full) {
-            draw(playerPos.down(), event, 0);
+            positions.add(playerPos.down());
         }
 
-        // Foot: 十字形 y-1
+        // Foot: 十字形 y-1（Full 模式额外四面）
         if (footMode.get() == FootMode.Full) {
-            for (Direction direction : Direction.HORIZONTAL) {
-                draw(playerPos.down().offset(direction), event, 0);
-            }
+            for (Direction dir : Direction.HORIZONTAL) positions.add(playerPos.down().offset(dir));
         }
+
+        return positions;
     }
 
-    private void draw(BlockPos renderPos, Render3DEvent event, int exclude) {
-        Color sideColor = getSideColor(renderPos);
-        Color lineColor = getLineColor(renderPos);
-        event.renderer.box(renderPos, sideColor, lineColor, shapeMode.get(), exclude);
+    // ==================== 渲染 ====================
+
+    @EventHandler
+    private void onRender3D(Render3DEvent event) {
+        if (!render.get() || mc.player == null || mc.world == null) return;
+
+        for (BlockPos pos : computeAllTargetPositions()) {
+            Color sideColor = getSideColor(pos);
+            Color lineColor = getLineColor(pos);
+            event.renderer.box(pos, sideColor, lineColor, shapeMode.get(), 0);
+        }
     }
 
     // Function
 
     @Override
     public void onActivate() {
-        // Center on activate
+        // 居中
         if (center.get() == Center.OnActivate) PlayerUtils.centerPlayer();
 
-        // Reset delay
-        timer = delay.get();
-
+        // 联动关闭其他模块
         if (toggleModules.get() && !modules.get().isEmpty() && mc.world != null && mc.player != null) {
             for (Module module : modules.get()) {
                 if (module.isActive()) {
@@ -355,7 +338,7 @@ public class Surround extends Module implements PrinterTaskProvider {
             }
         }
 
-        // 注册为 Printer 输入源
+        // 注册为 Printer 输入源（Printer 管线统一处理放置、旋转、slot 切换）
         Printer.registerProvider(this);
     }
 
@@ -376,65 +359,24 @@ public class Surround extends Module implements PrinterTaskProvider {
     // ==================== PrinterTaskProvider 接口实现 ====================
 
     /**
-     * 返回当前需要防御放置的目标位置集合（所有仍为可替换状态的 Surround 位置）。
+     * 返回当前需要放置的目标位置集合（所有仍为可替换状态的 Surround 位置 + body 下肢的 support 块）。
      * <p>Printer 模块调用此方法将 Surround 的任务注入其统一管线。</p>
      */
     @Override
     public Collection<BlockPos> getPlacementPositions() {
         if (mc.player == null || mc.world == null) return Collections.emptyList();
 
+        int playerY = mc.player.getBlockPos().getY();
         List<BlockPos> needed = new ArrayList<>();
-        BlockPos playerPos = mc.player.getBlockPos();
 
-        // Body: 下肢 y+0 四面
-        boolean doLower = bodyMode.get() == BodyMode.Lower || bodyMode.get() == BodyMode.Full;
-        if (doLower) {
-            for (Direction dir : Direction.HORIZONTAL) {
-                BlockPos pos = playerPos.offset(dir);
-                if (mc.world.getBlockState(pos).isReplaceable()) needed.add(pos);
+        for (BlockPos pos : computeAllTargetPositions()) {
+            if (!mc.world.getBlockState(pos).isReplaceable()) continue;
+            needed.add(pos);
 
-                // 空中放置时 support 格
-                if (!airPlace.get() && isAirPlace(pos) && mc.world.getBlockState(pos).isReplaceable()) {
-                    BlockPos support = pos.down();
-                    if (mc.world.getBlockState(support).isReplaceable()) needed.add(support);
-                }
-            }
-        }
-
-        // Body: 上肢 y+1 四面
-        boolean doUpper = bodyMode.get() == BodyMode.Upper || bodyMode.get() == BodyMode.Full;
-        if (doUpper) {
-            for (Direction dir : Direction.HORIZONTAL) {
-                BlockPos pos = playerPos.offset(dir).up();
-                if (mc.world.getBlockState(pos).isReplaceable()) needed.add(pos);
-            }
-        }
-
-        // Head: 头顶 y+2
-        if (headMode.get() == HeadMode.Single || headMode.get() == HeadMode.Full) {
-            BlockPos pos = playerPos.add(0, 2, 0);
-            if (mc.world.getBlockState(pos).isReplaceable()) needed.add(pos);
-        }
-
-        // Head: 十字形 y+2 周围四面（Full 模式）
-        if (headMode.get() == HeadMode.Full) {
-            for (Direction dir : Direction.HORIZONTAL) {
-                BlockPos pos = playerPos.add(0, 2, 0).offset(dir);
-                if (mc.world.getBlockState(pos).isReplaceable()) needed.add(pos);
-            }
-        }
-
-        // Foot: 脚下 y-1
-        if (footMode.get() == FootMode.Single || footMode.get() == FootMode.Full) {
-            BlockPos pos = playerPos.down();
-            if (mc.world.getBlockState(pos).isReplaceable()) needed.add(pos);
-        }
-
-        // Foot: 十字形 y-1 周围四面（Full 模式）
-        if (footMode.get() == FootMode.Full) {
-            for (Direction dir : Direction.HORIZONTAL) {
-                BlockPos pos = playerPos.down().offset(dir);
-                if (mc.world.getBlockState(pos).isReplaceable()) needed.add(pos);
+            // Body 下肢（y+0）的 support 块：位置悬空时需要先垫一格
+            if (pos.getY() == playerY && !airPlace.get() && isAirPlace(pos)) {
+                BlockPos support = pos.down();
+                if (mc.world.getBlockState(support).isReplaceable()) needed.add(support);
             }
         }
 
@@ -483,201 +425,149 @@ public class Surround extends Module implements PrinterTaskProvider {
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
-        // Delay
-        if (timer++ < delay.get()) return;
+        if (mc.player == null || mc.world == null) return;
 
-        // Toggle if Y level changed
+        // Y 坐标变化 → 关闭（跳跃/踩高后 Surround 位置失效）
         if (toggleOnYChange.get() && mc.player.lastY != mc.player.getY()) {
             toggle();
             return;
         }
 
-        // Wait till player is on ground
+        // 仅地面工作
         if (onlyOnGround.get() && !mc.player.isOnGround()) return;
 
-        // 如果已注册为 Printer 输入源，让出控制权（Printer 管线自动处理，无论 Printer 模块是否启用）
-        if (Printer.isProviderRegistered(this)) {
-            // Printer 管线负责实际 place，Surround 只负责 center
-            boolean complete = getPlacementPositions().isEmpty();
-            if (!complete && center.get() == Center.Incomplete) PlayerUtils.centerPlayer();
-            if (complete && center.get() == Center.Always) PlayerUtils.centerPlayer();
-            if (complete && toggleOnComplete.get()) { toggle(); return; }
-            timer = 0;
-            return;
+        // Printer 管线负责实际放置，Surround 只负责水晶防护 + 居中 + 状态检测
+        List<BlockPos> needed = new ArrayList<>(getPlacementPositions());
+        boolean complete = needed.isEmpty();
+
+        // ── 水晶防护：检测并攻击阻挡 Surround 位置的 EndCrystal ──
+        if (protect.get() && !complete) {
+            tickCrystalProtection(needed);
         }
 
-        // Wait until the player has a block available to place
-        FindItemResult block = InvUtils.findInHotbar(itemStack -> blocks.get().contains(Block.getBlockFromItem(itemStack.getItem())));
-        if (!block.found()) return;
+        // ── 居中控制 ──
+        if (!complete && center.get() == Center.Incomplete) PlayerUtils.centerPlayer();
+        if (complete && center.get() == Center.Always) PlayerUtils.centerPlayer();
 
-        // Centering player
-        if (center.get() == Center.Always) PlayerUtils.centerPlayer();
-
-        int placedCount = 0;
-        boolean complete = true;
-
-        BlockPos playerPos = mc.player.getBlockPos();
-
-        // Body: 下肢 y+0
-        boolean doLower = bodyMode.get() == BodyMode.Lower || bodyMode.get() == BodyMode.Full;
-        if (doLower) {
-            for (Direction direction : Direction.HORIZONTAL) {
-                BlockPos placePos = playerPos.offset(direction);
-
-                if (!airPlace.get() && isAirPlace(placePos) && mc.world.getBlockState(placePos).isReplaceable()) {
-                    if (placeSafe(placePos.down(), block) && ++placedCount >= blocksPerTick.get()) break;
-                    if (mc.world.getBlockState(placePos.down()).isReplaceable()) complete = false;
-                }
-
-                if (placeSafe(placePos, block) && ++placedCount >= blocksPerTick.get()) break;
-                if (mc.world.getBlockState(placePos).isReplaceable()) complete = false;
-            }
-        }
-
-        // Body: 上肢 y+1
-        boolean doUpper = bodyMode.get() == BodyMode.Upper || bodyMode.get() == BodyMode.Full;
-        if (doUpper && placedCount < blocksPerTick.get()) {
-            for (Direction direction : Direction.HORIZONTAL) {
-                BlockPos placePos = playerPos.offset(direction).up();
-                if (placeSafe(placePos, block) && ++placedCount >= blocksPerTick.get()) break;
-                if (mc.world.getBlockState(placePos).isReplaceable()) complete = false;
-            }
-        }
-
-        // Head: 头顶 y+2
-        if ((headMode.get() == HeadMode.Single || headMode.get() == HeadMode.Full) && placedCount < blocksPerTick.get()) {
-            BlockPos placePos = playerPos.add(0, 2, 0);
-            if (placeSafe(placePos, block)) placedCount++;
-            if (mc.world.getBlockState(placePos).isReplaceable()) complete = false;
-        }
-
-        // Head: 十字形 y+2
-        if (headMode.get() == HeadMode.Full && placedCount < blocksPerTick.get()) {
-            for (Direction direction : Direction.HORIZONTAL) {
-                BlockPos placePos = playerPos.add(0, 2, 0).offset(direction);
-                if (placeSafe(placePos, block) && ++placedCount >= blocksPerTick.get()) break;
-                if (mc.world.getBlockState(placePos).isReplaceable()) complete = false;
-            }
-        }
-
-        // Foot: 脚下 y-1
-        if ((footMode.get() == FootMode.Single || footMode.get() == FootMode.Full) && placedCount < blocksPerTick.get()) {
-            BlockPos placePos = playerPos.down();
-            if (placeSafe(placePos, block)) placedCount++;
-            if (mc.world.getBlockState(placePos).isReplaceable()) complete = false;
-        }
-
-        // Foot: 十字形 y-1
-        if (footMode.get() == FootMode.Full && placedCount < blocksPerTick.get()) {
-            for (Direction direction : Direction.HORIZONTAL) {
-                BlockPos placePos = playerPos.down().offset(direction);
-                if (placeSafe(placePos, block) && ++placedCount >= blocksPerTick.get()) break;
-                if (mc.world.getBlockState(placePos).isReplaceable()) complete = false;
-            }
-        }
-
-        timer = 0;
-
-        // Disable if all the surround blocks are placed
+        // ── 自动关闭 ──
         if (complete && toggleOnComplete.get()) {
             toggle();
-            return;
         }
-
-        // Keep the player centered until all the blocks are placed to avoid collision
-        if (!complete && center.get() == Center.Incomplete) PlayerUtils.centerPlayer();
     }
 
-    private boolean placeSafe(BlockPos placePos, FindItemResult item) {
-        if (mc.player == null || mc.world == null) return false;
+    // ==================== 水晶防护 ====================
 
-        // 位置已有不可替换方块 → 无需放置
-        if (!mc.world.getBlockState(placePos).isReplaceable()) return false;
+    /**
+     * 检测 Surround 空位上阻挡放置的 EndCrystal，执行攻击（+ 可选同 tick 放置）。
+     *
+     * <p><b>默认模式（2-tick 安全）</b>：
+     * Tick 1 攻击水晶（priority=200 抢占 Printer 旋转）→
+     * Tick 2 Printer 自然填补（EndCrystal 不在 Printer.hasBlockingEntity 过滤中）。
+     * 不触发任何 GrimAC 检测。</p>
+     *
+     * <p><b>激进模式（aggressiveProtect, 1-tick）</b>：
+     * 同 callback 内先 Attack 后 Place → TCP 保序 → 服务端先清水晶后放方块。
+     * 可能触发 GrimAC MultiActionsF（experimental, 大多数服务器未开启）。
+     * 若被 flag，Place 被 resync 但 Attack 仍然生效 → 退化为 2-tick。</p>
+     *
+     * @param needed 当前需要填补的 Surround 位置列表
+     * @return true 如果提交了旋转请求（本 tick Surround 接管旋转优先权）
+     */
+    private boolean tickCrystalProtection(List<BlockPos> needed) {
+        Vec3d eye = mc.player.getEyePos();
 
-        boolean placed = false;
+        for (BlockPos pos : needed) {
+            if (!mc.world.getBlockState(pos).isReplaceable()) continue;
 
-        // 获取物品信息并构建放置上下文
-        net.minecraft.item.ItemStack stack = mc.player.getInventory().getStack(item.isOffhand() ? 40 : item.slot());
-        Block blockToPlace = Block.getBlockFromItem(stack.getItem());
-        BlockState state = blockToPlace.getDefaultState();
+            // 查找阻挡该位置的 EndCrystal
+            List<EndCrystalEntity> crystals = mc.world.getEntitiesByClass(
+                EndCrystalEntity.class, new Box(pos), Entity::isAlive);
+            if (crystals.isEmpty()) continue;
 
-        PlacementContext ctx = PlacementContext.of(mc.world, placePos, state, mc.player, true, false, 4.5);
+            EndCrystalEntity crystal = crystals.getFirst();
+            if (eye.distanceTo(crystal.getPos()) > ATTACK_REACH) continue;
+
+            // 激进模式：尝试同 tick Attack + Place
+            if (aggressiveProtect.get()) {
+                return tickAggressiveProtect(pos, crystal);
+            }
+
+            // 安全模式：仅攻击，放置留给下 tick Printer
+            Rotations.rotateToward(crystal.getPos(), PROTECT_ROTATION_PRIORITY, () -> {
+                sendCrystalAttack(crystal);
+            });
+            return true;
+        }
+
+        return false;
+    }
+
+    /**
+     * 激进防护：同 tick Attack + Place。
+     * 旋转朝 placement hitVec（覆盖水晶碰撞检测范围），callback 内先发 Attack 再发 Place。
+     * 服务端按序处理：水晶死 → 方块放。
+     * 若客户端已无水晶（延迟确认），退化为纯 Place。
+     */
+    private boolean tickAggressiveProtect(BlockPos pos, EndCrystalEntity crystal) {
+        // 准备放置参数
+        FindItemResult item = InvUtils.findInHotbar(
+            s -> blocks.get().contains(Block.getBlockFromItem(s.getItem())));
+        if (!item.found()) {
+            // 没有方块 → 只攻击
+            Rotations.rotateToward(crystal.getPos(), PROTECT_ROTATION_PRIORITY, () -> {
+                sendCrystalAttack(crystal);
+            });
+            return true;
+        }
+
+        BlockState desired = blocks.get().isEmpty()
+            ? Blocks.OBSIDIAN.getDefaultState()
+            : blocks.get().getFirst().getDefaultState();
+        PlacementContext ctx = PlacementContext.of(mc.world, pos, desired, mc.player, true, false, 4.5);
         PlacementOption option = ResolverRegistry.resolve(ctx);
 
-        if (option != null && option.hitVec() != null) {
-            BlockPos interactPos = option.getInteractPos(placePos);
-            Direction clickedFace = option.getClickedFace();
-            BlockHitResult hitResult = new BlockHitResult(option.hitVec(), clickedFace, interactPos, false);
+        if (option == null || option.hitVec() == null) {
+            // 无合法面 → 只攻击
+            Rotations.rotateToward(crystal.getPos(), PROTECT_ROTATION_PRIORITY, () -> {
+                sendCrystalAttack(crystal);
+            });
+            return true;
+        }
 
-            // 切换到持有目标方块的槽位（非副手时），放置后恢复
-            int prevSlot = mc.player.getInventory().getSelectedSlot();
-            boolean needSwap = !item.isOffhand() && item.slot() != prevSlot;
-            Hand hand = item.isOffhand() ? Hand.OFF_HAND : Hand.MAIN_HAND;
+        // 构建 place 参数
+        BlockPos interactPos = option.getInteractPos(pos);
+        Direction clickedFace = option.getClickedFace();
+        BlockHitResult hitResult = new BlockHitResult(option.hitVec(), clickedFace, interactPos, false);
+        int prevSlot = mc.player.getInventory().getSelectedSlot();
+        boolean needSwap = !item.isOffhand() && item.slot() != prevSlot;
+        Hand hand = item.isOffhand() ? Hand.OFF_HAND : Hand.MAIN_HAND;
 
+        // 旋转朝 placement hitVec（水晶在同方向，碰撞箱够大，一个旋转覆盖两个检测）
+        Rotations.rotateToward(option.hitVec(), PROTECT_ROTATION_PRIORITY, () -> {
+            // ① 攻击水晶（无需特定手持物，先发以最快清除实体）
+            sendCrystalAttack(crystal);
+
+            // ② 切换到方块 slot（仅 Place 需要）
             if (needSwap) InvUtils.swap(item.slot(), false);
 
-            if (rotate.get()) {
-                Vec3d hv = option.hitVec();
-                double dx = hv.x - mc.player.getX();
-                double dy = hv.y - mc.player.getEyeY();
-                double dz = hv.z - mc.player.getZ();
-                double yaw = Math.toDegrees(Math.atan2(-dx, dz));
-                double pitch = Math.toDegrees(Math.atan2(-dy, Math.sqrt(dx * dx + dz * dz)));
-                Hand fHand = hand;
-                BlockHitResult fHit = hitResult;
-                int fPrevSlot = prevSlot;
-                boolean fNeedSwap = needSwap;
-                Rotations.rotate(yaw, pitch, () -> {
-                    int seq = mc.world.getPendingUpdateManager().incrementSequence().getSequence();
-                    mc.player.networkHandler.sendPacket(new PlayerInteractBlockC2SPacket(fHand, fHit, seq));
-                    if (fNeedSwap) InvUtils.swap(fPrevSlot, false);
-                });
-            } else {
-                int seq = mc.world.getPendingUpdateManager().incrementSequence().getSequence();
-                mc.player.networkHandler.sendPacket(new PlayerInteractBlockC2SPacket(hand, hitResult, seq));
-                if (needSwap) InvUtils.swap(prevSlot, false);
-            }
+            // ③ 放置方块（服务端紧接处理：水晶死 → 位置空 → 方块放）
+            int seq = mc.world.getPendingUpdateManager().incrementSequence().getSequence();
+            mc.player.networkHandler.sendPacket(new PlayerInteractBlockC2SPacket(hand, hitResult, seq));
 
-            if (swing.get()) mc.player.swingHand(hand);
-            placed = true;
+            // ④ 恢复原 slot
+            if (needSwap) InvUtils.swap(prevSlot, false);
+        });
+
+        return true;
+    }
+
+    /** 发送攻击水晶的数据包（含 swing 动画） */
+    private void sendCrystalAttack(Entity crystal) {
+        mc.player.networkHandler.sendPacket(
+            PlayerInteractEntityC2SPacket.attack(crystal, mc.player.isSneaking()));
+        if (swing.get()) {
+            mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(Hand.MAIN_HAND));
         }
-        // 无 fallback：ResolverRegistry 未找到有效面时静默跳过（避免 MultiPlace 风险）
-
-        // Check if being mined
-        boolean beingMined = false;
-        for (BlockBreakingInfo value : ((WorldRendererAccessor) mc.worldRenderer).meteor$getBlockBreakingInfos().values()) {
-            if (value.getPos().equals(placePos)) {
-                beingMined = true;
-                break;
-            }
-        }
-
-        boolean isThreat = mc.world.getBlockState(placePos).isReplaceable() || beingMined;
-
-        // If the block is air or is being mined, destroy nearby crystals to be safe
-        if (protect.get() && !placed && isThreat) {
-            Box box = new Box(
-                placePos.getX() - 1, placePos.getY() - 1, placePos.getZ() - 1,
-                placePos.getX() + 1, placePos.getY() + 1, placePos.getZ() + 1
-            );
-
-            Predicate<Entity> entityPredicate = entity -> entity instanceof EndCrystalEntity && DamageUtils.crystalDamage(mc.player, entity.getPos()) < PlayerUtils.getTotalHealth();
-
-            for (Entity crystal : mc.world.getOtherEntities(null, box, entityPredicate)) {
-                if (rotate.get()) {
-                    Rotations.rotate(Rotations.getPitch(crystal), Rotations.getYaw(crystal), () -> {
-                        mc.player.networkHandler.sendPacket(PlayerInteractEntityC2SPacket.attack(crystal, mc.player.isSneaking()));
-                    });
-                }
-                else {
-                    mc.player.networkHandler.sendPacket(PlayerInteractEntityC2SPacket.attack(crystal, mc.player.isSneaking()));
-                }
-
-                mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(Hand.MAIN_HAND));
-            }
-        }
-
-        return placed;
     }
 
     @EventHandler
