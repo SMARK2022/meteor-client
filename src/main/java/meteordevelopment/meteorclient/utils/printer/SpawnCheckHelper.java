@@ -35,8 +35,10 @@ public final class SpawnCheckHelper {
      */
     public static boolean canHostileSpawnAt(World world, BlockPos pos) {
         if (!isGeometricSpawnable(world, pos)) return false;
-        // 光照：block light == 0 → 夜间可刷怪 (1.18+)
-        return world.getLightLevel(LightType.BLOCK, pos) == 0;
+        // 1.18+ hostile 刷怪条件: max(block_light, sky_light - sky_darkening) == 0
+        // 午夜 sky_darkening 最大 = 11; sky_light > 11 → adjusted > 0 → 不刷怪
+        if (world.getLightLevel(LightType.BLOCK, pos) > 0) return false;
+        return world.getLightLevel(LightType.SKY, pos) <= 11;
     }
 
     /**
@@ -74,6 +76,8 @@ public final class SpawnCheckHelper {
      * 用于扫描循环中跳过 90%+ 的空气/流体位置，避免完整 spawn check。
      */
     public static boolean quickRejectNotSpawnable(World world, BlockPos pos) {
+        BlockState body = world.getBlockState(pos);
+        if (!body.isAir()) return true;  // 实心方块不刷怪
         BlockState ground = world.getBlockState(pos.down());
         return ground.isAir() || ground.getBlock() instanceof FluidBlock;
     }

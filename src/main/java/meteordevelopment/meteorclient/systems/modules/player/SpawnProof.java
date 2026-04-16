@@ -113,14 +113,14 @@ public class SpawnProof extends Module implements PrinterTaskProvider {
     private final Setting<SettingColor> faceColor = sgRender.add(new ColorSetting.Builder()
         .name("标记面颜色")
         .description("标记填充色（穿透通道自动取半 alpha）。")
-        .defaultValue(new SettingColor(255, 50, 50, 153))
+        .defaultValue(new SettingColor(255, 50, 50, 50))
         .visible(renderOverlay::get)
         .build());
 
     private final Setting<SettingColor> lineColor = sgRender.add(new ColorSetting.Builder()
         .name("标记线颜色")
         .description("标记边框线颜色（仅正常深度通道绘制）。")
-        .defaultValue(new SettingColor(255, 50, 50, 200))
+        .defaultValue(new SettingColor(255, 50, 50, 120))
         .visible(renderOverlay::get)
         .build());
 
@@ -148,7 +148,7 @@ public class SpawnProof extends Module implements PrinterTaskProvider {
 
     private static final int TORCH_GRID = 7;
     private static final int HL_INTERVAL = 5;
-    private static final int ANALYSIS_BUDGET = 16384;
+    private static final int ANALYSIS_BUDGET = 32768;
     private static final int CELL_BITS = 2; // 4³ blocks per cell
 
     // ==================== 生命周期 ====================
@@ -482,7 +482,7 @@ public class SpawnProof extends Module implements PrinterTaskProvider {
         renderHighlights = new ArrayList<>(pq);
 
         SettingColor fc = faceColor.get();
-        ghostColor = new SettingColor(fc.r, fc.g, fc.b, fc.a / 2);
+        ghostColor = new SettingColor(fc.r, fc.g, fc.b, Math.max(fc.a / 3, 10));
     }
 
     @EventHandler
@@ -498,7 +498,7 @@ public class SpawnProof extends Module implements PrinterTaskProvider {
                 pos.getX() + 0.1, y, pos.getZ() + 0.1,
                 pos.getX() + 0.9, y + 0.01, pos.getZ() + 0.9);
 
-            event.renderer.box(box, fc, lc, ShapeMode.Both, 0);
+            event.renderer.box(box, fc, lc, ShapeMode.Lines, 0);
             event.depthRenderer.box(box, ghostColor, ghostColor, ShapeMode.Sides, 0);
         }
     }
