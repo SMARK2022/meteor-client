@@ -440,9 +440,8 @@ public class Surround extends Module implements PrinterTaskProvider {
         // Wait till player is on ground
         if (onlyOnGround.get() && !mc.player.isOnGround()) return;
 
-        // 如果 Printer 已启用且自己已注册为输入源，让出控制权（仅保留 center/complete 逻辑）
-        Printer printer = Modules.get().get(Printer.class);
-        if (printer != null && printer.isActive() && Printer.isProviderRegistered(this)) {
+        // 如果已注册为 Printer 输入源，让出控制权（Printer 管线自动处理，无论 Printer 模块是否启用）
+        if (Printer.isProviderRegistered(this)) {
             // Printer 管线负责实际 place，Surround 只负责 center
             boolean complete = getPlacementPositions().isEmpty();
             if (!complete && center.get() == Center.Incomplete) PlayerUtils.centerPlayer();
@@ -524,9 +523,12 @@ public class Surround extends Module implements PrinterTaskProvider {
     private boolean placeSafe(BlockPos placePos, FindItemResult item) {
         if (mc.player == null || mc.world == null) return false;
 
+        // 位置已有不可替换方块 → 无需放置
+        if (!mc.world.getBlockState(placePos).isReplaceable()) return false;
+
         boolean placed = false;
 
-        // Try printer-resolver for NCP/GrimAC-safe face selection
+        // 获取物品信息并构建放置上下文
         net.minecraft.item.ItemStack stack = mc.player.getInventory().getStack(item.isOffhand() ? 40 : item.slot());
         Block blockToPlace = Block.getBlockFromItem(stack.getItem());
         BlockState state = blockToPlace.getDefaultState();
@@ -538,7 +540,13 @@ public class Surround extends Module implements PrinterTaskProvider {
             BlockPos interactPos = option.getInteractPos(placePos);
             Direction clickedFace = option.getClickedFace();
             BlockHitResult hitResult = new BlockHitResult(option.hitVec(), clickedFace, interactPos, false);
+
+            // 切换到持有目标方块的槽位（非副手时），放置后恢复
+            int prevSlot = mc.player.getInventory().getSelectedSlot();
+            boolean needSwap = !item.isOffhand() && item.slot() != prevSlot;
             Hand hand = item.isOffhand() ? Hand.OFF_HAND : Hand.MAIN_HAND;
+
+            if (needSwap) InvUtils.swap(item.slot(), false);
 
             if (rotate.get()) {
                 Vec3d hv = option.hitVec();
@@ -549,13 +557,17 @@ public class Surround extends Module implements PrinterTaskProvider {
                 double pitch = Math.toDegrees(Math.atan2(-dy, Math.sqrt(dx * dx + dz * dz)));
                 Hand fHand = hand;
                 BlockHitResult fHit = hitResult;
+                int fPrevSlot = prevSlot;
+                boolean fNeedSwap = needSwap;
                 Rotations.rotate(yaw, pitch, () -> {
                     int seq = mc.world.getPendingUpdateManager().incrementSequence().getSequence();
                     mc.player.networkHandler.sendPacket(new PlayerInteractBlockC2SPacket(fHand, fHit, seq));
+                    if (fNeedSwap) InvUtils.swap(fPrevSlot, false);
                 });
             } else {
                 int seq = mc.world.getPendingUpdateManager().incrementSequence().getSequence();
                 mc.player.networkHandler.sendPacket(new PlayerInteractBlockC2SPacket(hand, hitResult, seq));
+                if (needSwap) InvUtils.swap(prevSlot, false);
             }
 
             if (swing.get()) mc.player.swingHand(hand);

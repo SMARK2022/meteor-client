@@ -25,9 +25,11 @@ import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.gui.GuiThemes;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
+import meteordevelopment.meteorclient.MeteorClient;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.utils.misc.Keybind;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
@@ -91,11 +93,31 @@ public class Printer extends Module {
             providers.add(provider);
             providers.sort(Comparator.comparingInt(p -> -p.priority()));
         }
+        ensureSubscribed();
     }
 
     /** 注销输入源（外挂模块在 onDeactivate 时调用） */
     public static void unregisterProvider(PrinterTaskProvider provider) {
         providers.remove(provider);
+        ensureSubscribed();
+    }
+
+    /**
+     * 确保事件订阅状态与需求一致：
+     * - 模块启用 或 有 provider → 订阅事件
+     * - 都没有 → 取消订阅
+     */
+    private static void ensureSubscribed() {
+        Printer printer = Modules.get().get(Printer.class);
+        if (printer == null) return;
+        boolean need = printer.isActive() || !providers.isEmpty();
+        if (need && !printer.subscribedForProviders) {
+            MeteorClient.EVENT_BUS.subscribe(printer);
+            printer.subscribedForProviders = true;
+        } else if (!need && printer.subscribedForProviders) {
+            MeteorClient.EVENT_BUS.unsubscribe(printer);
+            printer.subscribedForProviders = false;
+        }
     }
 
     /** 查询指定输入源是否已注册 */
@@ -519,6 +541,9 @@ public class Printer extends Module {
     /** 全局 tick 计数器（用于 pendingUseBlocks 超时） */
     private int tickCounter;
 
+    /** 是否已为 provider-only 模式手动订阅事件 */
+    private boolean subscribedForProviders = false;
+
     /** 容器物品填充子系统（多 tick 有状态，独立于标准行为管线） */
     private final ContainerFillManager containerFillManager = new ContainerFillManager();
 
@@ -539,6 +564,7 @@ public class Printer extends Module {
 
     public Printer() {
         super(Categories.Player, "printer", "Automatically places blocks based on Litematica schematic.");
+        autoSubscribe = false;  // 手动管理事件订阅：providers 活跃时即使模块未启用也需要 tick
 
         // 填充 Key → sub-toggle 映射
         subToggles.put(PrinterBehavior.Key.REPEATER_DELAY, fixRepeaterDelay);
@@ -559,12 +585,14 @@ public class Printer extends Module {
     @Override
     public void onActivate() {
         resetState();
+        ensureSubscribed();
     }
 
     @Override
     public void onDeactivate() {
         resetState();
         resetSneakState();
+        ensureSubscribed();  // 有 providers 时保持订阅
     }
 
     /** 初始化/重置所有内部状态（activate/deactivate 共用） */
@@ -672,7 +700,14 @@ public class Printer extends Module {
      */
     @EventHandler
     private void onTickPre(TickEvent.Pre event) {
-        if (!isActive() || mc.player == null || mc.world == null) return;
+        if (mc.player == null || mc.world == null) return;
+
+        // 模块未启用：仅驱动 provider-only 管线
+        if (!isActive()) {
+            if (!hasActiveProviders()) return;
+            tickProviderOnly();
+            return;
+        }
 
         tickCounter++;
         tickRenderState();
@@ -692,7 +727,8 @@ public class Printer extends Module {
         WorldSchematic worldSchematic = SchematicWorldHandler.getSchematicWorld();
         boolean hasProviders = hasActiveProviders();
         if (worldSchematic == null && !hasProviders) {
-            if (isActive()) { error("Litematica schematic not loaded."); toggle(); }
+            error("Litematica schematic not loaded.");
+            toggle();
             return;
         }
 
@@ -749,6 +785,34 @@ public class Printer extends Module {
         containerFillManager.tick(tickCounter, placeRange.get(), strict,
             rotate.get(), didPrinterForceSneak, this::resetSneakState,
             overfillPolicy.get());
+    }
+
+    /**
+     * Provider-only 管线：Printer 模块未启用时，仅驱动外挂输入源的放置。
+     * 跳过蓝图扫描、容器填充、移动暂停等仅蓝图相关的逻辑。
+     */
+    private void tickProviderOnly() {
+        tickCounter++;
+
+        if (armed != null) return;  // 已有 plan 待 Post 执行
+
+        tasks.clear();
+        previewCandidates.clear();
+        appendProviderTasks(null);
+
+        if (tasks.isEmpty()) return;
+
+        buildPreviewCandidates();
+        SelectionResult result = selectAndPrepare();
+        switch (result) {
+            case SelectionResult.Ready r -> armed = r.armed();
+            case SelectionResult.AwaitingPrep ignored -> {}
+            case SelectionResult.None ignored -> resetSneakState();
+        }
+        if (armed != null && rotate.get()) {
+            ActionPlan.Interaction inter = armed.plan().interaction();
+            Rotations.requestPreMovementToward(inter.hitVec(), 50, null);
+        }
     }
 
     // ==================== 候选评分权重 ====================
