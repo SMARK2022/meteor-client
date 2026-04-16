@@ -668,10 +668,23 @@ public class KillAura extends Module {
     }
 
     /**
-     * 估算服务端处理攻击时实体是否已超出攻击范围。
+     * 估算服务端处理攻击时, GrimAC 射线检测是否可能因距离超标而失败。
      * <p>
-     * 服务端攻击处理时的实体位置 ≈ 客户端实体位置 + 实体速度 × (插值延迟 + 单程网络延迟)。
-     * 客户端显示的距离可能远小于服务端实际距离（尤其高速分飞场景）。
+     * GrimAC Reach 判定逻辑 (源码 Reach.java):
+     * <ol>
+     *   <li>maxReach = ENTITY_INTERACTION_RANGE = 3.0</li>
+     *   <li>hitboxMargin = threshold(0.0005) + movementThreshold(0.03) = 0.0305</li>
+     *   <li>targetBox = getPossibleCollisionBoxes() (old∪new 插值走廊)</li>
+     *   <li>targetBox.expand(hitboxMargin)</li>
+     *   <li>射线 eye+look × (maxReach+3) 与 targetBox 做交点检测</li>
+     *   <li>if (交点距离 > maxReach) → Reach FLAG</li>
+     * </ol>
+     * <p>
+     * 走廊 (old∪new) 不增加 maxReach, 只让 targetBox 在移动方向上拉长使射线更容易命中。
+     * hitboxMargin 膨胀 targetBox 约 0.03, 等效让 maxReach 增加 ~0.03。
+     * <p>
+     * 本方法估算: 服务端 eye→AABB 表面距离 ≈ 客户端距离 + 径向相对速度 × 总延迟 ticks。
+     * 如果超过 GrimAC 有效上限, 放弃攻击。
      */
     private boolean isServerRangeExceeded(Entity target) {
         TrackState state = trackMap.get(target.getId());
@@ -680,18 +693,44 @@ public class KillAura extends Module {
         int pingMs = PlayerUtils.getPing();
         if (pingMs <= 0) return false; // 本地服务器无延迟, 不需预测
 
-        // 总延迟 = 实体插值延迟(LivingEntity~1.5tick) + 单程网络延迟(RTT/2)
+        Vec3d eyePos = mc.player.getEyePos();
+
+        // 客户端当前 eye→AABB 表面距离
+        Box box = target.getBoundingBox();
+        double clientDist = Math.sqrt(eyeDistSqToAABB(eyePos, box));
+
+        // 实体速度 (客户端插值速度, α-β 平滑后)
+        Vec3d entityVel = state.vel;
+        // 我自己的速度
+        Vec3d myVel = mc.player.getVelocity();
+        // 相对速度 (实体相对于我)
+        Vec3d relVel = entityVel.subtract(myVel);
+
+        // eye→实体中心方向
+        double cx = (box.minX + box.maxX) * 0.5 - eyePos.x;
+        double cy = (box.minY + box.maxY) * 0.5 - eyePos.y;
+        double cz = (box.minZ + box.maxZ) * 0.5 - eyePos.z;
+        double dist = Math.sqrt(cx * cx + cy * cy + cz * cz);
+
+        // 径向相对速度投影 (正 = 远离)
+        double radialRelVel = dist > 0.01 ? (relVel.x * cx + relVel.y * cy + relVel.z * cz) / dist : 0;
+
+        // 总延迟 ticks: 客户端实体插值滞后(2t for LivingEntity) + 攻击包单程(ping/2/50)
         double oneWayTicks = pingMs / 100.0;
-        double interpLag = (target instanceof LivingEntity) ? 1.5 : 0.5;
+        double interpLag = (target instanceof LivingEntity) ? 2.0 : 1.0;
         double totalLagTicks = interpLag + oneWayTicks;
 
-        Vec3d entityServerEstimate = target.getPos().add(state.vel.multiply(totalLagTicks));
-        Vec3d eyePos = mc.player.getEyePos();
-        double serverDist = eyePos.distanceTo(entityServerEstimate);
-        double effectiveRange = getEffectiveRange();
+        // 估算 GrimAC 视角下的 eye→targetBox 表面距离
+        double serverDist = clientDist + radialRelVel * totalLagTicks;
 
-        // 留 0.3 余量: 实体碰撞箱宽度(0.6)的一半, 服务端用中心距离检测
-        return serverDist > effectiveRange + 0.3;
+        // GrimAC 有效上限:
+        // maxReach = 3.0 (ENTITY_INTERACTION_RANGE)
+        // + hitboxMargin expand ≈ 0.03 (threshold 0.0005 + movementThreshold 0.03)
+        // 走廊 (old∪new) 在移动方向拉长 targetBox, 不增加 maxReach 但让表面更近
+        // 保守估计走廊使表面近了 ~entity_speed × 1-2 ticks, 但我们已用表面距离而非中心距离
+        double grimMaxReach = 3.0;
+        double grimMargin = 0.03; // threshold + movementThreshold
+        return serverDist > grimMaxReach + grimMargin;
     }
 
     private boolean isStillValidTarget(Entity target) {
@@ -757,14 +796,34 @@ public class KillAura extends Module {
             Vec3d vel = state != null ? state.vel : Vec3d.ZERO;
             Vec3d acc = state != null ? state.acc : Vec3d.ZERO;
 
-            // === 动态 Horizon ===
-            // 总过期 = 客户端实体位置滞后(ping/2) + 攻击包到达(ping/2) + 服务端排队(~25ms)
-            // 即 horizon ≈ ping + 25ms。对于软追踪可以激进一些。
+            // === 动态 Horizon (P3) ===
+            // 基础 horizon = ping + 25ms (服务端排队), 但需要根据相对运动方向调整:
+            // - 追击(同向): 相对速度小, 实体位置变化慢, horizon 可以较短
+            // - 对冲(反向): 相对速度大, 需要更多前置, 但限制上限避免过度外推
             double t;
             int pingMs = PlayerUtils.getPing();
             if (pingMs > 0) {
-                double horizonMs = pingMs + 25.0;
-                t = Math.max(horizonMs / 50.0, 0.5);
+                double baseHorizonMs = pingMs + 25.0;
+                double baseTicks = baseHorizonMs / 50.0;
+
+                // 自身速度
+                Vec3d myVel = mc.player.getVelocity();
+                // eye→实体方向
+                double dx = (box.minX + box.maxX) * 0.5 - eyePos.x;
+                double dz = (box.minZ + box.maxZ) * 0.5 - eyePos.z;
+                double dist = Math.sqrt(dx * dx + dz * dz);
+
+                if (dist > 0.01) {
+                    // 实体相对于我在 eye→target 方向上的速度 (正=远离, 负=靠近)
+                    Vec3d relVel = vel.subtract(myVel);
+                    double radialRel = (relVel.x * dx + relVel.z * dz) / dist;
+
+                    // 远离: 需要更多前置 (up to 1.5×), 靠近: 减少前置 (down to 0.6×)
+                    double scaleFactor = MathHelper.clamp(1.0 + radialRel * 2.0, 0.6, 1.5);
+                    t = Math.max(baseTicks * scaleFactor, 0.5);
+                } else {
+                    t = Math.max(baseTicks, 0.5);
+                }
             } else {
                 // 本地服务器 / ping 未知 → 不预测（实体位置已是实时）
                 t = 0;
@@ -789,15 +848,20 @@ public class KillAura extends Module {
         aimZ += (cz - aimZ) * 0.3;
 
         // 攻击模式: 在当前 AABB 内微偏向运动前缘，使射线更接近 GrimAC 插值框的新端
+        // GrimAC 走廊在移动方向上的拉长 ≈ velXZ blocks/tick, 偏移量按速度比例缩放
         if (!applyPrediction && predictMovement.get()) {
             TrackState state = trackMap.get(entity.getId());
             if (state != null) {
                 double velXZ = Math.sqrt(state.vel.x * state.vel.x + state.vel.z * state.vel.z);
                 if (velXZ > 0.01) {
-                    // 归一化方向 × 0.08 blocks 偏移（约 AABB 半宽的 27%，保证不出框）
-                    double factor = 0.08 / velXZ;
-                    aimX = MathHelper.clamp(aimX + state.vel.x * factor, box.minX, box.maxX);
-                    aimZ = MathHelper.clamp(aimZ + state.vel.z * factor, box.minZ, box.maxZ);
+                    // 速度比例偏移: 0.5 × velXZ 方向, clamp 不出 AABB
+                    // 低速(0.04): 偏移 0.02  中速(0.1): 偏移 0.05  高速(0.3): 偏移 0.15
+                    double halfWidth = (box.maxX - box.minX) * 0.5;
+                    double bias = Math.min(velXZ * 0.5, halfWidth);
+                    double dirX = state.vel.x / velXZ;
+                    double dirZ = state.vel.z / velXZ;
+                    aimX = MathHelper.clamp(aimX + dirX * bias, box.minX, box.maxX);
+                    aimZ = MathHelper.clamp(aimZ + dirZ * bias, box.minZ, box.maxZ);
                 }
             }
         }
