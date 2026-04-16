@@ -198,7 +198,7 @@ public class Rotations {
 
     @EventHandler(priority = EventPriority.HIGHEST)
     private static void onPlayerTickMovement(PlayerTickMovementEvent event) {
-        if (mc.player == null || mc.cameraEntity != mc.player) return;
+        if (mc.player == null || mc.getCameraEntity() != mc.player) return;
 
         movementPhasePassed = true;
 
@@ -287,7 +287,7 @@ public class Rotations {
 
     @EventHandler(priority = EventPriority.LOWEST)
     private static void onSendMovementPacketsPost(SendMovementPacketsEvent.Post event) {
-        if (mc.player == null || mc.cameraEntity != mc.player) return;
+        if (mc.player == null || mc.getCameraEntity() != mc.player) return;
 
         // 执行 winner 的 callback (movement packet 已经发出)
         if (active != null && active.callback != null) {

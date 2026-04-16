@@ -1110,7 +1110,7 @@ public class CrystalAura extends Module {
     private LivingEntity findBestVictimFor(Entity crystal) {
         float bestDmg = 0;
         LivingEntity best = null;
-        Vec3d pos = crystal.getPos();
+        Vec3d pos = crystal.getEntityPos();
         blockPos.set(crystal.getBlockPos()).move(0, -1, 0);
         for (LivingEntity target : targets) {
             float dmg = DamageUtils.crystalDamage(target, pos, predictMovement.get(), blockPos);

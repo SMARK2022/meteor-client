@@ -483,7 +483,7 @@ public class Surround extends Module implements PrinterTaskProvider {
             if (crystals.isEmpty()) continue;
 
             EndCrystalEntity crystal = crystals.getFirst();
-            if (eye.distanceTo(crystal.getPos()) > ATTACK_REACH) continue;
+            if (eye.distanceTo(crystal.getEntityPos()) > ATTACK_REACH) continue;
 
             // 激进模式：尝试同 tick Attack + Place
             if (aggressiveProtect.get()) {
@@ -491,7 +491,7 @@ public class Surround extends Module implements PrinterTaskProvider {
             }
 
             // 安全模式：仅攻击，放置留给下 tick Printer
-            Rotations.rotateToward(crystal.getPos(), PROTECT_ROTATION_PRIORITY, () -> {
+            Rotations.rotateToward(crystal.getEntityPos(), PROTECT_ROTATION_PRIORITY, () -> {
                 sendCrystalAttack(crystal);
             });
             return true;
@@ -526,7 +526,7 @@ public class Surround extends Module implements PrinterTaskProvider {
 
         if (option == null || option.hitVec() == null) {
             // 无合法面 → 只攻击
-            Rotations.rotateToward(crystal.getPos(), PROTECT_ROTATION_PRIORITY, () -> {
+            Rotations.rotateToward(crystal.getEntityPos(), PROTECT_ROTATION_PRIORITY, () -> {
                 sendCrystalAttack(crystal);
             });
             return true;

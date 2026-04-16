@@ -1,0 +1,349 @@
+# KillAura 完整攻击链路分析 — 基于 MC 1.21.8 反编译源码验证
+
+## 一、攻击链路全时序
+
+当 KillAura 在 tick T 决定攻击实体 E 时，完整链路如下：
+
+```
+客户端 tick T:
+  TickEvent.Pre
+    → collectEntities() 用 entity.getBoundingBox() 筛选目标
+    → updateTrack() 更新 α-β 速度/加速度
+    → delayCheck() 确认冷却就绪
+    → rotation != None: Rotations.rotateWith(solveEntityAim(primary, false), priority=100, callback=commitAttack)
+    → 此时 AimResolver 注册进 pending 队列
+
+  PlayerTickMovementEvent (Rotations PREVIEW 阶段):
+    → 仲裁 winner (最高优先级的 pending request)
+    → 调用 AimResolver.resolve(PREVIEW)
+      → solveEntityAim(primary, false) → computeAimPoint(entity, false)
+      → 使用 entity 当前 AABB + 前缘微偏 0.08
+    → 预应用 yaw/pitch 到 mc.player (影响 MovementFix 输入重映射)
+
+  mc.player.tick() — 物理模拟 (位移)
+
+  SendMovementPacketsEvent.Pre (Rotations SEND_FINAL 阶段):
+    → 调用 AimResolver.resolve(SEND_FINAL)
+      → 再次 solveEntityAim(primary, false) → computeAimPoint(entity, false)
+      → 用 post-physics 自身位置重新计算精确角度
+    → 设置 mc.player yaw/pitch = finalAim
+    → Movement packet 发出 (携带旋转信息)
+
+  SendMovementPacketsEvent.Post:
+    → callback.run() → commitAttack(primary)
+      → isStillValidTarget 检查 (当前 AABB 距离)
+      → isServerRangeExceeded 检查 (服务端距离预测)
+      → mc.interactionManager.attackEntity() → 发送 ATTACK 包
+    → 恢复 mc.player 原始 yaw/pitch
+
+  网络传输: Movement packet + Attack packet → 服务器
+  延迟 = RTT/2 = ping/2 ms
+```
+
+### 关键: Movement 和 Attack 包的先后顺序
+Movement packet 在 SendMovementPacketsEvent.Pre 发出，Attack 包在 Post callback 发出。
+这意味着**服务器总是先收到 Movement (含旋转)，再收到 Attack**。
+→ GrimAC 在处理 Attack 包时已经有了最新的 yaw/pitch。
+
+---
+
+## 二、实体位置在各个"世界"中的状态
+
+### 2.1 我们客户端看到的实体位置
+实体 E 在我们客户端上的显示位置经历以下延迟：
+
+1. **E 自己的客户端 → 服务器**: ping_E / 2 (E 的输入传到服务器)
+2. **服务器处理 + 广播**: EntityTrackerEntry.tickInterval = **2 tick (100ms)**
+   - 实际上每 2 tick 检查一次, 有位移则广播 MoveRelative/PositionSync 包
+3. **服务器 → 我们的客户端**: ping_me / 2
+4. **客户端插值**: PositionInterpolator, DEFAULT_INTERPOLATION_DURATION = **3 tick**
+   - 但因为每 2 tick 收到新包, 稳态下只做 2/3 步就被覆盖
+   - **稳态插值延迟 ≈ 2 tick (100ms)**
+
+**总延迟**: ping_E/2 + 100ms(广播间隔) + ping_me/2 + 100ms(插值)
+= (ping_E + ping_me)/2 + 200ms
+
+对于 ping_E = ping_me = 100ms: 总延迟 = 100 + 200 = **300ms**
+
+### 2.2 服务器权威位置
+服务器上实体 E 的位置 = E 在自己客户端 ping_E/2 前的位置。
+
+对于我们自己: 服务器上的我 = 我屏幕上的我在 ping_me/2 前的位置。
+
+### 2.3 并列场景计算
+场景: 两人同向 10m/s (0.5 blocks/tick), 各 ping 100ms, 在我的屏幕上看起来并列。
+
+- 我在服务器上 = 屏幕我 - 50ms × 10m/s = 屏幕我 - 0.5m
+- 对手在服务器上 = 对手真实位置 - 50ms × 10m/s
+- 对手真实位置 = 我看到的对手 + 300ms × 10m/s = 并列位置 + 3.0m
+  (因为我看到的是对手 300ms 前的位置)
+- 对手在服务器上 = 并列位置 + 3.0 - 0.5 = 并列位置 + 2.5m
+- **净差距 = (并列位置 + 2.5) - (屏幕我 - 0.5) = 2.0m** (对手在前)
+
+  *注: 如果不算广播间隔(理想化), 总延迟=200ms, 差距=2.0m。
+  但广播不是额外延迟而是采样间隔，稳态下位置包频率固定，实际净差仍为 ~2.0m*
+
+---
+
+## 三、攻击包到达服务器时的世界状态
+
+当我在 tick T 发出 Attack 包，服务器在 tick T + ping/2 处理它:
+
+### 3.1 Vanilla 判定 (ServerPlayNetworkHandler.onPlayerInteractEntity)
+```java
+Box box = entity.getBoundingBox();  // 服务器当前 tick 的实体 AABB
+if (this.player.canInteractWithEntityIn(box, 3.0)) {
+    // 执行攻击
+}
+
+// canInteractWithEntityIn:
+double d = getEntityInteractionRange() + additionalRange;  // 3.0 + 3.0 = 6.0
+return box.squaredMagnitude(this.getEyePos()) < d * d;     // eyePos 到 AABB 表面距离 < 6.0
+```
+
+**结论**:
+- **总范围上限 6.0 blocks** (眼睛到 AABB 最近表面)
+- **完全不检查朝向** — 纯距离判定
+- 使用的是 **服务器当前 tick 的权威位置**, 不是任何插值
+
+### 3.2 GrimAC Reach 判定 (tickBetterReachCheckWithAngle)
+GrimAC 在收到 Movement + Attack 包后的下一个 tick 处理:
+
+```
+checkReach(reachEntity, player.x, player.y, player.z, ...)
+  → targetBox = getPossibleCollisionBoxes()
+      = combineCollisionBox(oldPacketLocation.getPossibleHitboxCombined(),
+                            newPacketLocation.getPossibleHitboxCombined())
+      → 这是一个"走廊": old 插值位置 ∪ new 插值位置
+      → 已被 threshold(0.0005) + movementThreshold 膨胀
+
+  → maxReach = getEntityInteractionRange()  (通常 3.0)
+
+  → possibleLookDirs = [
+      ReachUtils.getLook(player.yaw, player.pitch),
+      ReachUtils.getLook(player.lastYaw, player.pitch),
+      ReachUtils.getLook(player.lastYaw, player.lastPitch)
+    ]
+
+  → for each lookDir, for each possibleEyeHeight:
+      eyePos + lookDir × (maxReach + 3) = endReachPos
+      intercept = calculateIntercept(targetBox, eyePos, endReachPos)
+      if (intercept != null) minDistance = min(minDistance, eyePos→intercept)
+
+  → if minDistance > maxReach: FLAG (Reach violation)
+  → if minDistance == MAX_VALUE: FLAG (Hitbox violation — 射线没碰到任何东西)
+```
+
+**GrimAC 关键差异**:
+1. **必须朝向检查** — 射线必须与目标碰撞箱相交
+2. **maxReach = 3.0** (不是 vanilla 的 6.0)
+3. **targetBox 是"走廊"** — 包含了 old 和 new 插值位置之间的所有可能位置
+4. **容差**: threshold=0.0005 + movementThreshold (0.03 如果有跳 tick)
+5. **多朝向尝试**: 同时检查 [当前, lastYaw+当前pitch, lastYaw+lastPitch]
+
+---
+
+## 四、当前代码的问题分析
+
+### 4.1 攻击模式 (applyPrediction=false) — 当前实现
+
+```java
+// computeAimPoint(entity, false):
+Box box = entity.getBoundingBox();  // 客户端当前 AABB (已有 ~200ms 延迟)
+// 前缘微偏 0.08 blocks
+```
+
+**问题**:
+客户端看到的 entity.getBoundingBox() 是延迟 ~200ms 的老位置。
+当攻击包到达服务器时 (再过 ~50ms), 实体在 GrimAC 的视角已经又移动了。
+GrimAC 的 targetBox 是"走廊", 包含了 old→new 的插值区间。
+
+**当攻击包到达 GrimAC 时**:
+- 我的射线方向: 指向我看到的实体位置 (客户端当前 AABB)
+- GrimAC 的 targetBox: 实体在 GrimAC 视角的当前走廊位置
+
+**匹配分析**:
+GrimAC 维护的实体位置是从**服务器发给它的 Transaction + Entity Position 包**重建的。
+GrimAC 的走廊位置 ≈ 客户端看到的实体位置 ± 1-2 tick 不确定性。
+因此, 瞄准客户端当前 AABB **通常能命中 GrimAC 走廊**, 这也是为什么不预测时基本不误判。
+
+但是: 对于**高速移动 + 方向突变**的实体, 客户端插值位置和 GrimAC 走廊之间的偏差会增大,
+导致偶尔 Hitbox 未命中。
+
+### 4.2 软追踪模式 (applyPrediction=true) — 当前实现
+
+```java
+// horizon = (pingMs + 25) / 50.0 ticks
+// box = box.offset(vel * t + 0.5 * acc * t²)
+```
+
+**问题**:
+- 软追踪用于非攻击阶段的预瞄, 减少攻击瞬间的旋转角度
+- horizon 公式 `pingMs + 25` 是合理的 (替代了之前错误的 `pingMs * 0.5 + 25`)
+- 但如果实体在预瞄期间突然变向, α-β 的半衰期 ~2 tick 导致预测方向偏差
+
+### 4.3 服务端距离预测 (isServerRangeExceeded) — 当前实现
+
+```java
+// totalLagTicks = interpLag(1.5) + oneWayTicks(ping/100)
+// serverDist = target.getPos() + vel × totalLagTicks - eyePos
+// return serverDist > effectiveRange + 0.3
+```
+
+**问题**:
+1. `target.getPos()` 已经是客户端插值后的位置 (有 ~200ms 延迟), 再加 vel × lag 是双重外推
+2. oneWayTicks 应该是 `pingMs / (2 × 50)` = `pingMs / 100`, 当前用的也是 `/100` — 这是对的
+3. 但 interpLag = 1.5 是客户端对远程实体的插值延迟, 这不影响**服务器上实体的真实位置**
+4. 正确的估算:
+   - 服务器上的实体位置 ≈ 客户端看到的位置 + (总显示延迟) × 实体速度
+   - 总显示延迟 ≈ 200ms = 4 ticks
+   - 攻击包到达服务器还要 ping/2 = 50ms = 1 tick
+   - 但 vanilla 的 6.0 范围很宽松, 实际不太会超
+   - **GrimAC 的 3.0 范围才是瓶颈**
+
+### 4.4 α-β 追踪器精度
+
+```java
+// vel = entity.getX() - entity.lastRenderX
+```
+
+`lastRenderX` 在 `resetPosition()` 中设置, `resetPosition()` 只在 `readData()` 和 `refreshPositionAndAngles()` 中调用。
+对于远程玩家, `lastRenderX` 是在插值 tick 中通过 PositionInterpolator.tick() 更新的:
+```java
+// PositionInterpolator.tick():
+this.lastPos = vec3d2;  // vec3d2 = 本 tick 插值后的新位置
+```
+但 `entity.lastRenderX` 不是 PositionInterpolator 设置的！
+`lastRenderX` 只在 `setLastPosition(pos)` 中设置, 而 `setLastPosition` 只在 `resetPosition()` 中调用。
+
+**实际上**, 对于远程实体, 每个 tick 的位置更新路径是:
+```
+Entity.baseTick() 不调用 updateLastPosition()
+
+远程实体 tick 路径:
+  LivingEntity.tickMovement():
+    if (isInterpolating()):
+      getInterpolator().tick()
+        → entity.setPosition(newPos)  // 这只设置 pos, 不设置 lastRenderX!
+```
+
+等等, 让我验证 setPosition 是否更新 lastRenderX...
+
+```java
+// Entity.setPosition(Vec3d):
+public void setPosition(Vec3d pos) {
+    this.setPos(pos.x, pos.y, pos.z);
+}
+
+// Entity.setPos:
+public final void setPos(double x, double y, double z) {
+    this.pos = new Vec3d(x, y, z);
+    // ... 更新 bounding box
+    // 不设置 lastRenderX!
+}
+```
+
+所以 `lastRenderX` 对于远程实体来说, **不是每 tick 更新的**！
+它只在 `resetPosition()` 时更新 = 只在 `refreshPositionAndAngles()` (新实体 spawn/teleport) 时。
+
+这意味着 `entity.getX() - entity.lastRenderX` 不是 1-tick 的速度,
+而是**从最近一次 spawn/teleport 以来的总位移**！
+
+**等一下** — 让我重新确认。Minecraft 的渲染系统用 lastRenderX 做帧插值:
+```java
+// EntityRenderer 中:
+double renderX = MathHelper.lerp(tickDelta, entity.lastRenderX, entity.getX());
+```
+如果 lastRenderX 不每 tick 更新, 那渲染就会出问题。
+
+让我再仔细找...
+
+---
+
+## 五、lastRenderX 更新机制 (已验证)
+
+**结论: lastRenderX 每 tick 更新, α-β 追踪器输入正确。**
+
+源码证据 (ClientWorld.java:306):
+```java
+public void tickEntity(Entity entity) {
+    entity.resetPosition();   // lastRenderX = 当前 pos.x
+    ++entity.age;
+    entity.tick();             // → PositionInterpolator.tick() → setPosition(新插值位置)
+}
+```
+
+每 tick 顺序:
+1. resetPosition() → lastRenderX = tick开始时的 X
+2. tick() → 插值到新位置, entity.X 更新
+3. 下一 tick: lastRenderX = 上一步的 entity.X
+
+所以 `entity.getX() - entity.lastRenderX` = 本 tick 的插值位移 = 正确的 1-tick 速度。
+
+**但注意**: 这个速度是客户端插值速度, 不是实体的真实速度！
+- 稳态下, 客户端插值每 tick 移动 1/3 × (目标 - 当前), 且每 2 tick 收到新目标
+- 插值速度 ≠ 实体真实速度, 有一个"追赶"效应
+- 但 α-β 滤波后, 平滑速度趋近于真实速度 (只是有 ~2 tick 相位延迟)
+
+---
+
+## 六、GrimAC 走廊 vs 我们的瞄准策略
+
+### 6.1 走廊的结构
+
+GrimAC 的 targetBox = combineCollisionBox(oldLocation, newLocation)
+
+其中:
+- oldLocation = 上一次位置更新时的插值走廊 (可能包含 0~3 步)
+- newLocation = 当前位置更新的插值走廊
+
+走廊本质上是一个在移动方向上被拉长的 AABB。
+
+### 6.2 最优策略
+
+对于高速移动目标:
+- **攻击时**: 瞄准当前客户端 AABB 是最安全的 (不预测)
+  - GrimAC 的走廊包含了当前客户端看到的位置 ± 不确定性
+  - 射线需要命中走廊, 而不是实体中心
+  - 微偏向前缘 (当前 0.08) 增加了命中走廊新端的概率
+
+- **预瞄时**: 适度前置预测减少攻击瞬间的旋转跳变
+  - horizon ≈ 2-3 ticks 是合理的
+  - 太激进的预测反而会导致攻击时的方向大幅回调
+
+### 6.3 核心矛盾
+
+KillAura 的根本困境:
+- **Vanilla 不检查朝向**, 只检查距离 ≤ 6.0
+- **GrimAC 检查朝向** (射线 → 走廊交点), 范围 ≤ 3.0 + threshold
+- 我们必须让射线穿过走廊, 同时保持距离不超标
+- 对于高速分飞目标 (两人相向移动), 客户端看到 2m 内但服务端可能 4m+, 超出 GrimAC 3.0
+
+**这才是"prediction on 更难打到"的真正原因**:
+prediction 把朝向指向了走廊前方(或后方)之外的空间,
+射线不再穿过 GrimAC 的实际走廊, 导致 Hitbox/Reach violation → GrimAC 取消攻击。
+
+---
+
+## 七、修复建议
+
+### P0: ~~验证 lastRenderX 的 tick 更新~~ ✅ 已验证, 每 tick 更新, α-β 输入正确
+
+### P1: 改进攻击瞄准
+- 保持攻击时不预测的策略 (applyPrediction=false)
+- 前缘微偏从固定 0.08 改为基于速度动态调整:
+  - 低速 (< 0.1 blocks/tick): 0.02
+  - 中速 (0.1-0.3): 0.06
+  - 高速 (> 0.3): 0.10 (但仍 clamp 在 AABB 内)
+
+### P2: 改进服务端距离预测
+- 核心估算: 服务端距离 ≈ 客户端距离 + 实体速度投影 × (totalDelayTicks)
+- totalDelayTicks = 200ms/50 + ping/(2×50) = 4 + ping/100
+- 如果服务端距离 > 3.0 (GrimAC maxReach), 放弃攻击
+- 这比当前的 `effectiveRange + 0.3` 更准确
+
+### P3: 精准 horizon 公式
+当前: `(pingMs + 25) / 50` — 用于软追踪
+改为: 分两种情况
+- 如果对手与我同向(追击): horizon 较短 (相对速度小)
+- 如果对手与我反向(对冲): horizon 较长, 但限制最大值避免过度前置

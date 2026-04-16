@@ -35,9 +35,9 @@ public class NametagUtils {
     private NametagUtils() {
     }
 
-    public static void onRender(Matrix4f modelView, Matrix4f projectionMatrix) {
+    public static void onRender(Matrix4f modelView) {
         model.set(modelView);
-        NametagUtils.projection.set(projectionMatrix);
+        NametagUtils.projection.set(RenderUtils.projection);
 
         Utils.set(camera, mc.gameRenderer.getCamera().getCameraPos());
         cameraNegated.set(camera);

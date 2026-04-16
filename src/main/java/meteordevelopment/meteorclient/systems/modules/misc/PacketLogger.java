@@ -440,6 +440,7 @@ public class PacketLogger extends Module {
             case DROP_ITEM, DROP_ALL_ITEMS -> logDropItem.get();
             case RELEASE_USE_ITEM -> logReleaseUse.get();
             case SWAP_ITEM_WITH_OFFHAND -> logSwapOffhand.get();
+            default -> true;
         };
     }
 

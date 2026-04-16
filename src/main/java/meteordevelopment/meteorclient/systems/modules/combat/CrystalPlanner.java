@@ -319,7 +319,7 @@ public class CrystalPlanner {
      * 护甲值取 floor（原版行为），保护等级 = protection + 2*blast_protection（爆炸保护权重 2x）。
      */
     public static TargetSnap snapshotTarget(LivingEntity entity, boolean predictMovement) {
-        Vec3d pos = predictMovement ? entity.getPos().add(entity.getVelocity()) : entity.getPos();
+        Vec3d pos = predictMovement ? entity.getEntityPos().add(entity.getVelocity()) : entity.getEntityPos();
         Box box = entity.getBoundingBox();
         if (predictMovement) box = box.offset(entity.getVelocity());
         float armor = (float) Math.floor(entity.getAttributeValue(EntityAttributes.ARMOR));

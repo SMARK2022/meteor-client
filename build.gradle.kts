@@ -103,8 +103,9 @@ dependencies {
     jij(libs.netty.codec.socks) { isTransitive = false }
     jij(libs.waybackauthlib)
 
-    // Litematica (for Printer module)
-    modCompileOnly("maven.modrinth:litematica:${libs.versions.minecraft.get()}")
+    // Litematica (for Printer module - compile only, user installs separately)
+    modCompileOnly("maven.modrinth:malilib:0.27.8")
+    modCompileOnly("maven.modrinth:litematica:0.26.3")
 }
 
 sourceSets {
