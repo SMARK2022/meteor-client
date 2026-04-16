@@ -133,5 +133,9 @@ public class Asm {
         public IExtensionRegistry getExtensions() {
             return delegate.getExtensions();
         }
+
+        public boolean couldTransformClass(MixinEnvironment environment, String name) {
+            return true;
+        }
     }
 }

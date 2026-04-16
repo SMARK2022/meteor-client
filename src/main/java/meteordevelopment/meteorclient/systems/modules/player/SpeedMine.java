@@ -24,33 +24,37 @@ import static net.minecraft.entity.effect.StatusEffects.HASTE;
 
 public class SpeedMine extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
+    private final SettingGroup sgGrim    = settings.createGroup("Grim 合规");
+
+    // ── 通用 ──
 
     public final Setting<Mode> mode = sgGeneral.add(new EnumSetting.Builder<Mode>()
-        .name("mode")
+        .name("模式")
+        .description("加速方式。Normal 修改破坏速度，Haste 添加急迫效果，Damage 跳过挖掘进度。")
         .defaultValue(Mode.Damage)
         .onChanged(mode -> removeHaste())
         .build()
     );
 
     private final Setting<List<Block>> blocks = sgGeneral.add(new BlockListSetting.Builder()
-        .name("blocks")
-        .description("Selected blocks.")
+        .name("方块列表")
+        .description("指定生效的方块列表")
         .filter(block -> block.getHardness() > 0)
         .visible(() -> mode.get() != Mode.Haste)
         .build()
     );
 
     private final Setting<ListMode> blocksFilter = sgGeneral.add(new EnumSetting.Builder<ListMode>()
-        .name("blocks-filter")
-        .description("How to use the blocks setting.")
+        .name("列表模式")
+        .description("黑名单排除列表中的方块，白名单仅对列表中的方块生效。")
         .defaultValue(ListMode.Blacklist)
         .visible(() -> mode.get() != Mode.Haste)
         .build()
     );
 
     public final Setting<Double> modifier = sgGeneral.add(new DoubleSetting.Builder()
-        .name("modifier")
-        .description("Mining speed modifier. An additional value of 0.2 is equivalent to one haste level (1.2 = haste 1).")
+        .name("速度倍率")
+        .description("挖掘速度倍率，每增加 0.2 约等于一级急迫（1.2 ≈ 急迫 I）。")
         .defaultValue(1.4)
         .visible(() -> mode.get() == Mode.Normal)
         .min(0)
@@ -58,8 +62,8 @@ public class SpeedMine extends Module {
     );
 
     private final Setting<Integer> hasteAmplifier = sgGeneral.add(new IntSetting.Builder()
-        .name("haste-amplifier")
-        .description("What value of haste to give you. Above 2 not recommended.")
+        .name("急迫等级")
+        .description("给予的急迫效果等级，超过 2 不建议使用。")
         .defaultValue(2)
         .min(1)
         .visible(() -> mode.get() == Mode.Haste)
@@ -68,28 +72,72 @@ public class SpeedMine extends Module {
     );
 
     private final Setting<Boolean> instamine = sgGeneral.add(new BoolSetting.Builder()
-        .name("instamine")
-        .description("Whether or not to instantly mine blocks under certain conditions.")
+        .name("瞬间挖掘")
+        .description("满足条件时立即破坏方块（仅 Damage 模式）。")
         .defaultValue(true)
         .visible(() -> mode.get() == Mode.Damage)
         .build()
     );
 
-    private final Setting<Boolean> grimBypass = sgGeneral.add(new BoolSetting.Builder()
-        .name("grim-bypass")
-        .description("Bypasses Grim's fastbreak check, working as of 2.3.58")
+    // ── Grim 合规 ──
+
+    private final Setting<Boolean> grimAware = sgGrim.add(new BoolSetting.Builder()
+        .name("Grim 感知")
+        .description("启用 Grim 感知状态机，在加速与冷却间自动切换以避免触发检测。")
         .defaultValue(false)
         .visible(() -> mode.get() == Mode.Damage)
         .build()
     );
 
+    private final Setting<Integer> grimBalanceBudget = sgGrim.add(new IntSetting.Builder()
+        .name("　预算上限")
+        .description("允许的最大 blockBreakBalance（ms），Grim 在 1000ms 时标记。稳定~700，激进~900。")
+        .defaultValue(900)
+        .min(0)
+        .sliderMax(1000)
+        .visible(() -> mode.get() == Mode.Damage && grimAware.get())
+        .build()
+    );
+
+    private final Setting<Integer> rechargeBuffer = sgGrim.add(new IntSetting.Builder()
+        .name("　恢复缓冲")
+        .description("低于预算多少（ms）后恢复加速。0 = 一低于预算立即恢复。")
+        .defaultValue(240)
+        .min(0)
+        .sliderMax(500)
+        .visible(() -> mode.get() == Mode.Damage && grimAware.get())
+        .build()
+    );
+
+    /** 无 Grim 感知时的固定跳过阈值（经验值，对多数服务端安全） */
+    private static final double STANDARD_SKIP_THRESHOLD = 0.7;
+
+    // Grim state machine fields
+    private GrimPhase grimPhase = GrimPhase.ACCELERATING;
+    private double blockBreakBalance = 0;
+    private long grimStartMs = 0;
+    private BlockPos grimCurrentPos = null;
+    private double grimMaxDelta = 0;
+
     public SpeedMine() {
-        super(Categories.Player, "speed-mine", "Allows you to quickly mine blocks.");
+        super(Categories.Player, "speed-mine", "快速挖掘辅助，支持多种加速模式与 Grim 合规。");
+    }
+
+    @Override
+    public void onActivate() {
+        grimPhase = GrimPhase.ACCELERATING;
+        blockBreakBalance = 0;
+        grimStartMs = 0;
+        grimCurrentPos = null;
+        grimMaxDelta = 0;
     }
 
     @Override
     public void onDeactivate() {
         removeHaste();
+        grimPhase = GrimPhase.ACCELERATING;
+        blockBreakBalance = 0;
+        grimCurrentPos = null;
     }
 
     @EventHandler
@@ -109,18 +157,74 @@ public class SpeedMine extends Module {
             BlockPos pos = im.meteor$getCurrentBreakingBlockPos();
 
             if (pos == null || progress <= 0) return;
-            if (progress + mc.world.getBlockState(pos).calcBlockBreakingDelta(mc.player, mc.world, pos) >= 0.7f)
+
+            double delta = mc.world.getBlockState(pos).calcBlockBreakingDelta(mc.player, mc.world, pos);
+
+            // 每 tick 更新 Grim 追踪的 maxDelta（镜像 Grim 的 per-tick maximumBlockDamage 更新）
+            if (grimAware.get() && grimCurrentPos != null) {
+                grimMaxDelta = Math.max(grimMaxDelta, delta);
+            }
+
+            // 动态判断是否可以提前完成挖掘
+            if (shouldAccelerate(progress, delta)) {
                 im.meteor$setCurrentBreakingProgress(1f);
+            }
         }
+    }
+
+    /**
+     * 判断是否可以在当前 tick 将挖掘进度强制设为 1.0（跳过剩余挖掘时间）。
+     *
+     * <p>两种模式：
+     * <ul>
+     *   <li>无 Grim 感知：当 progress + delta >= 0.7 时直接跳过（旧行为，恒定跳过最后 30%）</li>
+     *   <li>Grim 感知：计算 Grim 视角下的跳过量 diff = predictedTime - realTime，
+     *       确保 diff <= headroom 或 diff < 25（Grim 衰减区，无条件安全）</li>
+     * </ul>
+     */
+    private boolean shouldAccelerate(float progress, double delta) {
+        if (delta <= 0) return false;
+
+        if (!grimAware.get()) {
+            return progress + delta >= STANDARD_SKIP_THRESHOLD;
+        }
+
+        // Grim 冷却期不加速
+        if (grimPhase == GrimPhase.COOLING_DOWN) return false;
+
+        // Grim 追踪未初始化：保守回退
+        if (grimCurrentPos == null || grimMaxDelta <= 0 || grimStartMs <= 0) {
+            return progress + delta >= STANDARD_SKIP_THRESHOLD;
+        }
+
+        // Grim 模型：predictedTime = ceil(1.0 / maxDelta) * 50
+        // realTime = 实际已经过去的 wall-clock 时间
+        // diff = predictedTime - realTime（提前量，即 Grim 会记入 blockBreakBalance 的值）
+        double predictedTime = Math.ceil(1.0 / grimMaxDelta) * 50;
+        double realTime = System.currentTimeMillis() - grimStartMs;
+        double diff = predictedTime - realTime;
+
+        // diff < 25: Grim 走衰减路径（blockBreakBalance *= 0.9），天然安全
+        if (diff < 25) return true;
+
+        // diff >= 25: 提前量不超出当前余量即可
+        return diff <= getBreakBudgetHeadroom();
     }
 
     @EventHandler
     private void onPacket(PacketEvent.Send event) {
-        if (!(mode.get() == Mode.Damage) || !grimBypass.get()) return;
+        if (mode.get() != Mode.Damage) return;
+        if (!(event.packet instanceof PlayerActionC2SPacket packet)) return;
 
-        // https://github.com/GrimAnticheat/Grim/issues/1296
-        if (event.packet instanceof PlayerActionC2SPacket packet && packet.getAction() == PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK) {
-            mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.ABORT_DESTROY_BLOCK, packet.getPos().up(), packet.getDirection()));
+        // Grim balance tracking — catches ALL START/STOP/ABORT packets (normal mining, instamine, PacketMine)
+        if (grimAware.get()) {
+            if (packet.getAction() == PlayerActionC2SPacket.Action.START_DESTROY_BLOCK) {
+                grimTrackStart(packet.getPos());
+            } else if (packet.getAction() == PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK) {
+                grimTrackFinish();
+            } else if (packet.getAction() == PlayerActionC2SPacket.Action.ABORT_DESTROY_BLOCK) {
+                grimTrackAbort();
+            }
         }
     }
 
@@ -131,13 +235,102 @@ public class SpeedMine extends Module {
         if (haste != null && !haste.shouldShowIcon()) mc.player.removeStatusEffect(HASTE);
     }
 
+    // ======================== Grim Balance Tracking ========================
+
+    /**
+     * 镜像 Grim FastBreak START_DIGGING：重置当前块状态。
+     */
+    private void grimTrackStart(BlockPos pos) {
+        if (mc.world == null) return;
+
+        grimStartMs = System.currentTimeMillis();
+        grimCurrentPos = pos.toImmutable();
+        grimMaxDelta = mc.world.getBlockState(pos).calcBlockBreakingDelta(mc.player, mc.world, pos);
+    }
+
+    /**
+     * 镜像 Grim FastBreak FINISHED_DIGGING：更新 blockBreakBalance 并转换状态机。
+     */
+    private void grimTrackFinish() {
+        long now = System.currentTimeMillis();
+
+        if (grimCurrentPos != null && grimMaxDelta > 0) {
+            double predictedTime = Math.ceil(1.0 / grimMaxDelta) * 50;
+            double realTime = now - grimStartMs;
+            double diff = predictedTime - realTime;
+
+            if (diff < 25) {
+                blockBreakBalance *= 0.9;
+            } else {
+                blockBreakBalance += diff;
+            }
+            clampBreakBalance();
+        }
+
+        // 重置当前块状态，避免 shouldAccelerate 读到陈旧数据
+        grimCurrentPos = null;
+        grimMaxDelta = 0;
+
+        updateGrimPhase();
+    }
+
+    /**
+     * ABORT_DESTROY_BLOCK: Grim 不更新 balance，但需要重置当前目标。
+     * 如果不重置，下一次 FINISH 会误算时间差。
+     */
+    private void grimTrackAbort() {
+        grimCurrentPos = null;
+        grimMaxDelta = 0;
+    }
+
+    private void updateGrimPhase() {
+        if (grimPhase == GrimPhase.ACCELERATING) {
+            if (blockBreakBalance >= grimBalanceBudget.get()) {
+                grimPhase = GrimPhase.COOLING_DOWN;
+            }
+        } else if (grimPhase == GrimPhase.COOLING_DOWN) {
+            if ((grimBalanceBudget.get() - blockBreakBalance) >= rechargeBuffer.get()) {
+                grimPhase = GrimPhase.ACCELERATING;
+            }
+        }
+    }
+
+    private void clampBreakBalance() {
+        blockBreakBalance = Math.max(-1000, Math.min(blockBreakBalance, 1000));
+    }
+
+    // ======================== Public API (for PacketMine integration) ========================
+
+    /** Grim 感知状态机是否活跃 */
+    public boolean isGrimAware() {
+        return isActive() && mode.get() == Mode.Damage && grimAware.get();
+    }
+
+    /** 是否处于冷却阶段（不加速） */
+    public boolean isGrimCoolingDown() {
+        return isGrimAware() && grimPhase == GrimPhase.COOLING_DOWN;
+    }
+
+    /**
+     * 返回当前可用的 blockBreakBalance 余量（ms）。
+     *
+     * <p>即 grimBalanceBudget - blockBreakBalance。
+     * PacketMine 用此值计算可以提前发送 STOP 的时间量。
+     * 值 <= 0 表示没有余量。
+     */
+    public double getBreakBudgetHeadroom() {
+        return Math.max(0, grimBalanceBudget.get() - blockBreakBalance);
+    }
+
     public boolean filter(Block block) {
         if (blocksFilter.get() == ListMode.Blacklist && !blocks.get().contains(block)) return true;
         return blocksFilter.get() == ListMode.Whitelist && blocks.get().contains(block);
     }
 
     public boolean instamine() {
-        return isActive() && mode.get() == Mode.Damage && instamine.get();
+        if (!isActive() || mode.get() != Mode.Damage || !instamine.get()) return false;
+        if (grimAware.get() && grimPhase == GrimPhase.COOLING_DOWN) return false;
+        return true;
     }
 
     public enum Mode {
@@ -149,5 +342,10 @@ public class SpeedMine extends Module {
     public enum ListMode {
         Whitelist,
         Blacklist
+    }
+
+    public enum GrimPhase {
+        ACCELERATING,
+        COOLING_DOWN
     }
 }

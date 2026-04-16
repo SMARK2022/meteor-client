@@ -1,5 +1,6 @@
 *.DS_Store
 .gradle
+references/
 .settings
 .project
 .classpath
@@ -16,3 +17,4 @@ logs
 .idea/*
 !.idea/copyright/*
 !.idea/scopes/*
+ref

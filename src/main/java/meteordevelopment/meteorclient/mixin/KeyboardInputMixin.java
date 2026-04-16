@@ -8,9 +8,11 @@ package meteordevelopment.meteorclient.mixin;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.modules.movement.Sneak;
 import meteordevelopment.meteorclient.systems.modules.render.Freecam;
+import meteordevelopment.meteorclient.utils.player.Rotations;
 import net.minecraft.client.input.Input;
 import net.minecraft.client.input.KeyboardInput;
 import net.minecraft.util.PlayerInput;
+import net.minecraft.util.math.Vec2f;
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -29,5 +31,15 @@ public abstract class KeyboardInputMixin extends Input {
             true,
             playerInput.sprint()
         );
+
+        // MovementFix: 输入重映射 — 在 input.tick() 产生新鲜输入后、movement 物理使用输入前
+        // 将 WASD 重映射到 target yaw 下仍保持原始视觉方向的 8 向合法按键
+        if (Rotations.needsMoveFix()) {
+            Rotations.applyMoveFix(this);
+            // applyMoveFix 更新了 playerInput, 需要同步 movementVector (protected)
+            float fw = playerInput.forward() == playerInput.backward() ? 0 : (playerInput.forward() ? 1.0f : -1.0f);
+            float sw = playerInput.left() == playerInput.right() ? 0 : (playerInput.left() ? 1.0f : -1.0f);
+            this.movementVector = new Vec2f(sw, fw);
+        }
     }
 }

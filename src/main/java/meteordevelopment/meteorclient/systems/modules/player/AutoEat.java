@@ -118,6 +118,10 @@ public class AutoEat extends Module {
     public boolean eating;
     private int slot, prevSlot;
 
+    public boolean isEating() {
+        return eating;
+    }
+
     private final List<Class<? extends Module>> wasAura = new ReferenceArrayList<>();
     private boolean wasBaritone = false;
 
@@ -177,9 +181,8 @@ public class AutoEat extends Module {
 
     private void startEating() {
         prevSlot = mc.player.getInventory().getSelectedSlot();
-        eat();
 
-        // Pause auras
+        // Pause auras first
         wasAura.clear();
         if (pauseAuras.get()) {
             for (Class<? extends Module> klass : AURAS) {
@@ -192,11 +195,13 @@ public class AutoEat extends Module {
             }
         }
 
-        // Pause baritone
+        // Pause baritone first
         if (pauseBaritone.get() && PathManagers.get().isPathing() && !wasBaritone) {
             wasBaritone = true;
             PathManagers.get().pause();
         }
+
+        eat();
     }
 
     private void eat() {

@@ -7,6 +7,10 @@ accessible   class   net/minecraft/network/packet/c2s/play/PlayerInteractEntityC
 accessible   class   net/minecraft/network/packet/c2s/play/PlayerInteractEntityC2SPacket$InteractTypeHandler
 accessible   class   net/minecraft/client/world/ClientChunkManager$ClientChunkMap
 
+accessible   field   net/minecraft/client/network/AbstractClientPlayerEntity playerListEntry Lnet/minecraft/client/network/PlayerListEntry;
+
+accessible   method  net/minecraft/client/render/entity/EntityRenderDispatcher render (Lnet/minecraft/entity/Entity;DDDFLnet/minecraft/client/util/math/MatrixStack;Lnet/minecraft/client/render/VertexConsumerProvider;ILnet/minecraft/client/render/entity/EntityRenderer;)V
+
 accessible   class   net/minecraft/client/texture/MapTextureManager$MapTexture
 accessible   field   net/minecraft/client/texture/MapTextureManager$MapTexture texture Lnet/minecraft/client/texture/NativeImageBackedTexture;
 
@@ -22,6 +26,17 @@ accessible   method  com/mojang/blaze3d/pipeline/RenderPipeline$Builder withSnip
 
 accessible   field   net/minecraft/client/render/command/OrderedRenderCommandQueueImpl batchingQueues Lit/unimi/dsi/fastutil/ints/Int2ObjectAVLTreeMap;
 
+accessible   field   net/minecraft/block/AbstractBlock collidable Z
+accessible   field   net/minecraft/util/math/Direction HORIZONTAL [Lnet/minecraft/util/math/Direction;
+
+accessible   field   net/minecraft/item/ItemGroups INVENTORY Lnet/minecraft/registry/RegistryKey;
+
+accessible   class   net/minecraft/entity/effect/StatusEffect$EffectAttributeModifierCreator
+
+accessible   class   net/minecraft/client/render/RenderLayer$MultiPhase
+accessible   class   net/minecraft/client/render/RenderLayer$MultiPhaseParameters
+accessible   class   net/minecraft/client/render/RenderPhase$Target
+
 # Auto Fish
 accessible   class   net/minecraft/entity/projectile/FishingBobberEntity$State
 accessible   field   net/minecraft/entity/projectile/FishingBobberEntity state Lnet/minecraft/entity/projectile/FishingBobberEntity$State;
@@ -32,3 +47,13 @@ accessible   class   net/minecraft/client/gui/DrawContext$ScissorStack
 accessible   field   net/minecraft/client/render/RenderSetup outputTarget Lnet/minecraft/client/render/OutputTarget;
 
 accessible   method   net/minecraft/entity/projectile/ProjectileEntity deflectsAgainstWorldBorder ()Z
+
+# Auto Fish
+accessible   field   net/minecraft/entity/projectile/FishingBobberEntity caughtFish Z
+
+# Item Physics
+accessible   field   net/minecraft/client/render/item/ItemRenderState layers [Lnet/minecraft/client/render/item/ItemRenderState$LayerRenderState;
+accessible   field   net/minecraft/client/render/item/ItemRenderState layerCount I
+
+# PacketMine - sequence support
+accessible   method  net/minecraft/client/world/ClientWorld getPendingUpdateManager ()Lnet/minecraft/client/network/PendingUpdateManager;

@@ -6,6 +6,7 @@
 package meteordevelopment.meteorclient.utils.render;
 
 import com.mojang.blaze3d.systems.RenderSystem;
+import meteordevelopment.meteorclient.MeteorClient;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.modules.render.Zoom;
 import meteordevelopment.meteorclient.utils.Utils;
@@ -27,12 +28,16 @@ public class NametagUtils {
 
     public static double scale;
 
+    // 调试用：每秒只打印一次日志
+    private static long lastLogTime = 0;
+    private static final boolean DEBUG_ENABLED = false; // 已修复，禁用调试日志
+
     private NametagUtils() {
     }
 
-    public static void onRender(Matrix4f modelView) {
+    public static void onRender(Matrix4f modelView, Matrix4f projectionMatrix) {
         model.set(modelView);
-        NametagUtils.projection.set(RenderUtils.projection);
+        NametagUtils.projection.set(projectionMatrix);
 
         Utils.set(camera, mc.gameRenderer.getCamera().getCameraPos());
         cameraNegated.set(camera);
@@ -76,7 +81,45 @@ public class NametagUtils {
 
         if (Double.isInfinite(x) || Double.isInfinite(y)) return false;
 
-        pos.set(x / windowScale, mc.getWindow().getFramebufferHeight() - y / windowScale, allowBehind ? pmMat4.w : pmMat4.z);
+        // 保存原始值用于日志
+        double originalX = x;
+        double originalY = y;
+
+        // 计算最终的屏幕坐标（转换为GUI缩放坐标系）
+        double guiScale = mc.getWindow().getScaleFactor();
+        double finalX = x;
+        double finalY = (mc.getWindow().getFramebufferHeight() - y);
+
+        // 调试日志 - 每500ms打印一次
+        if (DEBUG_ENABLED && System.currentTimeMillis() - lastLogTime > 500) {
+            lastLogTime = System.currentTimeMillis();
+
+            int fbWidth = mc.getWindow().getFramebufferWidth();
+            int fbHeight = mc.getWindow().getFramebufferHeight();
+            int winWidth = mc.getWindow().getWidth();
+            int winHeight = mc.getWindow().getHeight();
+            int scaledWidth = mc.getWindow().getScaledWidth();
+            int scaledHeight = mc.getWindow().getScaledHeight();
+
+            // 屏幕中心坐标（使用GUI缩放）
+            double screenCenterX = scaledWidth / 2.0;
+            double screenCenterY = scaledHeight / 2.0;
+
+            MeteorClient.LOG.info("=== NametagUtils Debug ===");
+            MeteorClient.LOG.info("Window: fbWidth={}, fbHeight={}, winWidth={}, winHeight={}", fbWidth, fbHeight, winWidth, winHeight);
+            MeteorClient.LOG.info("Scale: guiScale={}, windowScale={}, scaledWidth={}, scaledHeight={}", guiScale, windowScale, scaledWidth, scaledHeight);
+            MeteorClient.LOG.info("Screen Center: x={}, y={}", screenCenterX, screenCenterY);
+            MeteorClient.LOG.info("pmMat4 after toScreen: x={}, y={}, z={}, w={}", pmMat4.x, pmMat4.y, pmMat4.z, pmMat4.w);
+            MeteorClient.LOG.info("Raw screen coords: x={}, y={}", originalX, originalY);
+            MeteorClient.LOG.info("Final coords: x={}, y={}", finalX, finalY);
+            MeteorClient.LOG.info("World pos: x={}, y={}, z={}", pos.x, pos.y, pos.z);
+            MeteorClient.LOG.info("Camera pos: x={}, y={}, z={}", camera.x, camera.y, camera.z);
+            MeteorClient.LOG.info("Projection matrix valid: {}", !projection.equals(new Matrix4f()));
+            MeteorClient.LOG.info("RenderUtils.projection valid: {}", !projection.equals(new Matrix4f()));
+            MeteorClient.LOG.info("==========================");
+        }
+
+        pos.set(finalX, finalY, allowBehind ? pmMat4.w : pmMat4.z);
         return true;
     }
 

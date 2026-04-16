@@ -28,6 +28,15 @@ repositories {
         name = "ViaVersion"
         url = uri("https://repo.viaversion.com")
     }
+
+    maven {
+        name = "MaLiLib Maven"
+        url = uri("https://masa.dy.fi/maven/sakura-ryoko")
+        content { includeGroupAndSubgroups("fi.dy.masa") }
+    }
+
+    maven { url = uri("https://api.modrinth.com/maven") }
+
     mavenCentral()
 
     exclusiveContent {
@@ -93,6 +102,9 @@ dependencies {
     jij(libs.netty.handler.proxy) { isTransitive = false }
     jij(libs.netty.codec.socks) { isTransitive = false }
     jij(libs.waybackauthlib)
+
+    // Litematica (for Printer module)
+    modCompileOnly("maven.modrinth:litematica:${libs.versions.minecraft.get()}")
 }
 
 sourceSets {
@@ -143,8 +155,15 @@ afterEvaluate {
     }
 }
 
+tasks.withType<JavaCompile> {
+    options.encoding = "UTF-8"
+    options.compilerArgs.add("-Xlint:all,-processing")
+    options.compilerArgs.add("-Xlint:-unchecked")
+}
+
 loom {
     accessWidenerPath = file("src/main/resources/meteor-client.accesswidener")
+
 }
 
 tasks {
