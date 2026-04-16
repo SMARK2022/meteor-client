@@ -392,12 +392,12 @@ public class KillAura extends Module {
         if (targets.isEmpty()) {
             stopAttacking();
 
-            // 前瞻预瞄: 在攻击范围外但接近的候选实体, 提前旋转到位
+            // 前瞻预瞄: 在攻击范围外但接近的候选实体, 提前旋转到位（使用前置预测）
             if (rotation.get() == RotationMode.Always && !renderCandidates.isEmpty()) {
                 Entity approaching = findApproaching();
                 if (approaching != null) {
                     Rotations.rotateWith(
-                        phase -> solveEntityAim(approaching),
+                        phase -> solveEntityAim(approaching, true),
                         30, null   // 低优先级, 无 callback (不攻击)
                     );
                 }
@@ -442,19 +442,19 @@ public class KillAura extends Module {
         }
 
         if (delayCheck()) {
-            // 就绪: 用 AimResolver 提交旋转, SEND_FINAL 时从 post-physics 位置重建 aim
+            // 就绪: 攻击瞄准使用实体当前 AABB（不做前置预测），100% GrimAC-safe
             if (rotation.get() != RotationMode.None) {
                 Rotations.rotateWith(
-                    phase -> solveEntityAim(primary),
+                    phase -> solveEntityAim(primary, false),
                     100, () -> commitAttack(primary)
                 );
             } else {
                 commitAttack(primary);
             }
         } else if (rotation.get() == RotationMode.Always) {
-            // 未就绪: 软追踪, 保持朝向目标 (低优先级)
+            // 未就绪: 用前置预测做软追踪，减少攻击瞬间旋转角
             Rotations.rotateWith(
-                phase -> solveEntityAim(primary),
+                phase -> solveEntityAim(primary, true),
                 50, null
             );
         }
@@ -659,9 +659,39 @@ public class KillAura extends Module {
     private void commitAttack(Entity target) {
         if (!isActive() || !isStillValidTarget(target)) return;
 
+        // 服务端距离预测: 避免在服务端处理时实体已超出攻击范围的情况出手
+        if (predictMovement.get() && isServerRangeExceeded(target)) return;
+
         mc.interactionManager.attackEntity(mc.player, target);
         mc.player.swingHand(Hand.MAIN_HAND);
         hitTimer = 0;
+    }
+
+    /**
+     * 估算服务端处理攻击时实体是否已超出攻击范围。
+     * <p>
+     * 服务端攻击处理时的实体位置 ≈ 客户端实体位置 + 实体速度 × (插值延迟 + 单程网络延迟)。
+     * 客户端显示的距离可能远小于服务端实际距离（尤其高速分飞场景）。
+     */
+    private boolean isServerRangeExceeded(Entity target) {
+        TrackState state = trackMap.get(target.getId());
+        if (state == null) return false;
+
+        int pingMs = PlayerUtils.getPing();
+        if (pingMs <= 0) return false; // 本地服务器无延迟, 不需预测
+
+        // 总延迟 = 实体插值延迟(LivingEntity~1.5tick) + 单程网络延迟(RTT/2)
+        double oneWayTicks = pingMs / 100.0;
+        double interpLag = (target instanceof LivingEntity) ? 1.5 : 0.5;
+        double totalLagTicks = interpLag + oneWayTicks;
+
+        Vec3d entityServerEstimate = target.getPos().add(state.vel.multiply(totalLagTicks));
+        Vec3d eyePos = mc.player.getEyePos();
+        double serverDist = eyePos.distanceTo(entityServerEstimate);
+        double effectiveRange = getEffectiveRange();
+
+        // 留 0.3 余量: 实体碰撞箱宽度(0.6)的一半, 服务端用中心距离检测
+        return serverDist > effectiveRange + 0.3;
     }
 
     private boolean isStillValidTarget(Entity target) {
@@ -690,9 +720,11 @@ public class KillAura extends Module {
      * </ul>
      * 每次调用都从当前状态重新计算完整的 aim point + yaw/pitch,
      * 而非复用 Pre 阶段的旧结果。这消除了 sprint/鞘翅下 self 位移导致的系统性角度偏差。
+     *
+     * @param applyPrediction true=使用前置预测（软追踪用），false=瞄当前AABB（攻击用，GrimAC-safe）
      */
-    private Rotations.AimSolution solveEntityAim(Entity entity) {
-        Vec3d aim = computeAimPoint(entity);
+    private Rotations.AimSolution solveEntityAim(Entity entity, boolean applyPrediction) {
+        Vec3d aim = computeAimPoint(entity, applyPrediction);
         return new Rotations.AimSolution(
             (float) Rotations.getYaw(aim),
             (float) Rotations.getPitch(aim)
@@ -702,43 +734,50 @@ public class KillAura extends Module {
     /**
      * 计算给定实体的最优瞄准点。
      * <p>
-     * 算法:
-     * 1. 从 trackMap 获取实体的 α-β 平滑绝对速度 + 加速度
-     * 2. 二阶预测: v·t + ½a·t² (比纯匀速更精确)
-     * 3. 动态 Horizon: 从网络延迟自动计算预测时域
-     * 4. X/Z: clamp(eye, box) + 30% 中心混合
-     * 5. Y: 优选上胸区 (62% 身高)
+     * 两种模式:
+     * <ul>
+     *   <li><b>applyPrediction=true</b> (软追踪): α-β 速度 + 二阶外推, 瞄准实体未来位置,
+     *       用于非攻击阶段的前瞻预瞄，减少攻击瞬间的旋转角</li>
+     *   <li><b>applyPrediction=false</b> (攻击): 瞄准实体当前 AABB + 前缘微偏,
+     *       确保射线 100% 穿过 GrimAC 插值框, 同时微偏向运动前缘提高服务端命中概率</li>
+     * </ul>
      * <p>
-     * 注意: 使用实体 绝对速度 (非相对速度), 因为服务端命中检测从
-     * 玩家当前位置射线 → 预测点应为实体在世界坐标中的未来位置。
+     * X/Z: clamp(eye, box) + 30% 中心混合<br>
+     * Y: 优选上胸区 (62% 身高)
+     *
+     * @param applyPrediction true=前置预测(软追踪), false=当前AABB(攻击)
      */
-    private Vec3d computeAimPoint(Entity entity) {
+    private Vec3d computeAimPoint(Entity entity, boolean applyPrediction) {
         Vec3d eyePos = mc.player.getEyePos();
         Box box = entity.getBoundingBox();
 
-        if (predictMovement.get()) {
+        if (applyPrediction && predictMovement.get()) {
             // 从 trackMap 获取实体的平滑绝对速度 + 加速度
             TrackState state = trackMap.get(entity.getId());
             Vec3d vel = state != null ? state.vel : Vec3d.ZERO;
             Vec3d acc = state != null ? state.acc : Vec3d.ZERO;
 
             // === 动态 Horizon ===
-            // horizon = RTT/2 (oneWay) + 25ms (服务端排队偏置), 转为 tick 单位。
+            // 总过期 = 客户端实体位置滞后(ping/2) + 攻击包到达(ping/2) + 服务端排队(~25ms)
+            // 即 horizon ≈ ping + 25ms。对于软追踪可以激进一些。
             double t;
             int pingMs = PlayerUtils.getPing();
             if (pingMs > 0) {
-                double horizonMs = pingMs * 0.5 + 25.0;
+                double horizonMs = pingMs + 25.0;
                 t = Math.max(horizonMs / 50.0, 0.5);
             } else {
-                t = predictionTicks.get();
+                // 本地服务器 / ping 未知 → 不预测（实体位置已是实时）
+                t = 0;
             }
 
             // 二阶预测: v·t + ½a·t²
-            box = box.offset(
-                vel.x * t + 0.5 * acc.x * t * t,
-                vel.y * t + 0.5 * acc.y * t * t,
-                vel.z * t + 0.5 * acc.z * t * t
-            );
+            if (t > 0) {
+                box = box.offset(
+                    vel.x * t + 0.5 * acc.x * t * t,
+                    vel.y * t + 0.5 * acc.y * t * t,
+                    vel.z * t + 0.5 * acc.z * t * t
+                );
+            }
         }
 
         // X/Z: 最近点 + 30% 中心混合
@@ -748,6 +787,20 @@ public class KillAura extends Module {
         double cz = (box.minZ + box.maxZ) * 0.5;
         aimX += (cx - aimX) * 0.3;
         aimZ += (cz - aimZ) * 0.3;
+
+        // 攻击模式: 在当前 AABB 内微偏向运动前缘，使射线更接近 GrimAC 插值框的新端
+        if (!applyPrediction && predictMovement.get()) {
+            TrackState state = trackMap.get(entity.getId());
+            if (state != null) {
+                double velXZ = Math.sqrt(state.vel.x * state.vel.x + state.vel.z * state.vel.z);
+                if (velXZ > 0.01) {
+                    // 归一化方向 × 0.08 blocks 偏移（约 AABB 半宽的 27%，保证不出框）
+                    double factor = 0.08 / velXZ;
+                    aimX = MathHelper.clamp(aimX + state.vel.x * factor, box.minX, box.maxX);
+                    aimZ = MathHelper.clamp(aimZ + state.vel.z * factor, box.minZ, box.maxZ);
+                }
+            }
+        }
 
         // Y: 优选上胸区 (62% 身高), 再做 30% 中心混合
         double preferY = box.minY + (box.maxY - box.minY) * 0.62;
