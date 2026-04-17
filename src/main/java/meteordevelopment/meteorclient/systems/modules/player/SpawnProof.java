@@ -43,83 +43,83 @@ public class SpawnProof extends Module implements PrinterTaskProvider {
     // ==================== 设置 ====================
 
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
-    private final SettingGroup sgRender  = settings.createGroup("渲染");
+    private final SettingGroup sgRender  = settings.createGroup("Render");
 
     private final Setting<Mode> mode = sgGeneral.add(new EnumSetting.Builder<Mode>()
-        .name("模式")
-        .description("防刷模式。SLAB = 下半砖 / BUTTON = 按钮 / TORCH = 火把")
+        .name("mode")
+        .description("Spawn proof mode. SLAB=bottom slab, BUTTON=button, TORCH=torch.")
         .defaultValue(Mode.SLAB)
         .build());
 
     private final Setting<List<Block>> slabBlock = sgGeneral.add(new BlockListSetting.Builder()
-        .name("  半砖方块")
-        .description("SLAB 模式使用的半砖方块（取第一个）。")
+        .name("slab-blocks")
+        .description("Slab blocks to use for SLAB mode (first is selected).")
         .defaultValue(List.of(Blocks.SMOOTH_STONE_SLAB))
         .visible(() -> mode.get() == Mode.SLAB)
         .build());
 
     private final Setting<List<Block>> buttonBlock = sgGeneral.add(new BlockListSetting.Builder()
-        .name("  按钮方块")
-        .description("BUTTON 模式使用的按钮方块（取第一个）。")
+        .name("button-blocks")
+        .description("Button blocks to use for BUTTON mode (first is selected).")
         .defaultValue(List.of(Blocks.STONE_BUTTON))
         .visible(() -> mode.get() == Mode.BUTTON)
         .build());
 
     private final Setting<Integer> realtimeRange = sgGeneral.add(new IntSetting.Builder()
-        .name("实时扫描范围")
-        .description("实时扫描半径（方块数）。")
+        .name("scan-range")
+        .description("Real-time scan radius (blocks).")
         .defaultValue(6).min(4).sliderRange(4, 12)
         .build());
 
     private final Setting<Integer> scanInterval = sgGeneral.add(new IntSetting.Builder()
-        .name("扫描间隔")
-        .description("实时扫描间隔（tick），1 = 每 tick，2 = 每 2 tick。")
+        .name("scan-interval")
+        .description("Real-time scan interval (ticks).")
         .defaultValue(2).min(1).sliderRange(1, 10)
         .build());
 
     private final Setting<List<Block>> excludeBlocks = sgGeneral.add(new BlockListSetting.Builder()
-        .name("排除方块")
-        .description("位于这些方块上方的位置不进行防刷怪标记（如灵魂沙）。")
+        .name("exclude-blocks")
+        .description("Positions above these blocks are excluded from spawn proofing.")
         .defaultValue(List.of(Blocks.SOUL_SAND))
         .build());
 
     private final Setting<Boolean> skipSchematic = sgGeneral.add(new BoolSetting.Builder()
-        .name("排除投影区域")
-        .description("跳过 Litematica 投影内的位置，避免干扰蓝图放置。")
+        .name("exclude-schematic")
+        .description("Skips positions inside Litematica schematic projections.")
         .defaultValue(true)
         .build());
 
     private final Setting<Integer> cacheRadius = sgGeneral.add(new IntSetting.Builder()
-        .name("缓存半径")
-        .description("AFK 中心起算的全域分析扫描范围。")
+        .name("cache-radius")
+        .description("Full analysis scan range from AFK center.")
         .defaultValue(128).min(16).sliderRange(16, 200)
         .build());
 
     // ── 渲染 ──
 
     private final Setting<Boolean> renderOverlay = sgRender.add(new BoolSetting.Builder()
-        .name("显示渲染")
-        .description("显示可刷怪面高亮标记。")
+        .name("show-render")
+        .description("Shows spawnable surface highlight markers.")
         .defaultValue(true)
         .build());
 
     private final Setting<Integer> maxHighlights = sgRender.add(new IntSetting.Builder()
-        .name("最大标记数")
-        .description("同时显示的最大高亮标记数。")
+        .name("max-markers")
+        .description("Maximum number of highlight markers displayed.")
         .defaultValue(25).min(1).sliderRange(1, 100)
         .visible(renderOverlay::get)
         .build());
 
     private final Setting<SettingColor> faceColor = sgRender.add(new ColorSetting.Builder()
-        .name("标记面颜色")
-        .description("标记填充色（穿透通道自动取半 alpha）。")
+        .name("marker-side-color")
+        .description("Marker fill color (through-wall pass uses half alpha).")
         .defaultValue(new SettingColor(255, 50, 50, 50))
         .visible(renderOverlay::get)
         .build());
 
     private final Setting<SettingColor> lineColor = sgRender.add(new ColorSetting.Builder()
-        .name("标记线颜色")
-        .description("标记边框线颜色（仅正常深度通道绘制）。")
+        .name("marker-line-color")
+        .description("Marker border line color (normal depth pass only).")
         .defaultValue(new SettingColor(255, 50, 50, 120))
         .visible(renderOverlay::get)
         .build());
@@ -155,7 +155,7 @@ public class SpawnProof extends Module implements PrinterTaskProvider {
 
     public SpawnProof() {
         super(Categories.Player, "spawn-proof",
-            "扫描 hostile mob 刷怪面，联动 Printer 自动放置防刷方块。");
+            "Scans hostile mob spawnable surfaces and works with Printer to auto-place spawn proof blocks.");
     }
 
     @Override

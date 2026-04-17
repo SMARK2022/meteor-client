@@ -24,37 +24,37 @@ import static net.minecraft.entity.effect.StatusEffects.HASTE;
 
 public class SpeedMine extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
-    private final SettingGroup sgGrim    = settings.createGroup("Grim 合规");
+    private final SettingGroup sgGrim    = settings.createGroup("Grim Compliance");
 
     // ── 通用 ──
 
     public final Setting<Mode> mode = sgGeneral.add(new EnumSetting.Builder<Mode>()
-        .name("模式")
-        .description("加速方式。Normal 修改破坏速度，Haste 添加急迫效果，Damage 跳过挖掘进度。")
+        .name("mode")
+        .description("Mining speed mode. Normal modifies break speed, Haste adds haste effect, Damage skips mining progress.")
         .defaultValue(Mode.Damage)
         .onChanged(mode -> removeHaste())
         .build()
     );
 
     private final Setting<List<Block>> blocks = sgGeneral.add(new BlockListSetting.Builder()
-        .name("方块列表")
-        .description("指定生效的方块列表")
+        .name("blocks")
+        .description("Selected blocks.")
         .filter(block -> block.getHardness() > 0)
         .visible(() -> mode.get() != Mode.Haste)
         .build()
     );
 
     private final Setting<ListMode> blocksFilter = sgGeneral.add(new EnumSetting.Builder<ListMode>()
-        .name("列表模式")
-        .description("黑名单排除列表中的方块，白名单仅对列表中的方块生效。")
+        .name("blocks-filter")
+        .description("How to use the blocks setting.")
         .defaultValue(ListMode.Blacklist)
         .visible(() -> mode.get() != Mode.Haste)
         .build()
     );
 
     public final Setting<Double> modifier = sgGeneral.add(new DoubleSetting.Builder()
-        .name("速度倍率")
-        .description("挖掘速度倍率，每增加 0.2 约等于一级急迫（1.2 ≈ 急迫 I）。")
+        .name("modifier")
+        .description("Mining speed modifier. An additional value of 0.2 is equivalent to one haste level (1.2 = haste 1).")
         .defaultValue(1.4)
         .visible(() -> mode.get() == Mode.Normal)
         .min(0)
@@ -62,8 +62,8 @@ public class SpeedMine extends Module {
     );
 
     private final Setting<Integer> hasteAmplifier = sgGeneral.add(new IntSetting.Builder()
-        .name("急迫等级")
-        .description("给予的急迫效果等级，超过 2 不建议使用。")
+        .name("haste-amplifier")
+        .description("What value of haste to give you. Above 2 not recommended.")
         .defaultValue(2)
         .min(1)
         .visible(() -> mode.get() == Mode.Haste)
@@ -72,8 +72,8 @@ public class SpeedMine extends Module {
     );
 
     private final Setting<Boolean> instamine = sgGeneral.add(new BoolSetting.Builder()
-        .name("瞬间挖掘")
-        .description("满足条件时立即破坏方块（仅 Damage 模式）。")
+        .name("instamine")
+        .description("Whether or not to instantly mine blocks under certain conditions.")
         .defaultValue(true)
         .visible(() -> mode.get() == Mode.Damage)
         .build()
@@ -82,16 +82,16 @@ public class SpeedMine extends Module {
     // ── Grim 合规 ──
 
     private final Setting<Boolean> grimAware = sgGrim.add(new BoolSetting.Builder()
-        .name("Grim 感知")
-        .description("启用 Grim 感知状态机，在加速与冷却间自动切换以避免触发检测。")
+        .name("grim-bypass")
+        .description("Enables Grim-aware state machine, auto-switches between boost and cooldown to avoid detection.")
         .defaultValue(false)
         .visible(() -> mode.get() == Mode.Damage)
         .build()
     );
 
     private final Setting<Integer> grimBalanceBudget = sgGrim.add(new IntSetting.Builder()
-        .name("　预算上限")
-        .description("允许的最大 blockBreakBalance（ms），Grim 在 1000ms 时标记。稳定~700，激进~900。")
+        .name("budget-cap")
+        .description("Maximum blockBreakBalance (ms). Grim flags at 1000ms. Stable ~700, aggressive ~900.")
         .defaultValue(900)
         .min(0)
         .sliderMax(1000)
@@ -100,8 +100,8 @@ public class SpeedMine extends Module {
     );
 
     private final Setting<Integer> rechargeBuffer = sgGrim.add(new IntSetting.Builder()
-        .name("　恢复缓冲")
-        .description("低于预算多少（ms）后恢复加速。0 = 一低于预算立即恢复。")
+        .name("recovery-buffer")
+        .description("How far below budget (ms) before resuming boost. 0=resume immediately.")
         .defaultValue(240)
         .min(0)
         .sliderMax(500)
@@ -120,7 +120,7 @@ public class SpeedMine extends Module {
     private double grimMaxDelta = 0;
 
     public SpeedMine() {
-        super(Categories.Player, "speed-mine", "快速挖掘辅助，支持多种加速模式与 Grim 合规。");
+        super(Categories.Player, "speed-mine", "Allows you to quickly mine blocks with multiple speed modes and Grim compliance.");
     }
 
     @Override

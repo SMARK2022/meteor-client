@@ -50,41 +50,41 @@ import java.util.Set;
 
 public class Surround extends Module implements PrinterTaskProvider {
     private final SettingGroup sgGeneral  = settings.getDefaultGroup();
-    private final SettingGroup sgBody     = settings.createGroup("身体");
-    private final SettingGroup sgHead     = settings.createGroup("头部");
-    private final SettingGroup sgFoot     = settings.createGroup("脚部");
-    private final SettingGroup sgProtect  = settings.createGroup("防护");
-    private final SettingGroup sgLink     = settings.createGroup("联动");
-    private final SettingGroup sgAutoOff  = settings.createGroup("自动关闭");
-    private final SettingGroup sgRender   = settings.createGroup("渲染");
+    private final SettingGroup sgBody     = settings.createGroup("Body");
+    private final SettingGroup sgHead     = settings.createGroup("Head");
+    private final SettingGroup sgFoot     = settings.createGroup("Feet");
+    private final SettingGroup sgProtect  = settings.createGroup("Protect");
+    private final SettingGroup sgLink     = settings.createGroup("Toggle");
+    private final SettingGroup sgAutoOff  = settings.createGroup("Auto Disable");
+    private final SettingGroup sgRender   = settings.createGroup("Render");
 
     // ── 通用 ──
 
     private final Setting<List<Block>> blocks = sgGeneral.add(new BlockListSetting.Builder()
-        .name("方块列表")
-        .description("包围使用的方块类型。")
+        .name("blocks")
+        .description("What blocks to use for surround.")
         .defaultValue(Blocks.OBSIDIAN, Blocks.CRYING_OBSIDIAN, Blocks.NETHERITE_BLOCK)
         .filter(this::blockFilter)
         .build()
     );
 
     private final Setting<Center> center = sgGeneral.add(new EnumSetting.Builder<Center>()
-        .name("居中")
-        .description("将玩家传送到方块中心。注意：可能触发 GrimAC 移动检测。")
+        .name("center")
+        .description("Teleports you to the center of the block. Note: may trigger GrimAC movement detection.")
         .defaultValue(Center.Never)
         .build()
     );
 
     private final Setting<Boolean> onlyOnGround = sgGeneral.add(new BoolSetting.Builder()
-        .name("仅地面")
-        .description("仅在站立在方块上时工作。")
+        .name("only-on-ground")
+        .description("Works only when you are standing on blocks.")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<Boolean> airPlace = sgGeneral.add(new BoolSetting.Builder()
-        .name("空中放置")
-        .description("允许在无邻面支撑时放置方块（开启后跳过 support 块计算）。")
+        .name("air-place")
+        .description("Allows Surround to place blocks in the air (skips support block calculation when enabled).")
         .defaultValue(false)
         .build()
     );
@@ -92,8 +92,8 @@ public class Surround extends Module implements PrinterTaskProvider {
     // ── 身体 ──
 
     private final Setting<BodyMode> bodyMode = sgBody.add(new EnumSetting.Builder<BodyMode>()
-        .name("身体模式")
-        .description("身体保护。Lower=下肢 y+0 四面；Upper=上肢 y+1 四面；Full=全身 8 面。")
+        .name("body-mode")
+        .description("Body protection mode. Lower=lower body y+0 four sides; Upper=upper body y+1 four sides; Full=all 8 sides.")
         .defaultValue(BodyMode.Full)
         .build()
     );
@@ -101,8 +101,8 @@ public class Surround extends Module implements PrinterTaskProvider {
     // ── 头部 ──
 
     private final Setting<HeadMode> headMode = sgHead.add(new EnumSetting.Builder<HeadMode>()
-        .name("头部模式")
-        .description("头顶保护。Single=y+2 单方块；Full=y+2 十字形 5 方块。")
+        .name("head-mode")
+        .description("Head protection mode. Single=y+2 single block; Full=y+2 cross-shaped 5 blocks.")
         .defaultValue(HeadMode.Full)
         .build()
     );
@@ -110,8 +110,8 @@ public class Surround extends Module implements PrinterTaskProvider {
     // ── 脚部 ──
 
     private final Setting<FootMode> footMode = sgFoot.add(new EnumSetting.Builder<FootMode>()
-        .name("脚部模式")
-        .description("脚下保护。Single=y-1 单方块；Full=y-1 十字形 5 方块。")
+        .name("feet-mode")
+        .description("Feet protection mode. Single=y-1 single block; Full=y-1 cross-shaped 5 blocks.")
         .defaultValue(FootMode.Full)
         .build()
     );
@@ -119,23 +119,23 @@ public class Surround extends Module implements PrinterTaskProvider {
     // ── 防护 ──
 
     private final Setting<Boolean> protect = sgProtect.add(new BoolSetting.Builder()
-        .name("防护")
-        .description("在包围位置附近打碎水晶以防止被破围。")
+        .name("protect")
+        .description("Attempts to break crystals around surround positions to prevent surround break.")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<Boolean> aggressiveProtect = sgProtect.add(new BoolSetting.Builder()
-        .name("激进防护")
-        .description("同 tick 内 Attack+Place（消除对手重放水晶窗口，但可能触发 GrimAC MultiActionsF experimental 检测）。关闭时 2-tick 安全模式。")
+        .name("aggressive-protect")
+        .description("Same tick Attack+Place (eliminates opponent crystal re-place window, but may trigger GrimAC MultiActionsF). When disabled, uses 2-tick safe mode.")
         .defaultValue(false)
         .visible(protect::get)
         .build()
     );
 
     private final Setting<Boolean> swing = sgProtect.add(new BoolSetting.Builder()
-        .name("挥手")
-        .description("攻击水晶时渲染挥手动画。")
+        .name("swing")
+        .description("Render hand swing animation when attacking crystals.")
         .defaultValue(true)
         .visible(protect::get)
         .build()
@@ -144,23 +144,23 @@ public class Surround extends Module implements PrinterTaskProvider {
     // ── 联动 ──
 
     private final Setting<Boolean> toggleModules = sgLink.add(new BoolSetting.Builder()
-        .name("联动关闭")
-        .description("激活时关闭其他模块。")
+        .name("toggle-modules")
+        .description("Turn off other modules when surround is activated.")
         .defaultValue(false)
         .build()
     );
 
     private final Setting<Boolean> toggleBack = sgLink.add(new BoolSetting.Builder()
-        .name("联动恢复")
-        .description("关闭时恢复被联动关闭的模块。")
+        .name("toggle-back-on")
+        .description("Turn the other modules back on when surround is deactivated.")
         .defaultValue(false)
         .visible(toggleModules::get)
         .build()
     );
 
     private final Setting<List<Module>> modules = sgLink.add(new ModuleListSetting.Builder()
-        .name("联动模块")
-        .description("激活时需要关闭的模块列表。")
+        .name("modules")
+        .description("Which modules to disable on activation.")
         .visible(toggleModules::get)
         .build()
     );
@@ -168,22 +168,22 @@ public class Surround extends Module implements PrinterTaskProvider {
     // ── 自动关闭 ──
 
     private final Setting<Boolean> toggleOnYChange = sgAutoOff.add(new BoolSetting.Builder()
-        .name("Y 变化关闭")
-        .description("Y 坐标变化时自动关闭（跳跃、踩高等）。")
+        .name("toggle-on-y-change")
+        .description("Automatically disables when your y level changes (step, jumping, etc).")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<Boolean> toggleOnComplete = sgAutoOff.add(new BoolSetting.Builder()
-        .name("完成关闭")
-        .description("所有方块放置完成后自动关闭。")
+        .name("toggle-on-complete")
+        .description("Toggles off when all blocks are placed.")
         .defaultValue(false)
         .build()
     );
 
     private final Setting<Boolean> toggleOnDeath = sgAutoOff.add(new BoolSetting.Builder()
-        .name("死亡关闭")
-        .description("死亡时自动关闭。")
+        .name("toggle-on-death")
+        .description("Toggles off when you die.")
         .defaultValue(true)
         .build()
     );
@@ -191,62 +191,62 @@ public class Surround extends Module implements PrinterTaskProvider {
     // ── 渲染 ──
 
     private final Setting<Boolean> render = sgRender.add(new BoolSetting.Builder()
-        .name("渲染")
-        .description("渲染方块放置位置的叠加层。")
+        .name("render")
+        .description("Renders a block overlay where the blocks will be placed.")
         .defaultValue(true)
         .build()
     );
 
     private final Setting<ShapeMode> shapeMode = sgRender.add(new EnumSetting.Builder<ShapeMode>()
-        .name("渲染模式")
-        .description("叠加层的渲染方式。")
+        .name("render-mode")
+        .description("How the shapes are rendered.")
         .defaultValue(ShapeMode.Both)
         .build()
     );
 
     private final Setting<SettingColor> safeSideColor = sgRender.add(new ColorSetting.Builder()
-        .name("安全-面颜色")
-        .description("安全方块（基岩等）的面颜色。")
+        .name("safe-side-color")
+        .description("The side color for safe blocks.")
         .defaultValue(new SettingColor(13, 255, 0, 0))
         .visible(() -> render.get() && shapeMode.get() != ShapeMode.Lines)
         .build()
     );
 
     private final Setting<SettingColor> safeLineColor = sgRender.add(new ColorSetting.Builder()
-        .name("安全-线颜色")
-        .description("安全方块（基岩等）的线颜色。")
+        .name("safe-line-color")
+        .description("The line color for safe blocks.")
         .defaultValue(new SettingColor(13, 255, 0, 0))
         .visible(() -> render.get() && shapeMode.get() != ShapeMode.Sides)
         .build()
     );
 
     private final Setting<SettingColor> normalSideColor = sgRender.add(new ColorSetting.Builder()
-        .name("普通-面颜色")
-        .description("普通方块（黑曜石等）的面颜色。")
+        .name("normal-side-color")
+        .description("The side color for normal blocks.")
         .defaultValue(new SettingColor(0, 255, 238, 12))
         .visible(() -> render.get() && shapeMode.get() != ShapeMode.Lines)
         .build()
     );
 
     private final Setting<SettingColor> normalLineColor = sgRender.add(new ColorSetting.Builder()
-        .name("普通-线颜色")
-        .description("普通方块（黑曜石等）的线颜色。")
+        .name("normal-line-color")
+        .description("The line color for normal blocks.")
         .defaultValue(new SettingColor(0, 255, 238, 100))
         .visible(() -> render.get() && shapeMode.get() != ShapeMode.Sides)
         .build()
     );
 
     private final Setting<SettingColor> unsafeSideColor = sgRender.add(new ColorSetting.Builder()
-        .name("危险-面颜色")
-        .description("危险方块（可破坏方块）的面颜色。")
+        .name("unsafe-side-color")
+        .description("The side color for unsafe blocks.")
         .defaultValue(new SettingColor(204, 0, 0, 12))
         .visible(() -> render.get() && shapeMode.get() != ShapeMode.Lines)
         .build()
     );
 
     private final Setting<SettingColor> unsafeLineColor = sgRender.add(new ColorSetting.Builder()
-        .name("危险-线颜色")
-        .description("危险方块（可破坏方块）的线颜色。")
+        .name("unsafe-line-color")
+        .description("The line color for unsafe blocks.")
         .defaultValue(new SettingColor(204, 0, 0, 100))
         .visible(() -> render.get() && shapeMode.get() != ShapeMode.Sides)
         .build()

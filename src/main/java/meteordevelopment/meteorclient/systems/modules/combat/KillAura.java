@@ -57,7 +57,7 @@ public class KillAura extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgTargeting = settings.createGroup("Targeting");
     private final SettingGroup sgTiming = settings.createGroup("Timing");
-    private final SettingGroup sgRender = settings.createGroup("渲染");
+    private final SettingGroup sgRender = settings.createGroup("Render");
 
     // General
 
@@ -269,7 +269,7 @@ public class KillAura extends Module {
 
     private final Setting<Boolean> renderTrajectory = sgRender.add(new BoolSetting.Builder()
         .name("render-trajectory")
-        .description("开启预测运动后, 渲染目标未来 1 秒的预测轨迹线。")
+        .description("When predict movement is on, renders the target's predicted trajectory for 1 second.")
         .defaultValue(true)
         .visible(predictMovement::get)
         .build()
@@ -277,7 +277,7 @@ public class KillAura extends Module {
 
     private final Setting<SettingColor> trajectoryStartColor = sgRender.add(new ColorSetting.Builder()
         .name("trajectory-start-color")
-        .description("轨迹线起点颜色。")
+        .description("Trajectory line start color.")
         .defaultValue(new SettingColor(0, 255, 255, 255))
         .visible(() -> predictMovement.get() && renderTrajectory.get())
         .build()
@@ -285,7 +285,7 @@ public class KillAura extends Module {
 
     private final Setting<SettingColor> trajectoryEndColor = sgRender.add(new ColorSetting.Builder()
         .name("trajectory-end-color")
-        .description("轨迹线终点颜色 (渐变到此)。")
+        .description("Trajectory line end color (gradient).")
         .defaultValue(new SettingColor(0, 255, 255, 25))
         .visible(() -> predictMovement.get() && renderTrajectory.get())
         .build()
@@ -293,7 +293,7 @@ public class KillAura extends Module {
 
     private final Setting<Boolean> renderSpeed = sgRender.add(new BoolSetting.Builder()
         .name("render-speed")
-        .description("在目标头顶显示其移动速度 (m/s)。")
+        .description("Shows target movement speed (m/s) above their head.")
         .defaultValue(true)
         .visible(predictMovement::get)
         .build()
@@ -301,7 +301,7 @@ public class KillAura extends Module {
 
     private final Setting<Double> speedTextScale = sgRender.add(new DoubleSetting.Builder()
         .name("speed-text-scale")
-        .description("速度文字缩放比例。")
+        .description("Speed text scale.")
         .defaultValue(1.0)
         .min(0.5)
         .sliderRange(0.5, 3.0)

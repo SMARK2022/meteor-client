@@ -128,35 +128,35 @@ public class Printer extends Module {
     // ==================== 设置 ====================
 
     private final SettingGroup sgGeneral   = settings.getDefaultGroup();
-    private final SettingGroup sgFixes     = settings.createGroup("行为修正");
-    private final SettingGroup sgContainer = settings.createGroup("容器填充");
-    private final SettingGroup sgRender    = settings.createGroup("渲染");
+    private final SettingGroup sgFixes     = settings.createGroup("Correction");
+    private final SettingGroup sgContainer = settings.createGroup("Container Fill");
+    private final SettingGroup sgRender    = settings.createGroup("Render");
 
     // ── 通用 ──
 
     private final Setting<Boolean> moveStop = sgGeneral.add(new BoolSetting.Builder()
-            .name("移动暂停")
-            .description("移动时暂停放置")
+            .name("pause-on-move")
+            .description("Pauses placement while moving.")
             .defaultValue(false)
             .build());
 
     private final Setting<PlaceMode> placeMode = sgGeneral.add(new EnumSetting.Builder<PlaceMode>()
-            .name("放置模式")
-            .description("放置方式。STRICT 使用 NCP 方向校验绕过反作弊。")
+            .name("place-mode")
+            .description("Placement mode. STRICT uses NCP direction validation to bypass anti-cheat.")
             .defaultValue(PlaceMode.STRICT)
             .build());
 
     private final Setting<Integer> placeDelay = sgGeneral.add(new IntSetting.Builder()
-            .name("放置延迟")
-            .description("放置间隔（tick）")
+            .name("place-delay")
+            .description("Delay in ticks between placements.")
             .defaultValue(0)
             .min(0)
             .sliderRange(0, 10)
             .build());
 
     private final Setting<Double> placeRange = sgGeneral.add(new DoubleSetting.Builder()
-            .name("放置距离")
-            .description("放置范围（格）")
+            .name("place-range")
+            .description("Placement range in blocks.")
             .defaultValue(4.5)
             .min(1.0)
             .max(15.0)
@@ -164,27 +164,27 @@ public class Printer extends Module {
             .build());
 
     private final Setting<Boolean> rotate = sgGeneral.add(new BoolSetting.Builder()
-            .name("旋转")
-            .description("向目标方块旋转视角")
+            .name("rotate")
+            .description("Rotates towards the target block.")
             .defaultValue(true)
             .build());
 
     private final Setting<Boolean> swingHand = sgGeneral.add(new BoolSetting.Builder()
-            .name("挥手动画")
-            .description("交互时播放挥手动画")
+            .name("swing")
+            .description("Plays swing animation when interacting.")
             .defaultValue(true)
             .build());
 
     private final Setting<Boolean> checkLineOfSight = sgGeneral.add(new BoolSetting.Builder()
-            .name("视线检查")
-            .description("仅放置玩家可见的方块（反作弊）")
+            .name("line-of-sight")
+            .description("Only places blocks visible to the player (anti-cheat).")
             .defaultValue(true)
             .visible(() -> placeMode.get() == PlaceMode.STRICT)
             .build());
 
     private final Setting<Integer> maxCandidates = sgGeneral.add(new IntSetting.Builder()
-            .name("最大候选数")
-            .description("每 tick 评估的最大任务数，0 = 无限制")
+            .name("max-candidates")
+            .description("Maximum tasks to evaluate per tick, 0=unlimited.")
             .defaultValue(0)
             .min(0)
             .sliderRange(0, 100)
@@ -193,35 +193,35 @@ public class Printer extends Module {
     // ── 行为修正 · 红石 ──
 
     private final Setting<Boolean> fixRedstone = sgFixes.add(new BoolSetting.Builder()
-            .name("红石修正")
-            .description("启用红石组件状态修正（中继器/比较器/红石线）")
+            .name("redstone-fix")
+            .description("Enables redstone component state correction.")
             .defaultValue(false)
             .build());
 
     private final Setting<Boolean> fixRepeaterDelay = sgFixes.add(new BoolSetting.Builder()
-            .name("  中继器延迟")
-            .description("修正中继器延迟不匹配")
+            .name("repeater-delay")
+            .description("Fixes repeater delay mismatch.")
             .defaultValue(true)
             .visible(fixRedstone::get)
             .build());
 
     private final Setting<Boolean> fixComparatorMode = sgFixes.add(new BoolSetting.Builder()
-            .name("  比较器模式")
-            .description("修正比较器模式不匹配")
+            .name("comparator-mode")
+            .description("Fixes comparator mode mismatch.")
             .defaultValue(true)
             .visible(fixRedstone::get)
             .build());
 
     private final Setting<Boolean> fixRedstoneWire = sgFixes.add(new BoolSetting.Builder()
-            .name("  红石线形态")
-            .description("修正红石线十字/点形态")
+            .name("redstone-wire-shape")
+            .description("Fixes redstone wire cross/dot shape.")
             .defaultValue(true)
             .visible(fixRedstone::get)
             .build());
 
     private final Setting<Boolean> fixNoteBlock = sgFixes.add(new BoolSetting.Builder()
-            .name("  音符盒音高")
-            .description("修正音符盒音高")
+            .name("note-block-pitch")
+            .description("Fixes note block pitch.")
             .defaultValue(true)
             .visible(fixRedstone::get)
             .build());
@@ -229,49 +229,49 @@ public class Printer extends Module {
     // ── 行为修正 · 交互方块 ──
 
     private final Setting<Boolean> fixInteractable = sgFixes.add(new BoolSetting.Builder()
-            .name("交互方块修正")
-            .description("启用可交互方块状态修正（活板门/门/栅栏门/营火等）")
+            .name("interactable-fix")
+            .description("Enables interactable block state correction.")
             .defaultValue(false)
             .build());
 
     private final Setting<Boolean> fixTrapdoor = sgFixes.add(new BoolSetting.Builder()
-            .name("  活板门")
-            .description("修正活板门开合状态")
+            .name("trapdoor")
+            .description("Fixes trapdoor open/close state.")
             .defaultValue(true)
             .visible(fixInteractable::get)
             .build());
 
     private final Setting<Boolean> fixDoor = sgFixes.add(new BoolSetting.Builder()
-            .name("  门")
-            .description("修正门的开合状态")
+            .name("door")
+            .description("Fixes door open/close state.")
             .defaultValue(true)
             .visible(fixInteractable::get)
             .build());
 
     private final Setting<Boolean> fixFenceGate = sgFixes.add(new BoolSetting.Builder()
-            .name("  栅栏门")
-            .description("修正栅栏门开合状态")
+            .name("fence-gate")
+            .description("Fixes fence gate open/close state.")
             .defaultValue(true)
             .visible(fixInteractable::get)
             .build());
 
     private final Setting<Boolean> fixDaylightDetector = sgFixes.add(new BoolSetting.Builder()
-            .name("  阳光传感器")
-            .description("修正阳光传感器反转状态")
+            .name("daylight-sensor")
+            .description("Fixes daylight sensor inverted state.")
             .defaultValue(true)
             .visible(fixInteractable::get)
             .build());
 
     private final Setting<Boolean> fixLever = sgFixes.add(new BoolSetting.Builder()
-            .name("  拉杆")
-            .description("修正拉杆开关状态")
+            .name("lever")
+            .description("Fixes lever toggle state.")
             .defaultValue(true)
             .visible(fixInteractable::get)
             .build());
 
     private final Setting<Boolean> fixCampfire = sgFixes.add(new BoolSetting.Builder()
-            .name("  营火")
-            .description("修正营火点燃状态（铲子熄灭/打火石点燃）")
+            .name("campfire")
+            .description("Fixes campfire lit state (shovel extinguish / flint ignite).")
             .defaultValue(true)
             .visible(fixInteractable::get)
             .build());
@@ -279,21 +279,21 @@ public class Printer extends Module {
     // ── 行为修正 · 流体 ──
 
     private final Setting<Boolean> placeFluid = sgFixes.add(new BoolSetting.Builder()
-            .name("流体修正")
-            .description("启用流体放置与含水修正")
+            .name("fluid-fix")
+            .description("Enables fluid placement and waterlogging correction.")
             .defaultValue(false)
             .build());
 
     private final Setting<Boolean> placeFluidSource = sgFixes.add(new BoolSetting.Builder()
-            .name("  水源放置")
-            .description("使用桶放置水/岩浆源")
+            .name("water-source")
+            .description("Places water/lava sources using buckets.")
             .defaultValue(true)
             .visible(placeFluid::get)
             .build());
 
     private final Setting<Boolean> fixWaterlog = sgFixes.add(new BoolSetting.Builder()
-            .name("  含水修正")
-            .description("为可含水方块添加水")
+            .name("waterlogging")
+            .description("Adds water to waterloggable blocks.")
             .defaultValue(true)
             .visible(placeFluid::get)
             .build());
@@ -301,27 +301,27 @@ public class Printer extends Module {
     // ── 行为修正 · 方块容忍与破坏 ──
 
     private final Setting<Boolean> tolerateDirt = sgFixes.add(new BoolSetting.Builder()
-            .name("泥土等价")
-            .description("泥土与草方块视为等价，可互换放置，不因不匹配而破坏")
+            .name("dirt-equivalent")
+            .description("Treats dirt and grass blocks as equivalent.")
             .defaultValue(true)
             .build());
 
     private final Setting<Boolean> breakMismatched = sgFixes.add(new BoolSetting.Builder()
-            .name("破坏不匹配")
-            .description("破坏与蓝图不匹配的方块（需 PacketMine 启用）")
+            .name("break-mismatch")
+            .description("Breaks blocks that don't match the schematic (requires PacketMine).")
             .defaultValue(false)
             .build());
 
     private final Setting<Boolean> tolerateExtraDirt = sgFixes.add(new BoolSetting.Builder()
-            .name("  容忍多余泥土")
-            .description("不破坏蓝图要求空气位的泥土/草方块")
+            .name("tolerate-extra-dirt")
+            .description("Don't break dirt/grass blocks where schematic expects air.")
             .defaultValue(false)
             .visible(breakMismatched::get)
             .build());
 
     private final Setting<Boolean> tolerateScaffolding = sgFixes.add(new BoolSetting.Builder()
-            .name("  容忍脚手架")
-            .description("不破坏蓝图要求空气位的脚手架")
+            .name("tolerate-scaffolding")
+            .description("Don't break scaffolding where schematic expects air.")
             .defaultValue(true)
             .visible(breakMismatched::get)
             .build());
@@ -332,49 +332,49 @@ public class Printer extends Module {
     // ── 容器填充 ──
 
     private final Setting<Boolean> fillContainers = sgContainer.add(new BoolSetting.Builder()
-            .name("启用容器填充")
-            .description("自动填充容器内容（发射器/投掷器/漏斗/木桶），Grim 安全")
+            .name("container-fill")
+            .description("Auto-fills container contents (dispenser/dropper/hopper/barrel), Grim safe.")
             .defaultValue(false)
             .build());
 
     private final Setting<ContainerFillManager.OverfillPolicy> overfillPolicy = sgContainer.add(new EnumSetting.Builder<ContainerFillManager.OverfillPolicy>()
-            .name("过填策略")
-            .description("FAST：整组搬运，最快但可能过填。PRECISE：逐个精确放置，不过填。")
+            .name("overfill-strategy")
+            .description("FAST=move whole stacks (fastest but may overfill). PRECISE=place one by one.")
             .defaultValue(ContainerFillManager.OverfillPolicy.PRECISE)
             .visible(fillContainers::get)
             .build());
 
     private final Setting<Boolean> containerHighlight = sgContainer.add(new BoolSetting.Builder()
-            .name("容器高亮")
-            .description("在世界中高亮未满足的蓝图容器")
+            .name("container-highlight")
+            .description("Highlights unfulfilled schematic containers in the world.")
             .defaultValue(true)
             .visible(fillContainers::get)
             .build());
 
     private final Setting<SettingColor> containerSideColor = sgContainer.add(new ColorSetting.Builder()
-            .name("容器面颜色")
-            .description("未满足容器高亮的面颜色")
+            .name("container-side-color")
+            .description("The side color for unfulfilled container highlight.")
             .defaultValue(new SettingColor(255, 100, 50, 40))
             .visible(() -> fillContainers.get() && containerHighlight.get())
             .build());
 
     private final Setting<SettingColor> containerLineColor = sgContainer.add(new ColorSetting.Builder()
-            .name("容器线颜色")
-            .description("未满足容器高亮的线颜色")
+            .name("container-line-color")
+            .description("The line color for unfulfilled container highlight.")
             .defaultValue(new SettingColor(255, 100, 50, 200))
             .visible(() -> fillContainers.get() && containerHighlight.get())
             .build());
 
     private final Setting<Boolean> containerOverlay = sgContainer.add(new BoolSetting.Builder()
-            .name("容器 HUD")
-            .description("屏幕 HUD 覆盖层显示容器类型统计与物品需求")
+            .name("container-hud")
+            .description("Screen HUD overlay showing container type stats and item requirements.")
             .defaultValue(true)
             .visible(fillContainers::get)
             .build());
 
     private final Setting<Integer> containerInfoRange = sgContainer.add(new IntSetting.Builder()
-            .name("详情范围")
-            .description("容器详情界面的查询范围（格）")
+            .name("detail-range")
+            .description("Query range for container detail view (blocks).")
             .defaultValue(64)
             .min(8)
             .sliderRange(8, 128)
@@ -382,8 +382,8 @@ public class Printer extends Module {
             .build());
 
     private final Setting<Keybind> containerScreenKey = sgContainer.add(new KeybindSetting.Builder()
-            .name("详情按键")
-            .description("按下打开容器填充详情界面")
+            .name("detail-key")
+            .description("Press to open container fill detail view.")
             .defaultValue(Keybind.none())
             .visible(fillContainers::get)
             .action(this::openContainerFillScreen)
@@ -392,81 +392,81 @@ public class Printer extends Module {
     // ── 渲染 ──
 
     private final Setting<Boolean> render = sgRender.add(new BoolSetting.Builder()
-            .name("渲染")
-            .description("渲染即将放置或交互的方块")
+            .name("render")
+            .description("Renders blocks about to be placed or interacted with.")
             .defaultValue(true)
             .build());
 
     private final Setting<ShapeMode> shapeMode = sgRender.add(new EnumSetting.Builder<ShapeMode>()
-            .name("形状模式")
-            .description("渲染形状")
+            .name("shape-mode")
+            .description("How the shapes are rendered.")
             .defaultValue(ShapeMode.Both)
             .build());
 
     private final Setting<SettingColor> sideColor = sgRender.add(new ColorSetting.Builder()
-            .name("放置面颜色")
-            .description("方块放置预览的面颜色")
+            .name("place-side-color")
+            .description("The side color for block placement preview.")
             .defaultValue(new SettingColor(20, 200, 20, 50))
             .build());
 
     private final Setting<SettingColor> lineColor = sgRender.add(new ColorSetting.Builder()
-            .name("放置线颜色")
-            .description("方块放置预览的线颜色")
+            .name("place-line-color")
+            .description("The line color for block placement preview.")
             .defaultValue(new SettingColor(20, 200, 20, 255))
             .build());
 
     private final Setting<SettingColor> behaviorSideColor = sgRender.add(new ColorSetting.Builder()
-            .name("修正面颜色")
-            .description("行为修正任务的面颜色")
+            .name("fix-side-color")
+            .description("The side color for correction tasks.")
             .defaultValue(new SettingColor(200, 160, 20, 50))
             .build());
 
     private final Setting<SettingColor> behaviorLineColor = sgRender.add(new ColorSetting.Builder()
-            .name("修正线颜色")
-            .description("行为修正任务的线颜色")
+            .name("fix-line-color")
+            .description("The line color for correction tasks.")
             .defaultValue(new SettingColor(200, 160, 20, 255))
             .build());
 
     private final Setting<SettingColor> plannedSideColor = sgRender.add(new ColorSetting.Builder()
-            .name("计划面颜色")
-            .description("当前计划放置目标的面颜色")
+            .name("plan-side-color")
+            .description("The side color for planned placement target.")
             .defaultValue(new SettingColor(20, 200, 255, 80))
             .build());
 
     private final Setting<SettingColor> plannedLineColor = sgRender.add(new ColorSetting.Builder()
-            .name("计划线颜色")
-            .description("当前计划放置目标的线颜色")
+            .name("plan-line-color")
+            .description("The line color for planned placement target.")
             .defaultValue(new SettingColor(20, 200, 255, 255))
             .build());
 
     private final Setting<Boolean> renderHitVec = sgRender.add(new BoolSetting.Builder()
-            .name("命中点")
-            .description("在方块放置命中点渲染小方块")
+            .name("hit-point")
+            .description("Renders a small block at the block placement hit point.")
             .defaultValue(true)
             .build());
 
     private final Setting<SettingColor> hitVecColor = sgRender.add(new ColorSetting.Builder()
-            .name("命中点颜色")
-            .description("命中点方块的颜色")
+            .name("hit-point-color")
+            .description("The color of the hit point block.")
             .defaultValue(new SettingColor(255, 100, 100, 255))
             .build());
 
     private final Setting<Boolean> renderUnsupported = sgRender.add(new BoolSetting.Builder()
-            .name("不支持方块")
-            .description("渲染与蓝图不同但无匹配行为的方块")
+            .name("unsupported-blocks")
+            .description("Renders blocks that differ from schematic but have no matching action.")
             .defaultValue(false)
             .build());
 
     private final Setting<SettingColor> unsupportedSideColor = sgRender.add(new ColorSetting.Builder()
-            .name("不支持面颜色")
-            .description("不支持方块的面颜色")
+            .name("unsupported-side-color")
+            .description("The side color for unsupported blocks.")
             .defaultValue(new SettingColor(255, 160, 0, 30))
             .visible(renderUnsupported::get)
             .build());
 
     private final Setting<SettingColor> unsupportedLineColor = sgRender.add(new ColorSetting.Builder()
-            .name("不支持线颜色")
-            .description("不支持方块的线颜色")
+            .name("unsupported-line-color")
+            .description("The line color for unsupported blocks.")
             .defaultValue(new SettingColor(255, 160, 0, 180))
             .visible(renderUnsupported::get)
             .build());
