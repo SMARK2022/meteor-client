@@ -9,6 +9,7 @@ import meteordevelopment.meteorclient.gui.renderer.GuiRenderer;
 import meteordevelopment.meteorclient.gui.utils.Cell;
 import meteordevelopment.meteorclient.gui.widgets.WRoot;
 import meteordevelopment.meteorclient.gui.widgets.containers.WVerticalList;
+import meteordevelopment.meteorclient.gui.widgets.containers.WView;
 import meteordevelopment.meteorclient.gui.widgets.pressable.WPressable;
 import net.minecraft.util.math.MathHelper;
 
@@ -81,6 +82,8 @@ public abstract class WDropdown<T> extends WPressable {
     @Override
     protected void onPressed(int button) {
         expanded = !expanded;
+        root.setFocused(expanded);
+        setFocused(expanded);
     }
 
     public T get() {
@@ -106,11 +109,16 @@ public abstract class WDropdown<T> extends WPressable {
         animProgress = MathHelper.clamp(animProgress, 0, 1);
 
         if (!render && animProgress > 0) {
-            renderer.absolutePost(() -> {
-                renderer.scissorStart(x, y + height, width, root.height * animProgress);
-                root.render(renderer, mouseX, mouseY, delta);
-                renderer.scissorEnd();
-            });
+            WView view = getView();
+            boolean rootInView = view == null || view.isWidgetInView(root);
+
+            if (rootInView) {
+                renderer.absolutePost(() -> {
+                    renderer.scissorStart(x, y + height, width, root.height * animProgress);
+                    root.render(renderer, mouseX, mouseY, delta);
+                    renderer.scissorEnd();
+                });
+            }
         }
 
         if (expanded && root.mouseOver) theme.disableHoverColor = true;
@@ -121,11 +129,12 @@ public abstract class WDropdown<T> extends WPressable {
     // Events
 
     @Override
-    public boolean onMouseClicked(double mouseX, double mouseY, int button, boolean used) {
+    public boolean onMouseClicked(double mouseX, double mouseY, int button, boolean doubled) {
+        boolean used = false;
         if (!mouseOver && !root.mouseOver) expanded = false;
 
-        if (super.onMouseClicked(mouseX, mouseY, button, used)) used = true;
-        if (expanded && root.mouseClicked(mouseX, mouseY, button, used)) used = true;
+        if (super.onMouseClicked(mouseX, mouseY, button, doubled)) used = true;
+        if (expanded && root.mouseClicked(mouseX, mouseY, button, doubled)) used = true;
 
         return used;
     }

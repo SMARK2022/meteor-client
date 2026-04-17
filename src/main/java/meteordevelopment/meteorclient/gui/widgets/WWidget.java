@@ -8,6 +8,7 @@ package meteordevelopment.meteorclient.gui.widgets;
 import meteordevelopment.meteorclient.gui.GuiTheme;
 import meteordevelopment.meteorclient.gui.renderer.GuiRenderer;
 import meteordevelopment.meteorclient.gui.utils.BaseWidget;
+import meteordevelopment.meteorclient.gui.widgets.containers.WView;
 
 public abstract class WWidget implements BaseWidget {
     public boolean visible = true;
@@ -21,6 +22,7 @@ public abstract class WWidget implements BaseWidget {
     public String tooltip;
 
     public boolean mouseOver;
+    public boolean focused;
     protected boolean instantTooltips;
     protected double mouseOverTimer;
 
@@ -74,7 +76,11 @@ public abstract class WWidget implements BaseWidget {
 
         if (isOver(mouseX, mouseY)) {
             mouseOverTimer += delta;
-            if ((instantTooltips || mouseOverTimer >= 1) && tooltip != null) renderer.tooltip(tooltip);
+
+            if ((instantTooltips || mouseOverTimer >= 1) && tooltip != null) {
+                WView view = getView();
+                if (view == null || view.mouseOver) renderer.tooltip(tooltip);
+            }
         }
         else {
             mouseOverTimer = 0;
@@ -88,10 +94,10 @@ public abstract class WWidget implements BaseWidget {
 
     // Events
 
-    public boolean mouseClicked(double mouseX, double mouseY, int button, boolean used) {
-        return onMouseClicked(mouseX, mouseY, button, used);
+    public boolean mouseClicked(double mouseX, double mouseY, int button, boolean doubled) {
+        return onMouseClicked(mouseX, mouseY, button, doubled);
     }
-    public boolean onMouseClicked(double mouseX, double mouseY, int button, boolean used) { return false; }
+    public boolean onMouseClicked(double mouseX, double mouseY, int button, boolean doubled) { return false; }
 
     public boolean mouseReleased(double mouseX, double mouseY, int button) {
         return onMouseReleased(mouseX, mouseY, button);
@@ -135,7 +141,19 @@ public abstract class WWidget implements BaseWidget {
         return parent != null ? parent.getRoot() : (this instanceof WRoot ? this : null);
     }
 
+    public WView getView() {
+        return this instanceof WView ? (WView) this : (parent != null ? parent.getView() : null);
+    }
+
     public boolean isOver(double x, double y) {
         return x >= this.x && x <= this.x + width && y >= this.y && y <= this.y + height;
+    }
+
+    public boolean isFocused() {
+        return focused;
+    }
+
+    public void setFocused(boolean focused) {
+        if (this.focused != focused) this.focused = focused;
     }
 }
