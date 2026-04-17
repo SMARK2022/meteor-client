@@ -37,11 +37,15 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  * 6. 同 tick 多个请求只做仲裁 (priority 越大越优先), loser 延期
  *
  * 生命周期:
- *   TickEvent.Pre        → 清理上一拍、重置窗口
- *   模块调用 rotate()    → 加入 pending 队列
- *   PlayerTickMovementEvent → 从 pending 中仲裁 winner, 预应用 yaw/pitch
- *   sendMovementPackets  → 带正确角度的 vanilla movement packet 发出
- *   SendMovementPacketsEvent.Post → 执行 winner callback, 恢复视角
+ *   TickEvent.Pre                → 清理上一拍、重置窗口
+ *   模块调用 rotate()            → 加入 pending 队列, resolver 立即求解一次
+ *   PlayerTickMovementEvent      → 仲裁 winner, resolver 重新求解 (pre-physics 精确角), 预应用 yaw/pitch
+ *   SendMovementPacketsEvent.Pre → 应用角度到 player, 执行 callback (Pre-Flying: 交互包在 Flying 前发出)
+ *   sendMovementPackets          → 带正确角度的 vanilla movement packet 发出
+ *   SendMovementPacketsEvent.Post → 恢复视角, 清理
+ *
+ * 旋转求解始终在 pre-physics 位置进行 — 与原版客户端一致 (旋转由鼠标在物理前确定),
+ * 也与 GrimAC 的检查位置 (lastClaimedPosition = 上 tick Flying 位置) 自洽。
  */
 public class Rotations {
     // ==================== 公共状态 (只读) ====================
@@ -80,18 +84,17 @@ public class Rotations {
 
     // ==================== 公共 API ====================
 
-    // ── 固定角度 API: 两阶段返回相同角度 ──
+    // ── 固定角度 API ──
 
     /**
      * 请求服务端语义旋转 (固定角度)。
      * priority 越大越优先。movement 阶段已过则自动 defer 到下一 tick。
-     * 两阶段 (PREVIEW / SEND_FINAL) 返回相同 yaw/pitch。
      */
     public static void rotate(double yaw, double pitch, int priority, Runnable callback) {
         if (mc.player == null) return;
         float y = (float) yaw, p = (float) pitch;
         pending.add(new RotationRequest(y, p, priority, callback, movementPhasePassed,
-            phase -> new AimSolution(y, p)));
+            () -> new AimSolution(y, p)));
     }
 
     /** 兼容旧 API — clientSide 参数已废弃 */
@@ -118,20 +121,20 @@ public class Rotations {
         if (mc.player == null) return;
         float y = yaw, p = pitch;
         pending.add(new RotationRequest(y, p, priority, callback, false,
-            phase -> new AimSolution(y, p)));
+            () -> new AimSolution(y, p)));
     }
 
-    // ── 目标坐标 API: getYaw/getPitch 在两阶段因 self 位置不同而自动精确 ──
+    // ── 目标坐标 API ──
 
     /**
      * 面向固定世界坐标的旋转。
-     * PREVIEW 阶段从 pre-physics 位置算近似角;
-     * SEND_FINAL 阶段从 post-physics 位置算精确角。
-     * 适用于水晶/方块等不移动的目标。
+     * 在注册时从当前 (pre-physics) 位置计算角度 — 与原版客户端一致:
+     * 原版的旋转在 pre-physics 时由鼠标确定, 不因本 tick 物理移动而改变。
+     * GrimAC 从旧位置 (lastClaimedPosition) 检查旋转, 因此 pre-physics 角度与之自洽。
      */
     public static void rotateToward(Vec3d target, int priority, Runnable callback) {
         if (mc.player == null) return;
-        rotateWith(phase -> new AimSolution(
+        rotateWith(() -> new AimSolution(
             (float) getYaw(target), (float) getPitch(target)
         ), priority, callback);
     }
@@ -139,34 +142,39 @@ public class Rotations {
     /** 固定坐标 + 确保本 tick 参与仲裁。供 Printer 等模块使用。 */
     public static void requestPreMovementToward(Vec3d target, int priority, Runnable callback) {
         if (mc.player == null) return;
-        requestPreMovementWith(phase -> new AimSolution(
+        requestPreMovementWith(() -> new AimSolution(
             (float) getYaw(target), (float) getPitch(target)
         ), priority, callback);
     }
 
-    // ── AimResolver API: 调用方在两阶段可分别重建完整 aim solution ──
+    // ── AimResolver API ──
 
     /**
      * 提交 AimResolver 驱动的旋转请求。
      * <p>
-     * PREVIEW  — PlayerTickMovementEvent 时调用: 近似角, 用于 MovementFix。
-     * SEND_FINAL — SendMovementPacketsEvent.Pre 时调用: 精确角, 直接进入 movement packet。
+     * resolver 在两个时刻被调用:
+     * <ul>
+     *   <li>注册时 — 立即求解一次, 用于仲裁排序 (yaw/pitch 初始值)</li>
+     *   <li>PlayerTickMovementEvent — winner 确定后重新求解, 获得 pre-physics 精确角度</li>
+     * </ul>
      * <p>
-     * 对于追踪移动实体的场景 (如 KillAura), 调用方应在 resolver 内重新读取
-     * 实体状态并重建 aim point, 以消除 pre-physics → post-physics 之间的自身位移误差。
+     * 所有求解均在 pre-physics 位置进行 — 这与原版客户端一致 (旋转在物理前确定),
+     * 也与 GrimAC 的 Reach/RotationPlace 检查位置 (lastClaimedPosition = 旧位置) 自洽。
+     * <p>
+     * 对于追踪移动实体 (如 KillAura), 建议 resolver 读取实体最新客户端插值位置。
      */
     public static void rotateWith(AimResolver resolver, int priority, Runnable callback) {
         if (mc.player == null) return;
-        AimSolution approx = resolver.resolve(SolvePhase.PREVIEW);
-        pending.add(new RotationRequest(approx.yaw(), approx.pitch(), priority, callback,
+        AimSolution aim = resolver.resolve();
+        pending.add(new RotationRequest(aim.yaw(), aim.pitch(), priority, callback,
             movementPhasePassed, resolver));
     }
 
     /** AimResolver + 确保本 tick 参与仲裁 (不 defer)。 */
     public static void requestPreMovementWith(AimResolver resolver, int priority, Runnable callback) {
         if (mc.player == null) return;
-        AimSolution approx = resolver.resolve(SolvePhase.PREVIEW);
-        pending.add(new RotationRequest(approx.yaw(), approx.pitch(), priority, callback,
+        AimSolution aim = resolver.resolve();
+        pending.add(new RotationRequest(aim.yaw(), aim.pitch(), priority, callback,
             false, resolver));
     }
 
@@ -216,10 +224,11 @@ public class Rotations {
             rotating = true;
             holdTimer = 0;
 
-            // 两阶段求解 — PREVIEW: 从 pre-physics 位置计算近似角度
-            AimSolution preview = active.resolver.resolve(SolvePhase.PREVIEW);
-            active.yaw = preview.yaw();
-            active.pitch = preview.pitch();
+            // 求解: winner 确定后从当前 (pre-physics) 位置重新计算精确角度
+            // 这是最终角度 — 与原版一致 (旋转在物理前由鼠标确定, 不因物理移动而改变)
+            AimSolution aim = active.resolver.resolve();
+            active.yaw = aim.yaw();
+            active.pitch = aim.pitch();
 
             // 更新逻辑记账
             serverYaw = active.yaw;
@@ -264,11 +273,9 @@ public class Rotations {
     private static void onSendMovementPacketsPre(SendMovementPacketsEvent.Pre event) {
         if (active == null || mc.player == null) return;
 
-        // 两阶段求解 — SEND_FINAL: 位置已定型 (post-physics), 计算精确角度
-        // 对于固定角度请求: 返回与 PREVIEW 相同的值 (幂等)
-        // 对于目标坐标请求: getYaw/getPitch 使用 post-physics self 位置, 角度更精确
-        // 对于 AimResolver 请求: 调用方完整重建 aim solution (目标 AABB + 预测 + aim point)
-        AimSolution finalAim = active.resolver.resolve(SolvePhase.SEND_FINAL);
+        // 使用 onPlayerTickMovement 中已求解的角度 (pre-physics 位置)
+        // 不再从 post-physics 位置重算 — 原版旋转在物理前确定,
+        // GrimAC 也从旧位置 (lastClaimedPosition) 检查, 与 pre-physics 角度自洽。
 
         // 鞘翅延迟注入: onPlayerTickMovement 未预应用, 此刻才第一次触碰 player yaw/pitch
         if (!appliedThisTick) {
@@ -277,22 +284,25 @@ public class Rotations {
             appliedThisTick = true;
         }
 
-        mc.player.setYaw(finalAim.yaw());
-        mc.player.setPitch(finalAim.pitch());
-        active.yaw = finalAim.yaw();
-        active.pitch = finalAim.pitch();
-        serverYaw = finalAim.yaw();
-        serverPitch = finalAim.pitch();
+        mc.player.setYaw(active.yaw);
+        mc.player.setPitch(active.pitch);
+        serverYaw = active.yaw;
+        serverPitch = active.pitch;
+
+        // 执行 winner 的 callback (Pre-Flying: 旋转已应用, movement packet 尚未发出)
+        // 交互包 (INTERACT_ENTITY, HAND_SWING 等) 必须在 Flying 包之前发出,
+        // 否则 GrimAC PacketOrderO 会将 Flying 后的非 async 包标记为违规。
+        // GrimAC Reach 使用"排队 + Flying 到达时检查"机制:
+        //   收到 INTERACT_ENTITY → 入队; 收到 Flying → 用 Flying 中的旋转做精确检测。
+        // 因此 INTERACT_ENTITY 在 Flying 之前发出不影响 Reach 判定。
+        if (active.callback != null) {
+            active.callback.run();
+        }
     }
 
     @EventHandler(priority = EventPriority.LOWEST)
     private static void onSendMovementPacketsPost(SendMovementPacketsEvent.Post event) {
         if (mc.player == null || mc.cameraEntity != mc.player) return;
-
-        // 执行 winner 的 callback (movement packet 已经发出)
-        if (active != null && active.callback != null) {
-            active.callback.run();
-        }
 
         // 恢复玩家原始视角 (silent rotation: 视觉上不强制转头)
         if (appliedThisTick) {
@@ -498,30 +508,24 @@ public class Rotations {
         rotationTimer = 0;
     }
 
-    // ==================== 两阶段瞄准求解 ====================
-
-    /** 求解阶段: PREVIEW (预应用, pre-physics) / SEND_FINAL (发包, post-physics) */
-    public enum SolvePhase { PREVIEW, SEND_FINAL }
+    // ==================== 瞄准求解 ====================
 
     /** 瞄准解 — 包含解算出的 yaw/pitch */
     public record AimSolution(float yaw, float pitch) {}
 
     /**
-     * 瞄准求解器 — 根据求解阶段返回瞄准角度。
+     * 瞄准求解器 — 从当前 (pre-physics) 状态计算旋转角度。
      * <p>
-     * Rotations 在每 tick 的两个时刻分别调用 resolver:
-     * <ul>
-     *   <li>PREVIEW — PlayerTickMovementEvent: pre-physics 位置, 近似角, 用于 MovementFix</li>
-     *   <li>SEND_FINAL — SendMovementPacketsEvent.Pre: post-physics 位置, 精确角, 直接进入 packet</li>
-     * </ul>
+     * Rotations 在每 tick 的 PlayerTickMovementEvent 时调用 resolver:
+     * 此时位置为 pre-physics (≈ 上 tick Flying 的位置), 与 GrimAC 的检查位置一致。
      * <p>
-     * 对于固定角度 ({@link #rotate(double, double, int, Runnable)}): 两阶段返回相同值。<br>
-     * 对于固定坐标 ({@link #rotateToward(Vec3d, int, Runnable)}): getYaw/getPitch 自动因 self 位置不同而精确。<br>
-     * 对于实体追踪 ({@link #rotateWith(AimResolver, int, Runnable)}): 调用方可在 SEND_FINAL 重建完整 aim solution。
+     * 对于固定角度 ({@link #rotate(double, double, int, Runnable)}): 返回常量。<br>
+     * 对于固定坐标 ({@link #rotateToward(Vec3d, int, Runnable)}): 从 pre-physics 位置计算。<br>
+     * 对于实体追踪 ({@link #rotateWith(AimResolver, int, Runnable)}): 读取实体当前位置计算。
      */
     @FunctionalInterface
     public interface AimResolver {
-        AimSolution resolve(SolvePhase phase);
+        AimSolution resolve();
     }
 
     // ==================== 内部数据结构 ====================

@@ -398,7 +398,7 @@ public class KillAura extends Module {
                 Entity approaching = findApproaching();
                 if (approaching != null) {
                     Rotations.rotateWith(
-                        phase -> solveEntityAim(approaching, true),
+                        () -> solveEntityAim(approaching, true),
                         30, null   // 低优先级, 无 callback (不攻击)
                     );
                 }
@@ -446,7 +446,7 @@ public class KillAura extends Module {
             // 就绪: 攻击瞄准使用实体当前 AABB（不做前置预测），100% GrimAC-safe
             if (rotation.get() != RotationMode.None) {
                 Rotations.rotateWith(
-                    phase -> solveEntityAim(primary, false),
+                    () -> solveEntityAim(primary, false),
                     100, () -> commitAttack(primary)
                 );
             } else {
@@ -455,7 +455,7 @@ public class KillAura extends Module {
         } else if (rotation.get() == RotationMode.Always) {
             // 未就绪: 用前置预测做软追踪，减少攻击瞬间旋转角
             Rotations.rotateWith(
-                phase -> solveEntityAim(primary, true),
+                () -> solveEntityAim(primary, true),
                 50, null
             );
         }
@@ -754,13 +754,10 @@ public class KillAura extends Module {
     /**
      * 构建实体追踪的瞄准解。
      * <p>
-     * AimResolver 在两个阶段分别调用本方法:
-     * <ul>
-     *   <li>PREVIEW — pre-physics 位置, mc.player.getEyePos() 为旧位置, 角度为近似</li>
-     *   <li>SEND_FINAL — post-physics 位置, mc.player.getEyePos() 为新位置, 角度为精确</li>
-     * </ul>
-     * 每次调用都从当前状态重新计算完整的 aim point + yaw/pitch,
-     * 而非复用 Pre 阶段的旧结果。这消除了 sprint/鞘翅下 self 位移导致的系统性角度偏差。
+     * AimResolver 在 PlayerTickMovementEvent 时调用:
+     * mc.player 位置为 pre-physics (≈ 上 tick Flying 位置), 与 GrimAC Reach 检查位置一致。
+     * <p>
+     * 每次调用从当前状态重新计算完整的 aim point + yaw/pitch。
      *
      * @param applyPrediction true=使用前置预测（软追踪用），false=瞄当前AABB（攻击用，GrimAC-safe）
      */
