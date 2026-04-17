@@ -142,22 +142,6 @@ public abstract class WContainer extends WWidget {
             widget.mouseOver = false;
         }
 
-        return true
-        return false;
-    }
-
-    protected void renderWidget(WWidget widget, GuiRenderer renderer, double mouseX, double mouseY, double delta) {
-        widget.render(renderer, mouseX, mouseY, delta);
-    }
-
-    private boolean shouldRenderWidget(WWidget widget, WView view) {
-        if (view == null) return true;
-        if (!view.isWidgetInView(widget)) return false;
-
-        if (widget.mouseOver && !view.mouseOver) {
-            widget.mouseOver = false;
-        }
-
         return true;
     }
 
