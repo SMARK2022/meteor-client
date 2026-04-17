@@ -19,6 +19,7 @@ import meteordevelopment.meteorclient.utils.entity.EntityUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.LivingEntity;
+import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.item.MaceItem;
 import net.minecraft.network.packet.c2s.play.HandSwingC2SPacket;
 import net.minecraft.network.packet.c2s.play.PlayerInteractEntityC2SPacket;
@@ -125,6 +126,18 @@ public class Criticals extends Module {
                             event.cancel();
                         }
                     }
+                    case GrimSafe -> {
+                        if (!sendPackets) {
+                            sendPackets = true;
+                            attackPacket = (PlayerInteractEntityC2SPacket) event.packet;
+                            // 通过输入系统触发跳跃 → PLAYER_INPUT(jump=true) → GrimAC 合法预测
+                            mc.options.jumpKey.setPressed(true);
+                            waitingForPeak = true;
+                            lastY = mc.player.getY();
+                            sendTimer = 20; // 超时: 1秒
+                            event.cancel();
+                        }
+                    }
                 }
             }
         }
@@ -140,33 +153,45 @@ public class Criticals extends Module {
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
-        if (sendPackets) {
-            if (mode.get() == Mode.Jump && waitingForPeak) {
-                double currentY = mc.player.getY();
-                if (currentY <= lastY) {
-                    waitingForPeak = false;
-                    sendTimer = 0; // Attack on next tick after reaching peak
-                }
-                lastY = currentY;
+        if (!sendPackets) return;
+
+        // Phase 1: 等待跳跃峰值 (Jump 和 GrimSafe 模式)
+        if ((mode.get() == Mode.Jump || mode.get() == Mode.GrimSafe) && waitingForPeak) {
+            double currentY = mc.player.getY();
+            if (currentY <= lastY) {
+                waitingForPeak = false;
+                if (mode.get() == Mode.Jump) sendTimer = 0;
+                // GrimSafe: sendTimer 保持作为超时计数
+            }
+            lastY = currentY;
+            return;
+        }
+
+        // Phase 2a: GrimSafe — 等待暴击条件满足或超时
+        if (mode.get() == Mode.GrimSafe) {
+            if (!canCritNow() && sendTimer > 0) {
+                sendTimer--;
                 return;
             }
-
-            if (sendTimer <= 0) {
-                if (attackPacket == null || swingPacket == null) {
-                    sendPackets = false;
-                    return;
-                }
-                mc.getNetworkHandler().sendPacket(attackPacket);
-                mc.getNetworkHandler().sendPacket(swingPacket);
-
-                attackPacket = null;
-                swingPacket = null;
-
-                sendPackets = false;
-            } else {
-                sendTimer--;
-            }
+            // canCritNow() 为 true 或已超时 → 进入发送阶段
         }
+        // Phase 2b: 其他模式 — 等待计时器归零
+        else if (sendTimer > 0) {
+            sendTimer--;
+            return;
+        }
+
+        // Phase 3: 发送存储的数据包
+        if (attackPacket == null || swingPacket == null) {
+            sendPackets = false;
+            return;
+        }
+        mc.getNetworkHandler().sendPacket(attackPacket);
+        mc.getNetworkHandler().sendPacket(swingPacket);
+
+        attackPacket = null;
+        swingPacket = null;
+        sendPackets = false;
     }
 
     private void sendPacket(double height) {
@@ -180,8 +205,17 @@ public class Criticals extends Module {
         mc.player.networkHandler.sendPacket(packet);
     }
 
+    private boolean canCritNow() {
+        return mc.player.fallDistance > 0
+            && !mc.player.isOnGround()
+            && !mc.player.isClimbing()
+            && !mc.player.isTouchingWater()
+            && !mc.player.hasStatusEffect(StatusEffects.BLINDNESS)
+            && !mc.player.hasVehicle();
+    }
+
     private boolean skipCrit() {
-        if (EntityUtils.isInCobweb(mc.player) && (mode.get() == Mode.Jump || mode.get() == Mode.MiniJump))
+        if (EntityUtils.isInCobweb(mc.player) && (mode.get() == Mode.Jump || mode.get() == Mode.MiniJump || mode.get() == Mode.GrimSafe))
             return true;
 
         return !mc.player.isOnGround() || mc.player.isSubmergedInWater() || mc.player.isInLava() || mc.player.isClimbing();
@@ -197,6 +231,7 @@ public class Criticals extends Module {
         Packet,
         Bypass,
         Jump,
-        MiniJump
+        MiniJump,
+        GrimSafe
     }
 }
