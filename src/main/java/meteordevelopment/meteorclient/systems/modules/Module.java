@@ -31,8 +31,8 @@ public abstract class Module implements ISerializable<Module>, Comparable<Module
 
     public final Category category;
     public final String name;
-    public final String title;
-    public final String description;
+    public String title;
+    public String description;
     public final String[] aliases;
     public final Color color;
 

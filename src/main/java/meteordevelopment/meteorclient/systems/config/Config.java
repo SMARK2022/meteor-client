@@ -12,6 +12,7 @@ import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.System;
 import meteordevelopment.meteorclient.systems.Systems;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.utils.TranslationHelper;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import net.minecraft.nbt.NbtCompound;
 import net.minecraft.nbt.NbtElement;
@@ -30,6 +31,7 @@ public class Config extends System<Config> {
     private final SettingGroup sgModules = settings.createGroup("Modules");
     private final SettingGroup sgChat = settings.createGroup("Chat");
     private final SettingGroup sgMisc = settings.createGroup("Misc");
+    private final SettingGroup sgTranslation = settings.createGroup("Translation");
 
     // Visual
 
@@ -156,6 +158,16 @@ public class Config extends System<Config> {
         .name("use-team-color")
         .description("Uses player's team color for rendering things like esp and tracers.")
         .defaultValue(true)
+        .build()
+    );
+
+    // Translation
+
+    public final Setting<Boolean> translateModules = sgTranslation.add(new BoolSetting.Builder()
+        .name("translate-modules")
+        .description("Translate module names and descriptions to the current game language.")
+        .defaultValue(true)
+        .onChanged(TranslationHelper::onConfigChanged)
         .build()
     );
 
