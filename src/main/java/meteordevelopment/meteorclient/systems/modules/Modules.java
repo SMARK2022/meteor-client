@@ -461,12 +461,10 @@ public class Modules extends System<Modules> {
         add(new AutoWalk());
         add(new AutoWasp());
         add(new Blink());
-        add(new BoatFly());
         add(new ClickTP());
         add(new ElytraBoost());
         add(new ElytraFly());
         add(new EntityControl());
-        add(new EntitySpeed());
         add(new FastClimb());
         add(new Flight());
         add(new GUIMove());
