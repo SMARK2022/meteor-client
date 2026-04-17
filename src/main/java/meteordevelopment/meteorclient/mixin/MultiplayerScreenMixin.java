@@ -73,12 +73,6 @@ public abstract class MultiplayerScreenMixin extends Screen {
         proxies.setPosition(this.width - 75 - 3 - 75 - 2, 3);
     }
 
-    @Inject(method = "refreshWidgetPositions", at = @At("TAIL"))
-    private void onRefreshWidgetPositions(CallbackInfo info) {
-        if (accounts != null) accounts.setPosition(this.width - 75 - 3, 3);
-        if (proxies != null) proxies.setPosition(this.width - 75 - 3 - 75 - 2, 3);
-    }
-
     @Inject(method = "render", at = @At("TAIL"))
     private void onRender(DrawContext context, int mouseX, int mouseY, float delta, CallbackInfo ci) {
         int x = 3;
