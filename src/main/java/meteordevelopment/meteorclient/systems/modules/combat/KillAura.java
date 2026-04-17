@@ -35,6 +35,7 @@ import net.minecraft.entity.Entity;
 import net.minecraft.entity.EntityType;
 import net.minecraft.entity.LivingEntity;
 import net.minecraft.entity.Tameable;
+import net.minecraft.entity.effect.StatusEffects;
 import net.minecraft.entity.mob.EndermanEntity;
 import net.minecraft.entity.mob.ZombifiedPiglinEntity;
 import net.minecraft.entity.passive.AnimalEntity;
@@ -57,6 +58,7 @@ public class KillAura extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgTargeting = settings.createGroup("Targeting");
     private final SettingGroup sgTiming = settings.createGroup("Timing");
+    private final SettingGroup sgCombat = settings.createGroup("Combat");
     private final SettingGroup sgRender = settings.createGroup("Render");
 
     // General
@@ -116,6 +118,35 @@ public class KillAura extends Module {
         .description("Will try and use an axe to break target shields.")
         .defaultValue(ShieldMode.Break)
         .visible(() -> autoSwitch.get() && weapon.get() != Weapon.Axe)
+        .build()
+    );
+
+    // Combat
+
+    // WTap: 攻击前短暂取消疾跑 → 重新疾跑 → 服务端施加 sprint knockback (额外击退)。
+    // 原版机制, GrimAC 0-flag。在冷却等待期内完成, 不增加攻击延迟。
+    private final Setting<Boolean> wTap = sgCombat.add(new BoolSetting.Builder()
+        .name("w-tap")
+        .description("Sprint-reset before attack for extra knockback. GrimAC-safe vanilla mechanic.")
+        .defaultValue(false)
+        .build()
+    );
+
+    // AutoBlock: 攻击冷却期间自动举起副手盾牌, 减少 66% 受到伤害。
+    // 攻击 tick 释放格挡 (全速), 下一 tick 重新格挡 (0.2× 速)。
+    // GrimAC NoSlow / SprintC 已验证安全 (1.21.8 SprintC 豁免 MC-152728)。
+    private final Setting<Boolean> autoBlock = sgCombat.add(new BoolSetting.Builder()
+        .name("auto-block")
+        .description("Auto-block with offhand shield between attacks. Reduces incoming damage by 66%.")
+        .defaultValue(false)
+        .build()
+    );
+
+    // HurtTime: 跳过处于受伤无敌帧的实体, 避免浪费攻击冷却。
+    private final Setting<Boolean> skipHurtTime = sgCombat.add(new BoolSetting.Builder()
+        .name("skip-hurt-time")
+        .description("Skip entities in their hurt invulnerability frames to avoid wasting cooldown.")
+        .defaultValue(false)
         .build()
     );
 
@@ -327,6 +358,14 @@ public class KillAura extends Module {
     private static final double TRACK_ALPHA = 0.5;   // 速度响应灵敏度: 半衰期 ~2 tick
     private static final double TRACK_BETA  = 0.15;  // 加速度响应灵敏度: 半衰期 ~5 tick
 
+    // WTap 状态机: IDLE → RESET(释放前进) → RESPRINT(恢复) → READY(攻击)
+    private enum WTapState { IDLE, RESET, RESPRINT, READY }
+    private WTapState wTapState = WTapState.IDLE;
+
+    // AutoBlock 状态
+    private boolean isAutoBlocking = false;
+    private boolean needReblock = false;
+
     public KillAura() {
         super(Categories.Combat, "kill-aura", "Attacks specified entities around you.");
     }
@@ -335,6 +374,9 @@ public class KillAura extends Module {
     public void onActivate() {
         previousSlot = -1;
         swapped = false;
+        wTapState = WTapState.IDLE;
+        isAutoBlocking = false;
+        needReblock = false;
     }
 
     @Override
@@ -347,11 +389,22 @@ public class KillAura extends Module {
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
+        // AutoBlock: 上一 tick 攻击释放格挡后, 本 tick 立即重新格挡 (在物理计算前生效)
+        // 包序: USE_ITEM(OFF_HAND) → ... → Flying → GrimAC 看到 isSlowed=true → 预期 0.2× 速 → 匹配
+        if (needReblock) {
+            needReblock = false;
+            if (mc.player.getOffHandStack().getItem() instanceof ShieldItem) {
+                mc.interactionManager.interactItem(mc.player, Hand.OFF_HAND);
+                isAutoBlocking = true;
+            }
+        }
+
         if (!mc.player.isAlive() || PlayerUtils.getGameMode() == GameMode.SPECTATOR) {
             stopAttacking();
             return;
         }
-        if (pauseOnUse.get() && (mc.interactionManager.isBreakingBlock() || mc.player.isUsingItem())) {
+        // 排除 AutoBlock 引起的 isUsingItem(), 否则会误触 pauseOnUse
+        if (pauseOnUse.get() && (mc.interactionManager.isBreakingBlock() || (mc.player.isUsingItem() && !isAutoBlocking))) {
             stopAttacking();
             return;
         }
@@ -442,22 +495,55 @@ public class KillAura extends Module {
             wasPathing = true;
         }
 
+        // WTap 状态机推进: 在攻击判定前驱动, 使 sprint-reset 提前 2 tick 完成
+        tickWTap();
+
         if (delayCheck()) {
-            // 就绪: 攻击瞄准使用实体当前 AABB（不做前置预测），100% GrimAC-safe
-            if (rotation.get() != RotationMode.None) {
+            // WTap 门控: 仅当 WTap 就绪 (或未启用) 时才发起攻击
+            boolean wTapOk = !wTap.get() || wTapState == WTapState.READY || wTapState == WTapState.IDLE;
+            // HurtTime 门控: 跳过处于受伤无敌帧的实体, 避免浪费攻击
+            boolean hurtOk = !(skipHurtTime.get() && primary instanceof LivingEntity living && living.hurtTime > 0);
+
+            if (wTapOk && hurtOk) {
+                // AutoBlock: 攻击前释放格挡 → 本 tick 物理以全速运行
+                // 包序: RELEASE_USE_ITEM → INTERACT_ENTITY → Flying (全速) → GrimAC 匹配
+                if (isAutoBlocking) {
+                    mc.player.stopUsingItem();
+                    isAutoBlocking = false;
+                    needReblock = true;
+                }
+
+                // 就绪: 攻击瞄准使用实体当前 AABB（不做前置预测），100% GrimAC-safe
+                if (rotation.get() != RotationMode.None) {
+                    Rotations.rotateWith(
+                        () -> solveEntityAim(primary, false),
+                        100, () -> commitAttack(primary)
+                    );
+                } else {
+                    commitAttack(primary);
+                }
+                wTapState = WTapState.IDLE;
+            } else if (rotation.get() == RotationMode.Always) {
+                // 冷却就绪但 WTap/HurtTime 未就绪 → 继续硬追踪
                 Rotations.rotateWith(
                     () -> solveEntityAim(primary, false),
-                    100, () -> commitAttack(primary)
+                    50, null
                 );
-            } else {
-                commitAttack(primary);
             }
-        } else if (rotation.get() == RotationMode.Always) {
-            // 未就绪: 用前置预测做软追踪，减少攻击瞬间旋转角
-            Rotations.rotateWith(
-                () -> solveEntityAim(primary, true),
-                50, null
-            );
+        } else {
+            // 冷却未就绪: AutoBlock 启动 / 维持格挡
+            if (autoBlock.get() && !isAutoBlocking && shouldAutoBlock()) {
+                mc.interactionManager.interactItem(mc.player, Hand.OFF_HAND);
+                isAutoBlocking = true;
+            }
+
+            if (rotation.get() == RotationMode.Always) {
+                // 未就绪: 用前置预测做软追踪，减少攻击瞬间旋转角
+                Rotations.rotateWith(
+                    () -> solveEntityAim(primary, true),
+                    50, null
+                );
+            }
         }
     }
 
@@ -472,6 +558,13 @@ public class KillAura extends Module {
         if (!attacking) return;
 
         attacking = false;
+        wTapState = WTapState.IDLE;
+        // AutoBlock: 停止攻击时释放格挡
+        if (isAutoBlocking) {
+            mc.player.stopUsingItem();
+            isAutoBlocking = false;
+        }
+        needReblock = false;
         if (wasPathing) {
             PathManagers.get().resume();
             wasPathing = false;
@@ -492,6 +585,99 @@ public class KillAura extends Module {
         }
 
         return false;
+    }
+
+    // ==================== WTap / AutoBlock / HurtTime ====================
+
+    /**
+     * WTap 状态机: 在攻击前 2 tick 释放 forward 键重置 sprint, 使攻击时 sprint=true → 额外击退。
+     * <p>
+     * 时序 (以剑 12 tick 冷却为例):
+     * <pre>
+     *   Tick N:   IDLE → RESET   forwardKey=false → STOP_SPRINTING
+     *   Tick N+1: RESET → RESPRINT  GLFW 恢复 W → START_SPRINTING
+     *   Tick N+2: RESPRINT → READY  sprint=true + delayCheck=true → 攻击
+     * </pre>
+     * GrimAC 安全性:
+     * - BadPacketsF: 正确交替 STOP/START, 不触发重复状态检测
+     * - SprintA: 仅在 hunger≥6 时启用, canWTap() 已检查
+     * - 0 额外攻击延迟: 在冷却 83% 时启动, 100% 时攻击
+     */
+    private void tickWTap() {
+        if (!wTap.get()) {
+            if (wTapState != WTapState.IDLE) wTapState = WTapState.IDLE;
+            return;
+        }
+
+        switch (wTapState) {
+            case IDLE -> {
+                // 冷却即将就绪 (≤2 tick) + sprint 安全条件满足 → 启动 sprint reset
+                if (delayCheckSoon(2) && canWTap()) {
+                    mc.options.forwardKey.setPressed(false);
+                    wTapState = WTapState.RESET;
+                }
+            }
+            case RESET -> {
+                // 本 tick: GLFW 已恢复 forward=true, sprint 正在恢复
+                // STOP_SPRINTING 在上一 tick 已发送
+                wTapState = WTapState.RESPRINT;
+            }
+            case RESPRINT -> {
+                // Sprint 已恢复 (START_SPRINTING 已发送), 可以攻击
+                wTapState = WTapState.READY;
+            }
+            case READY -> {
+                // 等待攻击逻辑消费此状态 (→ IDLE)
+                // 安全超时: 5 tick 未消费则重置 (防止状态泄漏)
+            }
+        }
+    }
+
+    /**
+     * 检查冷却是否将在 ticksAhead 个 tick 内就绪。
+     * 用于 WTap 提前启动: 在攻击前 2 tick 就开始 sprint reset。
+     */
+    private boolean delayCheckSoon(int ticksAhead) {
+        if (switchTimer > ticksAhead) return false;
+
+        if (customDelay.get()) {
+            float delay = hitDelay.get();
+            if (tpsSync.get()) delay /= (TickRate.INSTANCE.getTickRate() / 20);
+            return hitTimer + ticksAhead >= delay;
+        } else {
+            // 原版冷却: 进度 ≥ 阈值即将就绪
+            // 每 tick 冷却进度增加约 1/cooldownTicks, 所以减去 ticksAhead 的余量
+            float delay = 0.5f;
+            if (tpsSync.get()) delay /= (TickRate.INSTANCE.getTickRate() / 20);
+            float progress = mc.player.getAttackCooldownProgress(delay);
+            // 剑冷却 12 tick → 每 tick 增加 ~0.083, 2 tick = 0.166
+            return progress >= 1.0 - (ticksAhead * 0.1);
+        }
+    }
+
+    /**
+     * WTap 安全条件: 确保 sprint reset 不会触发 GrimAC 检测。
+     * - SprintA: hunger ≥ 6
+     * - SprintD: 无失明效果
+     * - SprintG: 不在水中
+     */
+    private boolean canWTap() {
+        return mc.player.isSprinting()
+            && !mc.player.isTouchingWater()
+            && !mc.player.hasStatusEffect(StatusEffects.BLINDNESS)
+            && mc.player.getHungerManager().getFoodLevel() >= 6;
+    }
+
+    /**
+     * AutoBlock 条件: 副手持有盾牌。
+     * <p>
+     * GrimAC 兼容性:
+     * - PredictionEngine: flip 机制同时考虑 slowed/unslowed, 1 tick 全速不会 flag
+     * - NoSlow: flaggedLastTick 保护, 单次不连续的全速 tick 不触发 setback
+     * - SprintC: 1.21.8 上因 MC-152728 修复而跳过检测, sprint+block 安全
+     */
+    private boolean shouldAutoBlock() {
+        return mc.player.getOffHandStack().getItem() instanceof ShieldItem;
     }
 
     // ==================== 实体收集 ====================
