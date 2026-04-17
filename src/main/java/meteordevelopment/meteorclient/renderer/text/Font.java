@@ -17,24 +17,37 @@ import org.lwjgl.system.MemoryStack;
 
 import java.nio.ByteBuffer;
 import java.nio.IntBuffer;
+import java.util.ArrayList;
+import java.util.List;
 
 public class Font {
-    public final Texture texture;
+    public Texture texture;
     private final int height;
     private final float scale;
     private final float ascent;
     private final Int2ObjectOpenHashMap<CharData> charMap = new Int2ObjectOpenHashMap<>();
     private static final int size = 2048;
 
+    // Retained for lazy character loading
+    private final ByteBuffer buffer;
+    private final ByteBuffer bitmap;
+    private final STBTTPackContext packContext;
+
+    // Rate limiting for lazy loading
+    private long loadTimer = 0;
+    private int loadCount = 0;
+    private static final int LOAD_SPEED_LIMIT = 7;
+
     public Font(ByteBuffer buffer, int height) {
+        this.buffer = buffer;
         this.height = height;
 
         // Initialize font
         STBTTFontinfo fontInfo = STBTTFontinfo.create();
         STBTruetype.stbtt_InitFont(fontInfo, buffer);
 
-        // Allocate buffers
-        ByteBuffer bitmap = BufferUtils.createByteBuffer(size * size);
+        // Allocate bitmap buffer (retained for lazy loading)
+        bitmap = BufferUtils.createByteBuffer(size * size);
         STBTTPackedchar.Buffer[] cdata = {
             STBTTPackedchar.create(95), // Basic Latin
             STBTTPackedchar.create(96), // Latin 1 Supplement
@@ -44,9 +57,9 @@ public class Font {
             STBTTPackedchar.create(1) // infinity symbol
         };
 
-        // create and initialise packing context
-        STBTTPackContext packContext = STBTTPackContext.create();
-        STBTruetype.stbtt_PackBegin(packContext, bitmap, size, size, 0 ,1);
+        // Create and initialise packing context (retained for lazy loading)
+        packContext = STBTTPackContext.create();
+        STBTruetype.stbtt_PackBegin(packContext, bitmap, size, size, 0, 1);
 
         // create the pack range, populate with the specific packing ranges
         STBTTPackRange.Buffer packRange = STBTTPackRange.create(cdata.length);
@@ -58,9 +71,8 @@ public class Font {
         packRange.put(STBTTPackRange.create().set(height, 8734, null, 1, cdata[5], (byte) 2, (byte) 2)); // lol
         packRange.flip();
 
-        // write and finish
+        // Pack pre-loaded character ranges (do NOT call stbtt_PackEnd — keep context open)
         STBTruetype.stbtt_PackFontRanges(packContext, buffer, 0, packRange);
-        STBTruetype.stbtt_PackEnd(packContext);
 
         // Create texture object and get font scale
         texture = new Texture(size, size, TextureFormat.RED8, FilterMode.LINEAR, FilterMode.LINEAR);
@@ -81,7 +93,7 @@ public class Font {
             for (int j = 0; j < cbuf.capacity(); j++) {
                 STBTTPackedchar packedChar = cbuf.get(j);
 
-                float ipw = 1f / size; // pixel width and height
+                float ipw = 1f / size;
                 float iph = 1f / size;
 
                 charMap.put(j + offset, new CharData(
@@ -99,8 +111,74 @@ public class Font {
         }
     }
 
+    /**
+     * Attempt to lazily load any missing characters in the given string.
+     * @return true if there are still characters being loaded (caller should skip rendering this frame)
+     */
+    public boolean tryLoadString(String s) {
+        List<Integer> missing = null;
+        for (int i = 0; i < s.length(); i++) {
+            int cp = s.charAt(i);
+            if (!charMap.containsKey(cp)) {
+                if (missing == null) missing = new ArrayList<>();
+                missing.add(cp);
+            }
+        }
+        if (missing == null) return false;
+
+        // Rate limiting: max LOAD_SPEED_LIMIT batches per 100ms
+        long now = System.currentTimeMillis();
+        if (now - loadTimer > 100) {
+            loadTimer = now;
+            loadCount = 0;
+        }
+        if (loadCount >= LOAD_SPEED_LIMIT) return true;
+
+        for (int cp : missing) {
+            loadCharacter(cp);
+        }
+        rebuildTexture();
+        loadCount++;
+        return false;
+    }
+
+    private void loadCharacter(int codePoint) {
+        if (charMap.containsKey(codePoint)) return;
+
+        STBTTPackedchar.Buffer cdata = STBTTPackedchar.create(1);
+
+        STBTTPackRange.Buffer packRange = STBTTPackRange.create(1);
+        packRange.put(STBTTPackRange.create().set(height, codePoint, null, 1, cdata, (byte) 2, (byte) 2));
+        packRange.flip();
+
+        STBTruetype.stbtt_PackFontRanges(packContext, buffer, 0, packRange);
+
+        STBTTPackedchar packedChar = cdata.get(0);
+        float ipw = 1f / size;
+        float iph = 1f / size;
+
+        charMap.put(codePoint, new CharData(
+            packedChar.xoff(),
+            packedChar.yoff(),
+            packedChar.xoff2(),
+            packedChar.yoff2(),
+            packedChar.x0() * ipw,
+            packedChar.y0() * iph,
+            packedChar.x1() * ipw,
+            packedChar.y1() * iph,
+            packedChar.xadvance()
+        ));
+    }
+
+    private void rebuildTexture() {
+        texture.close();
+        texture = new Texture(size, size, TextureFormat.RED8, FilterMode.LINEAR, FilterMode.LINEAR);
+        texture.upload(bitmap);
+    }
+
     public double getWidth(String string, int length) {
         double width = 0;
+        if (tryLoadString(string)) return width;
 
         for (int i = 0; i < length; i++) {
             int cp = string.charAt(i);
@@ -118,6 +196,8 @@ public class Font {
     }
 
     public double render(MeshBuilder mesh, String string, double x, double y, Color color, double scale) {
+        if (tryLoadString(string)) return x;
+
         y += ascent * this.scale * scale;
 
         int length = string.length();
