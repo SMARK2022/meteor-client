@@ -134,6 +134,8 @@ public abstract class WidgetScreen extends Screen {
         mouseX *= s;
         mouseY *= s;
 
+        if (debug && button == GLFW_MOUSE_BUTTON_RIGHT) DEBUG_RENDERER.mouseReleased(root, mouseX, mouseY, 0);
+
         return root.mouseReleased(mouseX, mouseY, button);
     }
 

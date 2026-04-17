@@ -2,55 +2,81 @@
  * This file is part of the Meteor Client distribution (https://github.com/MeteorDevelopment/meteor-client).
  * Copyright (c) Meteor Development.
  */
-
 package meteordevelopment.meteorclient.utils.render;
 
+import it.unimi.dsi.fastutil.objects.ObjectOpenHashSet;
 import meteordevelopment.meteorclient.MeteorClient;
 import meteordevelopment.meteorclient.renderer.Fonts;
 import meteordevelopment.meteorclient.renderer.text.*;
-import meteordevelopment.meteorclient.utils.Utils;
+import meteordevelopment.meteorclient.utils.files.ByteBufferUtils;
 import net.minecraft.util.Util;
 import org.lwjgl.BufferUtils;
 import org.lwjgl.stb.STBTTFontinfo;
 import org.lwjgl.stb.STBTruetype;
 
 import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileNotFoundException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
+import java.nio.channels.Channels;
+import java.nio.channels.ReadableByteChannel;
 import java.nio.charset.StandardCharsets;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-public class FontUtils {
-    private FontUtils() {
-    }
+public final class FontUtils {
+    private FontUtils() {}
 
     public static FontInfo getSysFontInfo(File file) {
-        return getFontInfo(stream(file));
+        return getFontInfo(file);
     }
 
     public static FontInfo getBuiltinFontInfo(String builtin) {
-        return getFontInfo(stream(builtin));
+        return getFontInfo(builtinFontStream(builtin));
     }
 
+    /**
+     * System font path: avoid heap byte[] by reading the file into a direct buffer.
+     */
+    private static FontInfo getFontInfo(File file) {
+        if (file == null || !file.isFile()) return null;
+
+        try {
+            return getFontInfo(ByteBufferUtils.readFully(file.toPath(), BufferUtils::createByteBuffer));
+        } catch (Exception e) {
+            MeteorClient.LOG.warn("Failed to read font file: {}", file, e);
+            return null;
+        }
+    }
+
+    /**
+     * Builtin/resource path: stream into a direct buffer (no byte[] intermediate).
+     */
     public static FontInfo getFontInfo(InputStream stream) {
         if (stream == null) return null;
 
-        byte[] bytes = Utils.readBytes(stream);
-        if (bytes.length < 5) return null;
+        try (ReadableByteChannel ch = Channels.newChannel(stream)) {
+            ByteBuffer buf = ByteBufferUtils.readFully(ch, BufferUtils::createByteBuffer);
+            return getFontInfo(buf);
+        } catch (Exception e) {
+            MeteorClient.LOG.warn("Failed to read font stream.", e);
+            return null;
+        }
+    }
+
+    /**
+     * Core logic: interpret font data from a ByteBuffer.
+     */
+    private static FontInfo getFontInfo(ByteBuffer buffer) {
+        if (buffer.remaining() < 5) return null;
 
         if (
-            bytes[0] != 0 ||
-            bytes[1] != 1 ||
-            bytes[2] != 0 ||
-            bytes[3] != 0 ||
-            bytes[4] != 0
+            buffer.get(0) != 0 ||
+                buffer.get(1) != 1 ||
+                buffer.get(2) != 0 ||
+                buffer.get(3) != 0 ||
+                buffer.get(4) != 0
         ) return null;
 
-        ByteBuffer buffer = BufferUtils.createByteBuffer(bytes.length).put(bytes).flip();
         STBTTFontinfo fontInfo = STBTTFontinfo.create();
         if (!STBTruetype.stbtt_InitFont(fontInfo, buffer)) return null;
 
@@ -65,7 +91,7 @@ public class FontUtils {
     }
 
     public static Set<String> getSearchPaths() {
-        Set<String> paths = new HashSet<>();
+        Set<String> paths = new ObjectOpenHashSet<>();
         paths.add(System.getProperty("java.home") + "/lib/fonts");
 
         for (File dir : getUFontDirs()) {
@@ -136,7 +162,7 @@ public class FontUtils {
         }
     }
 
-    public static boolean addFont(List<FontFamily> fontList, FontFace font) {
+    private static boolean addFont(List<FontFamily> fontList, FontFace font) {
         if (font == null) return false;
 
         FontInfo info = font.info;
@@ -152,17 +178,7 @@ public class FontUtils {
         return family.addFont(font);
     }
 
-    public static InputStream stream(String builtin) {
-        return FontUtils.class.getResourceAsStream("/assets/" + MeteorClient.MOD_ID + "/fonts/" + builtin + ".ttf");
-    }
-
-    public static InputStream stream(File file) {
-        try {
-            return new FileInputStream(file);
-        }
-        catch (FileNotFoundException e) {
-            e.printStackTrace();
-            return null;
-        }
+    public static InputStream builtinFontStream(String name) {
+        return FontUtils.class.getResourceAsStream("/assets/" + MeteorClient.MOD_ID + "/fonts/" + name + ".ttf");
     }
 }

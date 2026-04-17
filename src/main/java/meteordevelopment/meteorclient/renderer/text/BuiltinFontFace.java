@@ -3,8 +3,10 @@ package meteordevelopment.meteorclient.renderer.text;
 import meteordevelopment.meteorclient.utils.render.FontUtils;
 
 import java.io.InputStream;
+import java.nio.channels.Channels;
+import java.nio.channels.ReadableByteChannel;
 
-public class BuiltinFontFace extends FontFace {
+public non-sealed class BuiltinFontFace extends FontFace {
     private final String name;
 
     public BuiltinFontFace(FontInfo info, String name) {
@@ -14,10 +16,12 @@ public class BuiltinFontFace extends FontFace {
     }
 
     @Override
-    public InputStream toStream() {
-        InputStream in = FontUtils.stream(name);
-        if (in == null) throw new RuntimeException("Failed to load builtin font " + name + ".");
-        return in;
+    public ReadableByteChannel byteChannelForRead() {
+        InputStream inputStream = FontUtils.builtinFontStream(this.name);
+        if (inputStream == null) {
+            throw new IllegalArgumentException("Builtin font '" + this.name + "' not found");
+        }
+        return Channels.newChannel(inputStream);
     }
 
     @Override

@@ -5,6 +5,7 @@
 
 package meteordevelopment.meteorclient.gui.renderer;
 
+import meteordevelopment.meteorclient.MeteorClient;
 import meteordevelopment.meteorclient.gui.utils.Cell;
 import meteordevelopment.meteorclient.gui.widgets.WWidget;
 import meteordevelopment.meteorclient.gui.widgets.containers.WContainer;
@@ -34,11 +35,25 @@ public class GuiDebugRenderer {
             .end();
     }
 
+    public void mouseReleased(WWidget widget, double mouseX, double mouseY, int depth) {
+        if (widget == null) return;
+
+        MeteorClient.LOG.info("{} {}", widget.getClass(), depth);
+
+        if (widget instanceof WContainer container) {
+            for (Cell<?> cell : container.cells) {
+                if (cell.widget().isOver(mouseX, mouseY)) {
+                    mouseReleased(cell.widget(), mouseX, mouseY, depth + 1);
+                }
+            }
+        }
+    }
+
     private void renderWidget(WWidget widget) {
         lineBox(widget.x, widget.y, widget.width, widget.height, WIDGET_COLOR);
 
-        if (widget instanceof WContainer) {
-            for (Cell<?> cell : ((WContainer) widget).cells) {
+        if (widget instanceof WContainer container) {
+            for (Cell<?> cell : container.cells) {
                 lineBox(cell.x, cell.y, cell.width, cell.height, CELL_COLOR);
                 renderWidget(cell.widget());
             }
