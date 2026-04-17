@@ -51,6 +51,8 @@ public abstract class WidgetScreen extends Screen {
     private boolean onClose;
     private boolean debug;
 
+    private boolean closing;
+
     private double lastMouseX, lastMouseY;
 
     public double animProgress;
@@ -245,8 +247,12 @@ public abstract class WidgetScreen extends Screen {
         mouseX *= s;
         mouseY *= s;
 
-        animProgress += delta / 20 * 14;
+        animProgress += (delta / 20 * 14) * (closing ? -1 : 1);
         animProgress = MathHelper.clamp(animProgress, 0, 1);
+
+        if (closing && (animProgress == 0 || parent != null)) {
+            closeInternal();
+        }
 
         GuiKeyEvents.canUseKeys = true;
 
@@ -294,12 +300,7 @@ public abstract class WidgetScreen extends Screen {
     @Override
     public void close() {
         if (!locked || lockedAllowClose) {
-            boolean preOnClose = onClose;
-            onClose = true;
-
-            removed();
-
-            onClose = preOnClose;
+            closing = true;
         }
     }
 
@@ -329,6 +330,16 @@ public abstract class WidgetScreen extends Screen {
                 };
             }
         }
+    }
+
+    private void closeInternal() {
+        boolean preOnClose = onClose;
+        onClose = true;
+
+        super.close();
+        removed();
+
+        onClose = preOnClose;
     }
 
     private void loopWidgets(WWidget widget, Consumer<WWidget> action) {
