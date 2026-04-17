@@ -129,6 +129,7 @@ public class Hud extends System<Hud> implements Iterable<HudElement> {
         register(ModuleInfosHud.INFO);
         register(PotionTimersHud.INFO);
         register(CombatHud.INFO);
+        register(MapHud.INFO);
 
         // Default config
         if (isFirstInit) resetToDefaultElements();
@@ -304,6 +305,7 @@ public class Hud extends System<Hud> implements Iterable<HudElement> {
             if (info != null) {
                 HudElement element = info.create();
                 element.fromTag(c);
+                element.settings.registerColorSettings(null);
                 elements.add(element);
             }
         }
