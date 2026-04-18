@@ -23,6 +23,7 @@ public class TranslationHelper {
     // key → [originalTitle, originalDescription]
     private static final Map<String, String[]> originalModuleTexts = new HashMap<>();
     private static final Map<String, String[]> originalSettingTexts = new HashMap<>();
+    private static final Map<String, String[]> originalConfigTexts = new HashMap<>();
 
     /**
      * Called on the first game tick. Checks Config and applies translation if enabled.
@@ -94,12 +95,47 @@ public class TranslationHelper {
 
         applied = true;
         MeteorClient.LOG.info("Translation applied: {} modules translated", translated);
+
+        // Translate Config settings
+        translateConfigSettings();
+    }
+
+    private static void translateConfigSettings() {
+        for (SettingGroup group : Config.get().settings) {
+            for (Setting<?> setting : group) {
+                String key = getConfigSettingKey(group, setting);
+
+                originalConfigTexts.putIfAbsent(key, new String[]{setting.title, setting.description});
+
+                String stResult = tryTranslate(key + ".name");
+                if (stResult != null) setting.title = stResult;
+
+                String sdResult = tryTranslate(key + ".description");
+                if (sdResult != null) setting.description = sdResult;
+            }
+        }
     }
 
     public static void resetAll() {
         for (Module module : Modules.get().getAll()) {
             String moduleKey = getModuleKey(module);
             String[] orig = originalModuleTexts.get(moduleKey);
+
+        // Reset Config settings
+        resetConfigSettings();
+    }
+
+    private static void resetConfigSettings() {
+        for (SettingGroup group : Config.get().settings) {
+            for (Setting<?> setting : group) {
+                String key = getConfigSettingKey(group, setting);
+                String[] origS = originalConfigTexts.get(key);
+                if (origS != null) {
+                    setting.title = origS[0];
+                    setting.description = origS[1];
+                }
+            }
+        }
             if (orig != null) {
                 module.title = orig[0];
                 module.description = orig[1];
@@ -117,7 +153,11 @@ public class TranslationHelper {
             }
         }
 
-        applied = false;
+     
+
+    private static String getConfigSettingKey(SettingGroup group, Setting<?> setting) {
+        return "meteor.meteor_client.config.setting." + baseFormat(group.name) + "." + baseFormat(setting.name);
+    }   applied = false;
         MeteorClient.LOG.info("Translation reset to English");
     }
 
