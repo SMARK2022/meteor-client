@@ -460,6 +460,7 @@ public class KillAura extends Module {
         }
 
         Entity primary = targets.getFirst();
+        FindItemResult attackWeapon = null;
 
         if (autoSwitch.get()) {
             Predicate<ItemStack> predicate = switch (weapon.get()) {
@@ -470,21 +471,20 @@ public class KillAura extends Module {
                 case All -> stack -> stack.getItem() instanceof AxeItem || stack.isIn(ItemTags.SWORDS) || stack.getItem() instanceof MaceItem || stack.getItem() instanceof TridentItem;
                 default -> o -> true;
             };
-            FindItemResult weaponResult = InvUtils.findInHotbar(predicate);
+            attackWeapon = InvUtils.findInHotbar(predicate);
 
             if (shouldShieldBreak()) {
                 FindItemResult axeResult = InvUtils.findInHotbar(itemStack -> itemStack.getItem() instanceof AxeItem);
-                if (axeResult.found()) weaponResult = axeResult;
+                if (axeResult.found()) attackWeapon = axeResult;
             }
 
-            if (!swapped) {
-                previousSlot  = mc.player.getInventory().getSelectedSlot();
-                swapped = true;
+            // 方案 A: 不在 onTick 前置阶段切槽位。
+            // 这里仅确定本次攻击希望使用的 hotbar 槽位，真正的 slot side-effect 放到 commitAttack 回调中执行。
+            if (attackWeapon == null || !attackWeapon.found()) {
+                stopAttacking();
+                return;
             }
-            InvUtils.swap(weaponResult.slot(), false);
-        }
-
-        if (!itemInHand()) {
+        } else if (!itemInHand()) {
             stopAttacking();
             return;
         }
@@ -515,12 +515,13 @@ public class KillAura extends Module {
 
                 // 就绪: 攻击瞄准使用实体当前 AABB（不做前置预测），100% GrimAC-safe
                 if (rotation.get() != RotationMode.None) {
+                    FindItemResult finalAttackWeapon = attackWeapon;
                     Rotations.rotateWith(
                         () -> solveEntityAim(primary, false),
-                        150, () -> commitAttack(primary)
+                        150, () -> commitAttack(primary, finalAttackWeapon)
                     );
                 } else {
-                    commitAttack(primary);
+                    commitAttack(primary, attackWeapon);
                 }
                 wTapState = WTapState.IDLE;
             } else if (rotation.get() == RotationMode.Always) {
@@ -844,11 +845,34 @@ public class KillAura extends Module {
         } else return mc.player.getAttackCooldownProgress(delay) >= 1;
     }
 
-    private void commitAttack(Entity target) {
+    private void commitAttack(Entity target, FindItemResult attackWeapon) {
         if (!isActive() || !isStillValidTarget(target)) return;
 
         // 服务端距离预测: 避免在服务端处理时实体已超出攻击范围的情况出手
         if (predictMovement.get() && isServerRangeExceeded(target)) return;
+
+        // 方案 A: slot switch side-effect 延迟到 callback。
+        // 时序: rotate winner -> callback(这里切槽/攻击) -> Flying。
+        // 这样当旋转仲裁失败时不会发生白切槽，避免 C1 中的反复 swap 空转。
+        if (autoSwitch.get()) {
+            if (attackWeapon == null || !attackWeapon.found()) return;
+
+            int desiredSlot = attackWeapon.slot();
+            int currentSlot = mc.player.getInventory().getSelectedSlot();
+            if (desiredSlot != currentSlot) {
+                if (!swapped) {
+                    previousSlot = currentSlot;
+                    swapped = true;
+                }
+
+                InvUtils.swap(desiredSlot, false);
+
+                // 保持原始逐 tick 语义: 当 switch-delay > 0 时，切槽 tick 不执行攻击。
+                // 老逻辑依赖 onSendPacket 在 delayCheck 前更新 switchTimer；
+                // 现在切槽移动到 callback，需要在此显式执行同等门控。
+                if (switchDelay.get() > 0) return;
+            }
+        } else if (!itemInHand()) return;
 
         mc.interactionManager.attackEntity(mc.player, target);
         mc.player.swingHand(Hand.MAIN_HAND);
