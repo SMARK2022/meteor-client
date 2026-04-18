@@ -63,6 +63,7 @@ public class Rotations {
     private static boolean movementPhasePassed; // PlayerTickMovementEvent 已触发
     private static boolean appliedThisTick;     // 本 tick 是否预应用了旋转
     private static float savedYaw, savedPitch;  // 预应用前保存的原始角度
+    private static int nextSeq;                 // 请求提交序号计数器 (FIFO 确定性排序)
 
     // hold 逻辑状态 (只记账, 不注入)
     private static int holdTimer;
@@ -202,6 +203,9 @@ public class Rotations {
         active = null;
         appliedThisTick = false;
         rotationTimer++;
+
+        // TTL 安全网: 递增 age, 清除超龄请求 (Fix-A 已防止正常累积, 此为兜底)
+        pending.removeIf(req -> ++req.age > REQUEST_TTL_TICKS);
     }
 
     @EventHandler(priority = EventPriority.HIGHEST)
@@ -210,11 +214,12 @@ public class Rotations {
 
         movementPhasePassed = true;
 
-        // 仲裁: 选出 priority 最大的 winner
+        // 仲裁: 选出 priority 最大的 winner; 同优先级时按提交顺序 (FIFO) 选择最先提交的
         RotationRequest winner = null;
         for (RotationRequest req : pending) {
             if (req.deferred) continue;
-            if (winner == null || req.priority > winner.priority) {
+            if (winner == null || req.priority > winner.priority
+                || (req.priority == winner.priority && req.seq < winner.seq)) {
                 winner = req;
             }
         }
@@ -302,7 +307,15 @@ public class Rotations {
 
     @EventHandler(priority = EventPriority.LOWEST)
     private static void onSendMovementPacketsPost(SendMovementPacketsEvent.Post event) {
-        if (mc.player == null || mc.cameraEntity != mc.player) return;
+        if (mc.player == null) return;
+
+        // Spectator 模式 (cameraEntity != player): 旋转不可执行, 丢弃全部请求防止累积
+        if (mc.cameraEntity != mc.player) {
+            pending.clear();
+            active = null;
+            appliedThisTick = false;
+            return;
+        }
 
         // 恢复玩家原始视角 (silent rotation: 视觉上不强制转头)
         if (appliedThisTick) {
@@ -311,11 +324,13 @@ public class Rotations {
             appliedThisTick = false;
         }
 
-        // 清理本 tick 已处理的请求, 保留 deferred 到下一 tick
-        pending.removeIf(req -> !req.deferred);
-        // 重置 deferred 标记, 让它们在下一 tick 重新参与仲裁
+        // 清理: 只保留 late-submitted 请求 (movement 阶段后提交, 给它们下 tick 一次机会)
+        // 仲裁失败的 loser 直接丢弃 — 模块会在下 tick 重新提交 fresh 请求
+        pending.removeIf(req -> !req.lateSubmission);
+        // 保留的 late-submitted 请求重置标记, 下 tick 按正常请求参与仲裁
         for (RotationRequest req : pending) {
             req.deferred = false;
+            req.lateSubmission = false;
         }
 
         active = null;
@@ -530,12 +545,18 @@ public class Rotations {
 
     // ==================== 内部数据结构 ====================
 
+    /** 请求最大存活 tick 数 (超过即视为 stale, 在 onTickPre 中清除) */
+    private static final int REQUEST_TTL_TICKS = 2;
+
     private static class RotationRequest {
         float yaw, pitch;
         final int priority;
         final Runnable callback;
         final AimResolver resolver;
         boolean deferred;
+        boolean lateSubmission;  // true = 创建时 movementPhasePassed 已过, 应推迟到下 tick
+        int age;                 // 请求存活 tick 数, 每 tick onTickPre 递增
+        final int seq;           // 提交序号, 同优先级时 FIFO 排序
 
         RotationRequest(float yaw, float pitch, int priority, Runnable callback, boolean deferred, AimResolver resolver) {
             this.yaw = yaw;
@@ -543,7 +564,10 @@ public class Rotations {
             this.priority = priority;
             this.callback = callback;
             this.deferred = deferred;
+            this.lateSubmission = deferred;  // 创建时 deferred==true 等价 late submission
             this.resolver = resolver;
+            this.age = 0;
+            this.seq = nextSeq++;
         }
     }
 }
