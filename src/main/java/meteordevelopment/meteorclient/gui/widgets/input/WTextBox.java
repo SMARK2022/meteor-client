@@ -27,6 +27,10 @@ import static org.lwjgl.glfw.GLFW.*;
 public abstract class WTextBox extends WWidget {
     private static final Renderer DEFAULT_RENDERER = (renderer, x, y, text, color) -> renderer.text(text, x, y, color, false);
 
+    // Compatibility alias for third-party mixins that shadow WTextBox.focused.
+    // Canonical focus state still lives in WWidget.focused and is synchronized in setFocused().
+    public boolean focused;
+
     public Runnable action;
     public Runnable actionOnUnfocused;
 
@@ -57,6 +61,7 @@ public abstract class WTextBox extends WWidget {
         this.text = text;
         this.placeholder = placeholder;
         this.filter = filter;
+        this.focused = super.focused;
 
         try {
             this.renderer = renderer != null ? renderer.getDeclaredConstructor().newInstance() : DEFAULT_RENDERER;
@@ -732,6 +737,7 @@ public abstract class WTextBox extends WWidget {
         boolean wasJustFocused = focused && !this.focused;
 
         this.focused = focused;
+        super.focused = focused;
 
         resetSelection();
 
