@@ -182,6 +182,14 @@ public class PacketMine extends Module {
         .build()
     );
 
+    private final Setting<Boolean> storedBreak = sgGrim.add(new BoolSetting.Builder()
+        .name("stored-break")
+        .description("After breaking a block, monitors the position for replacement and instantly re-mines using stored server mining context.")
+        .defaultValue(false)
+        .visible(grimBypass::get)
+        .build()
+    );
+
     // ── 渲染 ──
 
     private final Setting<Boolean> render = sgRender.add(new BoolSetting.Builder()
@@ -370,13 +378,14 @@ public class PacketMine extends Module {
                 true);
         }
 
-        // 清理已完成的任务 + secondary 追踪
+        // 清理已完成的任务 + secondary/watching 追踪
         Iterator<MyBlock> it = blocks.iterator();
         while (it.hasNext()) {
             MyBlock b = it.next();
             if (b.secondary) {
-                // secondary: 追踪 failedToMine 自动破坏
                 b.tickSecondary();
+            } else if (b.watching) {
+                b.tickWatching();
             }
             if (b.phase == Phase.FINISHED) {
                 blockPool.free(b);
@@ -385,14 +394,20 @@ public class PacketMine extends Module {
         }
 
         // 如果没有活跃任务且有需要恢复的槽位，恢复之
-        if (blocks.isEmpty() && savedSlot != -1) {
-            restoreSlot();
+        {
+            boolean hasActiveWork = false;
+            for (MyBlock b : blocks) {
+                if (!b.secondary && !b.watching) { hasActiveWork = true; break; }
+            }
+            if (!hasActiveWork && savedSlot != -1) {
+                restoreSlot();
+            }
         }
 
-        // 找到队列中第一个非 secondary 的活跃任务
+        // 找到队列中第一个非 secondary 非 watching 的活跃任务
         MyBlock active = null;
         for (MyBlock b : blocks) {
-            if (!b.secondary) { active = b; break; }
+            if (!b.secondary && !b.watching) { active = b; break; }
         }
 
         // 槽位冲突检测：渐进式响应，区分用户接管和模块干扰
@@ -457,6 +472,28 @@ public class PacketMine extends Module {
         if (isInstantCandidate(event.newState)) {
             instantBlockCache.add(pos);
             cacheByChunk.computeIfAbsent(key, k -> new HashSet<>()).add(pos);
+        }
+
+        // Stored Break: 检测同位置新方块出现
+        if (storedBreak.get()) {
+            for (MyBlock b : blocks) {
+                if (!b.watching || b.phase != Phase.WATCHING) continue;
+                if (!b.blockPos.equals(event.pos)) continue;
+
+                BlockState newState = event.newState;
+                if (newState.isAir()) continue;
+                if (newState.getHardness(null, null) == -1.0f) continue;
+
+                b.blockState = newState;
+                b.block = newState.getBlock();
+                b.watching = false;
+                b.mining = true;
+                b.progress = 1.0;
+                b.lockedToolSlot = findBestToolSlot(newState);
+                b.phase = Phase.PENDING_STOP;
+                b.clearRotationState();
+                break;
+            }
         }
     }
 
@@ -605,6 +642,12 @@ public class PacketMine extends Module {
      */
     private boolean shouldDrain() {
         if (!grimBypass.get() || !drainEnabled.get()) return false;
+        // Stored break 观测期间禁止 drain：drain START 会覆盖服务端 miningPos
+        if (storedBreak.get()) {
+            for (MyBlock b : blocks) {
+                if (b.watching && b.phase == Phase.WATCHING) return false;
+            }
+        }
         long breakDelay = System.currentTimeMillis() - lastFinishMs;
         if (breakDelay < 275) return false;
         return localDelayBalance * 0.9 > drainTarget.get();
@@ -954,26 +997,7 @@ public class PacketMine extends Module {
         if (face == null) face = Direction.UP;
 
         MyBlock b = blockPool.get();
-        b.blockPos = pos;
-        b.direction = face;
-        b.currentFace = face;
-        b.blockState = mc.world.getBlockState(pos);
-        b.block = b.blockState.getBlock();
-        b.phase = Phase.PENDING_START;
-        b.mining = false;
-        b.progress = 0;
-        b.lockedToolSlot = -1;
-        b.heartbeatTimer = 0;
-        b.rotationQueued = false;
-        b.rotationPhaseToken = null;
-        b.startMs = 0;
-        b.readyMs = 0;
-        b.maxDelta = 0;
-        b.pendingSinceMs = System.currentTimeMillis();
-        b.activated = false;
-        b.secondary = false;
-        b.exploitUsed = false;
-        b.expectedFinishMs = 0;
+        b.reset(pos, face);
         blocks.add(b);
     }
 
@@ -1039,6 +1063,13 @@ public class PacketMine extends Module {
     }
 
     private void sendStartPacket(BlockPos pos, Direction face) {
+        // 新 START 覆盖服务端 miningPos → 所有 stored break 观测失效
+        for (MyBlock b : blocks) {
+            if (b.watching && b.phase == Phase.WATCHING) {
+                b.phase = Phase.FINISHED;
+                b.watching = false;
+            }
+        }
         int seq = mc.world.getPendingUpdateManager().incrementSequence().getSequence();
         mc.getNetworkHandler().sendPacket(new PlayerActionC2SPacket(
             PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, pos, face, seq));
@@ -1064,6 +1095,8 @@ public class PacketMine extends Module {
         MINING,
         /** progress 到位，等待一个干净 tick 来发 STOP */
         PENDING_STOP,
+        /** 方块已破，正在监听同位置新方块（stored break） */
+        WATCHING,
         /** 需要中止（目标失效），等待发 ABORT */
         ABORTING,
         /** 已完成，等待下次清理 */
@@ -1107,6 +1140,11 @@ public class PacketMine extends Module {
         boolean rotationQueued;
         /** 提交 rotation callback 时的阶段快照，callback 执行时需校验 */
         Phase rotationPhaseToken;
+        /** rotation 排队时的 wall-clock 时间戳，用于过期保护 */
+        long rotationQueuedMs;
+
+        /** rotation 排队后多久视为过期（ms），过期后直接执行动作不等旋转 */
+        private static final long ROTATION_EXPIRE_MS = 200;
 
         /**
          * START 实际发出时的 wall-clock 时间戳（ms）。
@@ -1139,11 +1177,24 @@ public class PacketMine extends Module {
         /** secondary 预期自动完成的 wall-clock 时间戳（ms），0 = 未设置 */
         long expectedFinishMs;
 
+        /** 是否处于 stored break 观测状态（被动，不占用 active 任务槽位） */
+        boolean watching;
+        /** 进入 WATCHING 的 wall-clock 时间戳（ms），用于超时保护 */
+        long watchStartMs;
+
         public MyBlock set(StartBreakingBlockEvent event) {
-            this.blockPos = event.blockPos;
-            this.direction = event.direction;
-            this.currentFace = event.direction;
-            this.blockState = mc.world.getBlockState(blockPos);
+            return reset(event.blockPos, event.direction);
+        }
+
+        /**
+         * 统一初始化所有字段。set() 和 addBreakTarget() 均委托此方法，
+         * 确保新增字段只需在此处维护，消除 pool 回收后旧值残留风险。
+         */
+        MyBlock reset(BlockPos pos, Direction face) {
+            this.blockPos = pos;
+            this.direction = face;
+            this.currentFace = face;
+            this.blockState = mc.world.getBlockState(pos);
             this.block = blockState.getBlock();
             this.phase = Phase.PENDING_START;
             this.mining = false;
@@ -1152,6 +1203,7 @@ public class PacketMine extends Module {
             this.heartbeatTimer = 0;
             this.rotationQueued = false;
             this.rotationPhaseToken = null;
+            this.rotationQueuedMs = 0;
             this.startMs = 0;
             this.readyMs = 0;
             this.maxDelta = 0;
@@ -1160,12 +1212,15 @@ public class PacketMine extends Module {
             this.secondary = false;
             this.exploitUsed = false;
             this.expectedFinishMs = 0;
+            this.watching = false;
+            this.watchStartMs = 0;
             return this;
         }
 
         /** 外部契约：是否可以立刻破坏（用于渲染颜色判断） */
         public boolean isReady() {
-            if (secondary) return false; // secondary 还在等 failedToMine，不算 ready
+            if (secondary) return false;
+            if (watching) return false;
             return canStopNow();
         }
 
@@ -1193,10 +1248,30 @@ public class PacketMine extends Module {
             }
         }
 
+        /**
+         * Stored break tick：持续心跳 swing 以维持 Grim maximumBlockDamage。
+         * 在 AIR 阶段，swing 使 Grim 读取 getBlockDamage(AIR) = ∞，
+         * 确保后续 STOP 的 predictedTime=0 → diff 永远为负 → FastBreak 安全。
+         */
+        void tickWatching() {
+            if (System.currentTimeMillis() - watchStartMs > 30_000) {
+                phase = Phase.FINISHED;
+                return;
+            }
+            if (heartbeatSwing.get() && isQuietTick()) {
+                heartbeatTimer++;
+                if (heartbeatTimer >= heartbeatInterval.get()) {
+                    sendSwing();
+                    heartbeatTimer = 0;
+                }
+            }
+        }
+
         /** 清除 rotation 排队状态，防止陈旧 callback 卡死后续 phase */
         private void clearRotationState() {
             rotationQueued = false;
             rotationPhaseToken = null;
+            rotationQueuedMs = 0;
         }
 
         /**
@@ -1213,12 +1288,25 @@ public class PacketMine extends Module {
                 return;
             }
             if (!shouldRotate) { action.run(); return; }
-            if (rotationQueued) return;
+
+            // 已排队：检查过期
+            if (rotationQueued) {
+                if (System.currentTimeMillis() - rotationQueuedMs > ROTATION_EXPIRE_MS) {
+                    // 旋转请求超时：放弃等待，直接执行动作
+                    clearRotationState();
+                    action.run();
+                }
+                return;
+            }
+
+            // 提交新的旋转请求
             rotationQueued = true;
             rotationPhaseToken = expectedPhase;
+            rotationQueuedMs = System.currentTimeMillis();
             Vec3d anchor = getFaceAnchor(pos, face);
             Rotations.rotate(Rotations.getYaw(anchor), Rotations.getPitch(anchor), 50, () -> {
-                if (phase != expectedPhase) { clearRotationState(); return; }
+                if (phase != rotationPhaseToken) { clearRotationState(); return; }
+                clearRotationState();
                 action.run();
             });
         }
@@ -1309,7 +1397,6 @@ public class PacketMine extends Module {
                     progress = 0; heartbeatTimer = 0; readyMs = 0;
                     phase = Phase.MINING;
                 }
-                clearRotationState();
             });
         }
 
@@ -1423,11 +1510,18 @@ public class PacketMine extends Module {
                         ? startMs + (long) Math.ceil(1.0 / delta) * 50
                         : 0;
                     phase = Phase.MINING; // 保持 MINING 使渲染继续显示进度
+                } else if (storedBreak.get()) {
+                    // Stored Break: 进入观测状态，等待同位置新方块
+                    mining = false;
+                    progress = 0;
+                    watching = true;
+                    watchStartMs = System.currentTimeMillis();
+                    heartbeatTimer = 0;
+                    lockedToolSlot = -1;
+                    phase = Phase.WATCHING;
                 } else {
                     phase = Phase.FINISHED;
                 }
-
-                clearRotationState();
             });
         }
 
@@ -1443,7 +1537,6 @@ public class PacketMine extends Module {
                 ensureTaskToolSelected(MyBlock.this);
                 sendAbortPacket(blockPos, currentFace);
                 phase = Phase.FINISHED;
-                clearRotationState();
             });
         }
 
@@ -1473,6 +1566,7 @@ public class PacketMine extends Module {
         // -------------------- Render --------------------
 
         public void render(Render3DEvent event) {
+            if (phase == Phase.WATCHING) return;
             VoxelShape shape = mc.world.getBlockState(blockPos).getOutlineShape(mc.world, blockPos);
 
             double x1 = blockPos.getX();
