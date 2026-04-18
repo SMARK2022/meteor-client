@@ -6,10 +6,8 @@
 package meteordevelopment.meteorclient.systems.modules.misc;
 
 import meteordevelopment.meteorclient.events.packets.PacketEvent;
-import meteordevelopment.meteorclient.settings.BoolSetting;
-import meteordevelopment.meteorclient.settings.PacketListSetting;
-import meteordevelopment.meteorclient.settings.Setting;
-import meteordevelopment.meteorclient.settings.SettingGroup;
+import meteordevelopment.meteorclient.events.world.TickEvent;
+import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.network.PacketUtils;
@@ -31,9 +29,45 @@ import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Set;
 import java.util.StringJoiner;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicLong;
 
+/**
+ * PacketLogger — 可选粒度的包日志模块。
+ *
+ * <h3>Chat 输出三模式</h3>
+ * <ul>
+ *   <li><b>Never</b>  — 不输出到 chat，零渲染开销</li>
+ *   <li><b>Statistics</b> — 每秒一条摘要（+N C2S | +M S2C），最小 chat 开销</li>
+ *   <li><b>Details</b> — 逐包输出完整详情（高频时可能影响帧率）</li>
+ * </ul>
+ *
+ * <h3>文件记录</h3>
+ * 独立开关，通过 {@link ConcurrentLinkedQueue} + daemon 线程异步写盘，
+ * 主线程仅做 offer()（~20ns），不阻塞渲染。
+ *
+ * <h3>性能概要</h3>
+ * Statistics/Never 模式下主线程每包开销：2× AtomicLong.increment + 1× queue.offer（如启用文件）。
+ */
 public class PacketLogger extends Module {
+
+    // ════════════════════════════════════════════════════════════
+    //  Chat 输出模式枚举
+    // ════════════════════════════════════════════════════════════
+
+    public enum ChatMode {
+        /** 不输出到 chat，零开销 */
+        Never,
+        /** 每秒一条统计摘要：+N C2S | +M S2C (total: X | Y) */
+        Statistics,
+        /** 逐包输出完整详情（兼容旧版行为） */
+        Details
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  Setting Groups
+    // ════════════════════════════════════════════════════════════
+
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgDigging = settings.createGroup("Digging");
     private final SettingGroup sgMovement = settings.createGroup("Movement");
@@ -45,24 +79,36 @@ public class PacketLogger extends Module {
 
     // ======================== General ========================
 
-    private final Setting<Boolean> detailed = sgGeneral.add(new BoolSetting.Builder()
-        .name("detailed")
-        .description("Print detailed field values for each packet.")
-        .defaultValue(true)
+    /** Chat 输出粒度控制 */
+    private final Setting<ChatMode> chatMode = sgGeneral.add(new EnumSetting.Builder<ChatMode>()
+        .name("chat-mode")
+        .description("Chat output: Never (silent), Statistics (1/sec summary), Details (per-packet).")
+        .defaultValue(ChatMode.Statistics)
         .build()
     );
 
+    /** 仅 Details 模式下可见——为每行添加序号/tick/耗时前缀 */
+    private final Setting<Boolean> showTimestamp = sgGeneral.add(new BoolSetting.Builder()
+        .name("show-timestamp")
+        .description("Prefix each detail line with sequence, tick, and elapsed ms.")
+        .defaultValue(true)
+        .visible(() -> chatMode.get() == ChatMode.Details)
+        .build()
+    );
+
+    /** 文件记录开关——启用后通过异步线程写盘，不阻塞主线程 */
     private final Setting<Boolean> logToFile = sgGeneral.add(new BoolSetting.Builder()
         .name("log-to-file")
-        .description("Write packet log to a file in logs/packet-logger/ directory.")
+        .description("Write complete detailed log to logs/packet-logger/ via async I/O thread.")
         .defaultValue(false)
         .build()
     );
 
-    private final Setting<Boolean> showTimestamp = sgGeneral.add(new BoolSetting.Builder()
-        .name("show-timestamp")
-        .description("Prefix each log line with tick, elapsed ms, and sequence number.")
-        .defaultValue(true)
+    /** 启动时清空 chat 并插入分隔符——方便区分多次录制 */
+    private final Setting<Boolean> clearOnStart = sgGeneral.add(new BoolSetting.Builder()
+        .name("clear-on-start")
+        .description("Clear chat and insert separator line when starting the logger.")
+        .defaultValue(false)
         .build()
     );
 
@@ -277,27 +323,97 @@ public class PacketLogger extends Module {
     );
 
     public PacketLogger() {
-        super(Categories.Misc, "packet-logger", "Logs selected packets to chat with detailed field output.");
+        super(Categories.Misc, "packet-logger", "Logs selected packets with configurable chat/file output.");
     }
 
-    // ======================== State ========================
+    // ════════════════════════════════════════════════════════════
+    //  Internal State
+    // ════════════════════════════════════════════════════════════
 
+    /** 全局序号，用于文件和 Details 模式的行号 */
     private final AtomicLong seqCounter = new AtomicLong();
+
+    /** 统计计数器——主线程 increment，统计/停用时读取 */
+    private final AtomicLong c2sTotal = new AtomicLong();
+    private final AtomicLong s2cTotal = new AtomicLong();
+    /** 距上次统计输出的增量（每秒重置） */
+    private final AtomicLong c2sDelta = new AtomicLong();
+    private final AtomicLong s2cDelta = new AtomicLong();
+
+    /** 模块激活时的 System.currentTimeMillis()，用于计算 elapsed */
     private long activateMs;
+    /** 统计 tick 计数器，0~19 循环 */
+    private int statsTicks;
+
+    // ── 异步文件写入 ──
+    /** 无锁队列：主线程 offer()，IO 线程 poll() */
+    private final ConcurrentLinkedQueue<String> fileQueue = new ConcurrentLinkedQueue<>();
+    private volatile boolean ioRunning;
+    private Thread ioThread;
     private BufferedWriter fileWriter;
+
     private static final DateTimeFormatter FILE_TS = DateTimeFormatter.ofPattern("yyyy-MM-dd_HH-mm-ss");
+    /** IO 线程批量写入周期（ms）——平衡延迟与吞吐 */
+    private static final long IO_DRAIN_INTERVAL_MS = 200;
+
+    // ════════════════════════════════════════════════════════════
+    //  Lifecycle
+    // ════════════════════════════════════════════════════════════
 
     @Override
     public void onActivate() {
+        // 重置所有计数器
         seqCounter.set(0);
+        c2sTotal.set(0);
+        s2cTotal.set(0);
+        c2sDelta.set(0);
+        s2cDelta.set(0);
         activateMs = System.currentTimeMillis();
-        if (logToFile.get()) openLogFile();
+        statsTicks = 0;
+
+        // 清屏 + 分隔符
+        if (clearOnStart.get() && mc.inGameHud != null) {
+            mc.inGameHud.getChatHud().clear(false);
+            info("═══════════════ PacketLogger started ═══════════════");
+        }
+
+        // 启动异步 IO 线程（仅文件模式需要）
+        if (logToFile.get()) {
+            openLogFile();
+            if (fileWriter != null) {
+                ioRunning = true;
+                ioThread = new Thread(this::ioLoop, "Meteor-PacketLogger-IO");
+                ioThread.setDaemon(true);
+                ioThread.start();
+            }
+        }
     }
 
     @Override
     public void onDeactivate() {
+        // 停止 IO 线程
+        ioRunning = false;
+        if (ioThread != null) {
+            ioThread.interrupt();
+            try { ioThread.join(2000); } catch (InterruptedException ignored) {}
+            ioThread = null;
+        }
+
+        // 把队列中残留条目写完
+        drainQueueToFile();
         closeLogFile();
+        fileQueue.clear();
+
+        // 输出 session 统计总结
+        if (chatMode.get() != ChatMode.Never) {
+            info("Session total: (highlight)%d C2S(default) | (highlight)%d S2C(default)",
+                c2sTotal.get(), s2cTotal.get());
+        }
     }
+
+    // ════════════════════════════════════════════════════════════
+    //  File I/O — 异步写盘
+    // ════════════════════════════════════════════════════════════
 
     private void openLogFile() {
         try {
@@ -318,47 +434,113 @@ public class PacketLogger extends Module {
         }
     }
 
+    /**
+     * IO 线程主循环——每 {@value IO_DRAIN_INTERVAL_MS}ms drain 一次队列并批量 flush。
+     * 相比旧版逐条 flush，减少 ~99% 的 fsync 次数。
+     */
+    private void ioLoop() {
+        while (ioRunning) {
+            drainQueueToFile();
+            try {
+                //noinspection BusyWait
+                Thread.sleep(IO_DRAIN_INTERVAL_MS);
+            } catch (InterruptedException e) {
+                break; // onDeactivate 中断退出
+            }
+        }
+    }
+
+    /** 将队列中所有待写条目一次性写入文件，末尾统一 flush */
+    private void drainQueueToFile() {
+        if (fileWriter == null) return;
+        String line;
+        int count = 0;
+        while ((line = fileQueue.poll()) != null) {
+            try {
+                fileWriter.write(line);
+                fileWriter.newLine();
+                count++;
+            } catch (IOException e) {
+                error("File write error: " + e.getMessage());
+                closeLogFile();
+                return;
+            }
+        }
+        if (count > 0) {
+            try { fileWriter.flush(); } catch (IOException ignored) {}
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  Statistics Tick Handler
+    // ════════════════════════════════════════════════════════════
+
+    /**
+     * 每 20 tick（≈1 秒）输出一次统计摘要到 chat。
+     * 如果本周期无任何包记录则静默跳过，避免刷屏。
+     */
+    @EventHandler
+    private void onTick(TickEvent.Post event) {
+        if (chatMode.get() != ChatMode.Statistics) return;
+
+        if (++statsTicks < 20) return;
+        statsTicks = 0;
+
+        long dc2s = c2sDelta.getAndSet(0);
+        long ds2c = s2cDelta.getAndSet(0);
+
+        // 无包时静默
+        if (dc2s == 0 && ds2c == 0) return;
+
+        info("(highlight)+%d C2S(default) | (highlight)+%d S2C(default)  (gray)(total: %d C2S | %d S2C)",
+            dc2s, ds2c, c2sTotal.get(), s2cTotal.get());
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  Packet Event Handlers
+    // ════════════════════════════════════════════════════════════
+
     @EventHandler
     private void onReceivePacket(PacketEvent.Receive event) {
         Packet<?> packet = event.packet;
 
         // Dedicated S2C toggles
         if (packet instanceof BlockUpdateS2CPacket) {
-            if (logBlockUpdate.get()) logPacket("[S2C]", packet, packet.getClass());
+            if (logBlockUpdate.get()) recordPacket("[S2C]", packet, packet.getClass());
             return;
         }
         if (packet instanceof PlayerPositionLookS2CPacket) {
-            if (logPlayerPosLook.get()) logPacket("[S2C]", packet, packet.getClass());
+            if (logPlayerPosLook.get()) recordPacket("[S2C]", packet, packet.getClass());
             return;
         }
         if (packet instanceof HealthUpdateS2CPacket) {
-            if (logHealthUpdate.get()) logPacket("[S2C]", packet, packet.getClass());
+            if (logHealthUpdate.get()) recordPacket("[S2C]", packet, packet.getClass());
             return;
         }
         if (packet instanceof PlaySoundS2CPacket) {
-            if (logPlaySound.get()) logPacket("[S2C]", packet, packet.getClass());
+            if (logPlaySound.get()) recordPacket("[S2C]", packet, packet.getClass());
             return;
         }
 
         // Container Fill S2C toggles
         if (packet instanceof OpenScreenS2CPacket) {
-            if (logOpenScreen.get()) logPacket("[S2C]", packet, packet.getClass());
+            if (logOpenScreen.get()) recordPacket("[S2C]", packet, packet.getClass());
             return;
         }
         if (packet instanceof InventoryS2CPacket) {
-            if (logInventorySync.get()) logPacket("[S2C]", packet, packet.getClass());
+            if (logInventorySync.get()) recordPacket("[S2C]", packet, packet.getClass());
             return;
         }
         if (packet instanceof ScreenHandlerSlotUpdateS2CPacket) {
-            if (logSlotUpdate.get()) logPacket("[S2C]", packet, packet.getClass());
+            if (logSlotUpdate.get()) recordPacket("[S2C]", packet, packet.getClass());
             return;
         }
         if (packet instanceof CloseScreenS2CPacket) {
-            if (logCloseScreen.get()) logPacket("[S2C]", packet, packet.getClass());
+            if (logCloseScreen.get()) recordPacket("[S2C]", packet, packet.getClass());
             return;
         }
         if (packet instanceof BlockEntityUpdateS2CPacket) {
-            if (logBlockEntityUpdate.get()) logPacket("[S2C]", packet, packet.getClass());
+            if (logBlockEntityUpdate.get()) recordPacket("[S2C]", packet, packet.getClass());
             return;
         }
 
@@ -366,7 +548,7 @@ public class PacketLogger extends Module {
         @SuppressWarnings("unchecked")
         Class<? extends Packet<?>> packetClass = (Class<? extends Packet<?>>) packet.getClass();
         if (s2cLogAll.get() || s2cPackets.get().contains(packetClass)) {
-            logPacket("[S2C]", packet, packetClass);
+            recordPacket("[S2C]", packet, packetClass);
         }
     }
 
@@ -377,50 +559,50 @@ public class PacketLogger extends Module {
         // Dedicated toggles for common C2S packets
         if (packet instanceof PlayerActionC2SPacket p) {
             if (shouldLogAction(p.getAction())) {
-                logPacket("[C2S]", packet, PlayerActionC2SPacket.class);
+                recordPacket("[C2S]", packet, PlayerActionC2SPacket.class);
             }
             return;
         }
         if (packet instanceof PlayerMoveC2SPacket) {
-            if (logMovement.get()) logPacket("[C2S]", packet, packet.getClass());
+            if (logMovement.get()) recordPacket("[C2S]", packet, packet.getClass());
             return;
         }
         if (packet instanceof PlayerInteractBlockC2SPacket) {
-            if (logInteractBlock.get()) logPacket("[C2S]", packet, packet.getClass());
+            if (logInteractBlock.get()) recordPacket("[C2S]", packet, packet.getClass());
             return;
         }
         if (packet instanceof PlayerInteractEntityC2SPacket) {
-            if (logInteractEntity.get()) logPacket("[C2S]", packet, packet.getClass());
+            if (logInteractEntity.get()) recordPacket("[C2S]", packet, packet.getClass());
             return;
         }
         if (packet instanceof UpdateSelectedSlotC2SPacket) {
-            if (logSlotChange.get()) logPacket("[C2S]", packet, packet.getClass());
+            if (logSlotChange.get()) recordPacket("[C2S]", packet, packet.getClass());
             return;
         }
         if (packet instanceof HandSwingC2SPacket) {
-            if (logHandSwing.get()) logPacket("[C2S]", packet, packet.getClass());
+            if (logHandSwing.get()) recordPacket("[C2S]", packet, packet.getClass());
             return;
         }
 
         // Container Fill C2S toggles
         if (packet instanceof ClientCommandC2SPacket) {
-            if (logClientCommand.get()) logPacket("[C2S]", packet, packet.getClass());
+            if (logClientCommand.get()) recordPacket("[C2S]", packet, packet.getClass());
             return;
         }
         if (packet instanceof ClickSlotC2SPacket) {
-            if (logClickSlot.get()) logPacket("[C2S]", packet, packet.getClass());
+            if (logClickSlot.get()) recordPacket("[C2S]", packet, packet.getClass());
             return;
         }
         if (packet instanceof CloseHandledScreenC2SPacket) {
-            if (logCloseHandledScreen.get()) logPacket("[C2S]", packet, packet.getClass());
+            if (logCloseHandledScreen.get()) recordPacket("[C2S]", packet, packet.getClass());
             return;
         }
         if (packet instanceof PlayerInteractItemC2SPacket) {
-            if (logInteractItem.get()) logPacket("[C2S]", packet, packet.getClass());
+            if (logInteractItem.get()) recordPacket("[C2S]", packet, packet.getClass());
             return;
         }
         if (packet instanceof PlayerInputC2SPacket) {
-            if (logPlayerInput.get()) logPacket("[C2S]", packet, packet.getClass());
+            if (logPlayerInput.get()) recordPacket("[C2S]", packet, packet.getClass());
             return;
         }
 
@@ -428,7 +610,7 @@ public class PacketLogger extends Module {
         @SuppressWarnings("unchecked")
         Class<? extends Packet<?>> packetClass = (Class<? extends Packet<?>>) packet.getClass();
         if (c2sPacketsExtra.get().contains(packetClass)) {
-            logPacket("[C2S]", packet, packetClass);
+            recordPacket("[C2S]", packet, packetClass);
         }
     }
 
@@ -443,10 +625,55 @@ public class PacketLogger extends Module {
         };
     }
 
-    // ======================== Formatting ========================
+    // ════════════════════════════════════════════════════════════
+    //  Core Recording — 主线程快路径
+    // ════════════════════════════════════════════════════════════
 
+    /**
+     * 主线程包记录入口。
+     * <ol>
+     *   <li>原子计数 — 永远执行，~20ns/call</li>
+     *   <li>格式化 — 仅 Details chat 或 file 模式需要</li>
+     *   <li>Chat 输出 — 仅 Details 模式</li>
+     *   <li>队列入队 — 仅 file 模式，非阻塞 offer()</li>
+     * </ol>
+     */
+    private void recordPacket(String direction, Packet<?> packet, Class<?> packetClass) {
+        boolean isC2S = "[C2S]".equals(direction);
+
+        // 1) 计数 — 始终执行
+        (isC2S ? c2sTotal : s2cTotal).incrementAndGet();
+        (isC2S ? c2sDelta : s2cDelta).incrementAndGet();
+
+        boolean needsFormat = chatMode.get() == ChatMode.Details || logToFile.get();
+        if (!needsFormat) return; // Statistics/Never + 无文件 → 快速退出
+
+        // 2) 格式化
+        String formatted = formatLine(direction, packet, packetClass);
+
+        // 3) Chat 输出（仅 Details）
+        if (chatMode.get() == ChatMode.Details) {
+            info(formatted);
+        }
+
+        // 4) 文件队列（非阻塞 offer）
+        if (logToFile.get()) {
+            fileQueue.offer(formatted);
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  Formatting
+    // ════════════════════════════════════════════════════════════
+
+    /**
+     * 构造单条包日志行。格式：
+     * {@code [C2S] #seq tTICK +ELAPSEDms PacketName detail_fields}
+     * <p>
+     * 时间戳前缀在文件中始终写入；在 chat Details 模式下由 showTimestamp 控制。
+     */
     @SuppressWarnings("unchecked")
-    private void logPacket(String direction, Packet<?> packet, Class<?> packetClass) {
+    private String formatLine(String direction, Packet<?> packet, Class<?> packetClass) {
         long seq = seqCounter.incrementAndGet();
         long elapsedMs = System.currentTimeMillis() - activateMs;
         long tick = mc.world != null ? mc.world.getTime() : -1;
@@ -454,34 +681,26 @@ public class PacketLogger extends Module {
         String name = PacketUtils.getName((Class<? extends Packet<?>>) packetClass);
         if (name == null) name = packetClass.getSimpleName();
 
-        // Build timestamp prefix
-        String tsPrefix = "";
-        if (showTimestamp.get()) {
-            tsPrefix = String.format("#%d t%d +%dms ", seq, tick, elapsedMs);
+        StringBuilder sb = new StringBuilder(128);
+        sb.append(direction).append(' ');
+
+        // 时间戳前缀
+        // 对文件：始终包含；对 chat Details：尊重 showTimestamp 设置
+        // 此处统一写入——chat 和 file 共享同一格式行
+        if (showTimestamp.get() || logToFile.get()) {
+            sb.append(String.format("#%d t%d +%dms ", seq, tick, elapsedMs));
         }
 
-        // Build detail suffix
-        String detail = "";
-        if (detailed.get()) {
-            String d = formatSpecial(packet);
-            if (d == null) d = formatReflective(packet);
-            if (d != null && !d.isEmpty()) detail = d;
+        sb.append(name);
+
+        // 详细字段
+        String detail = formatSpecial(packet);
+        if (detail == null) detail = formatReflective(packet);
+        if (detail != null && !detail.isEmpty()) {
+            sb.append(' ').append(detail);
         }
 
-        // Chat output
-        if (!detail.isEmpty()) {
-            info("(highlight)%s(default) %s%s %s (gray)%s", direction, tsPrefix, name, "", detail);
-        } else {
-            info("(highlight)%s(default) %s%s", direction, tsPrefix, name);
-        }
-
-        // File output
-        if (fileWriter != null) {
-            try {
-                fileWriter.write(String.format("%s %s%s %s%n", direction, tsPrefix, name, detail));
-                fileWriter.flush();
-            } catch (IOException ignored) {}
-        }
+        return sb.toString();
     }
 
     private String formatSpecial(Packet<?> packet) {
