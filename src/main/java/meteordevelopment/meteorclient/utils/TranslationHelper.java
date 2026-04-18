@@ -9,6 +9,8 @@ import meteordevelopment.meteorclient.MeteorClient;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.settings.SettingGroup;
 import meteordevelopment.meteorclient.systems.config.Config;
+import meteordevelopment.meteorclient.systems.hud.Hud;
+import meteordevelopment.meteorclient.systems.hud.HudElementInfo;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import net.minecraft.client.resource.language.I18n;
@@ -24,6 +26,7 @@ public class TranslationHelper {
     private static final Map<String, String[]> originalModuleTexts = new HashMap<>();
     private static final Map<String, String[]> originalSettingTexts = new HashMap<>();
     private static final Map<String, String[]> originalConfigTexts = new HashMap<>();
+    private static final Map<String, String[]> originalHudTexts = new HashMap<>();
 
     /**
      * Called on the first game tick. Checks Config and applies translation if enabled.
@@ -98,6 +101,23 @@ public class TranslationHelper {
 
         // Translate Config settings
         translateConfigSettings();
+
+        // Translate HUD element infos
+        translateHudElements();
+    }
+
+    private static void translateHudElements() {
+        for (HudElementInfo<?> info : Hud.get().infos.values()) {
+            String key = getHudElementKey(info);
+
+            originalHudTexts.putIfAbsent(key, new String[]{info.title, info.description});
+
+            String titleResult = tryTranslate(key + ".name");
+            if (titleResult != null) info.title = titleResult;
+
+            String descResult = tryTranslate(key + ".description");
+            if (descResult != null) info.description = descResult;
+        }
     }
 
     private static void translateConfigSettings() {
@@ -120,22 +140,6 @@ public class TranslationHelper {
         for (Module module : Modules.get().getAll()) {
             String moduleKey = getModuleKey(module);
             String[] orig = originalModuleTexts.get(moduleKey);
-
-        // Reset Config settings
-        resetConfigSettings();
-    }
-
-    private static void resetConfigSettings() {
-        for (SettingGroup group : Config.get().settings) {
-            for (Setting<?> setting : group) {
-                String key = getConfigSettingKey(group, setting);
-                String[] origS = originalConfigTexts.get(key);
-                if (origS != null) {
-                    setting.title = origS[0];
-                    setting.description = origS[1];
-                }
-            }
-        }
             if (orig != null) {
                 module.title = orig[0];
                 module.description = orig[1];
@@ -153,12 +157,38 @@ public class TranslationHelper {
             }
         }
 
-     
+        // Reset Config settings
+        resetConfigSettings();
 
-    private static String getConfigSettingKey(SettingGroup group, Setting<?> setting) {
-        return "meteor.meteor_client.config.setting." + baseFormat(group.name) + "." + baseFormat(setting.name);
-    }   applied = false;
+        // Reset HUD element infos
+        resetHudElements();
+
+        applied = false;
         MeteorClient.LOG.info("Translation reset to English");
+    }
+
+    private static void resetConfigSettings() {
+        for (SettingGroup group : Config.get().settings) {
+            for (Setting<?> setting : group) {
+                String key = getConfigSettingKey(group, setting);
+                String[] origS = originalConfigTexts.get(key);
+                if (origS != null) {
+                    setting.title = origS[0];
+                    setting.description = origS[1];
+                }
+            }
+        }
+    }
+
+    private static void resetHudElements() {
+        for (HudElementInfo<?> info : Hud.get().infos.values()) {
+            String key = getHudElementKey(info);
+            String[] orig = originalHudTexts.get(key);
+            if (orig != null) {
+                info.title = orig[0];
+                info.description = orig[1];
+            }
+        }
     }
 
     public static boolean isApplied() {
@@ -192,6 +222,14 @@ public class TranslationHelper {
 
     private static String getSettingKey(Module module, SettingGroup group, Setting<?> setting) {
         return getModuleKey(module) + ".setting." + baseFormat(group.name) + "." + baseFormat(setting.name);
+    }
+
+    private static String getConfigSettingKey(SettingGroup group, Setting<?> setting) {
+        return "meteor.meteor_client.config.setting." + baseFormat(group.name) + "." + baseFormat(setting.name);
+    }
+
+    private static String getHudElementKey(HudElementInfo<?> info) {
+        return "meteor.meteor_client.hud." + baseFormat(info.name);
     }
 
     /**

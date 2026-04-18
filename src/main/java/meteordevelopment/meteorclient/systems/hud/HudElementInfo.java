@@ -16,8 +16,8 @@ import java.util.function.Supplier;
 public class HudElementInfo<T extends HudElement> {
     public final HudGroup group;
     public final String name;
-    public final String title;
-    public final String description;
+    public String title;
+    public String description;
 
     public final Supplier<T> factory;
     public final List<Preset> presets;
