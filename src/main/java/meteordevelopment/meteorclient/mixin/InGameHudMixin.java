@@ -8,6 +8,7 @@ package meteordevelopment.meteorclient.mixin;
 import com.llamalad7.mixinextras.injector.ModifyExpressionValue;
 import meteordevelopment.meteorclient.MeteorClient;
 import meteordevelopment.meteorclient.events.render.Render2DEvent;
+import com.mojang.blaze3d.systems.RenderSystem;
 import meteordevelopment.meteorclient.mixininterface.IGameRenderer;
 import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.systems.modules.misc.BetterChat;
@@ -37,6 +38,7 @@ public abstract class InGameHudMixin {
     @Inject(method = "render", at = @At("TAIL"))
     private void onRender(DrawContext context, RenderTickCounter tickCounter, CallbackInfo ci) {
         ((IGameRenderer) mc.gameRenderer).meteor$flushGuiState();
+        RenderSystem.getDevice().createCommandEncoder().clearDepthTexture(mc.getFramebuffer().getDepthAttachment(), 1.0);
         context.createNewRootLayer();
 
         Profilers.get().push(MeteorClient.MOD_ID + "_render_2d");
