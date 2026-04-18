@@ -9,6 +9,7 @@ import meteordevelopment.meteorclient.events.entity.player.AttackEntityEvent;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.utils.entity.DamageUtils;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.orbit.EventHandler;
@@ -47,6 +48,10 @@ public class AutoWeapon extends Module {
 
     @EventHandler
     private void onAttack(AttackEntityEvent event) {
+        // KillAura 主动攻击时已自行管理武器切换，不干预
+        KillAura killAura = Modules.get().get(KillAura.class);
+        if (killAura.isActive() && killAura.attacking) return;
+
         if (event.entity instanceof LivingEntity livingEntity) {
             InvUtils.swap(getBestWeapon(livingEntity), false);
         }
