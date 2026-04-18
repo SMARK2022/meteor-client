@@ -151,9 +151,9 @@ public class BowAimbot extends Module {
 
         // Set player rotation
         if (Float.isNaN(pitch)) {
-            Rotations.rotate(Rotations.getYaw(target), Rotations.getPitch(target));
+            Rotations.rotate(Rotations.getYaw(target), Rotations.getPitch(target), 10);
         } else {
-            Rotations.rotate(Rotations.getYaw(new Vec3d(pos.x, pos.y, pos.z)), pitch);
+            Rotations.rotate(Rotations.getYaw(new Vec3d(pos.x, pos.y, pos.z)), pitch, 10);
         }
     }
 

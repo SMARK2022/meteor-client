@@ -452,7 +452,7 @@ public class KillAura extends Module {
                 if (approaching != null) {
                     Rotations.rotateWith(
                         () -> solveEntityAim(approaching, true),
-                        30, null   // 低优先级, 无 callback (不攻击)
+                        -15, null   // 低优先级, 无 callback (不攻击)
                     );
                 }
             }
@@ -517,7 +517,7 @@ public class KillAura extends Module {
                 if (rotation.get() != RotationMode.None) {
                     Rotations.rotateWith(
                         () -> solveEntityAim(primary, false),
-                        100, () -> commitAttack(primary)
+                        150, () -> commitAttack(primary)
                     );
                 } else {
                     commitAttack(primary);
@@ -527,7 +527,7 @@ public class KillAura extends Module {
                 // 冷却就绪但 WTap/HurtTime 未就绪 → 继续硬追踪
                 Rotations.rotateWith(
                     () -> solveEntityAim(primary, false),
-                    50, null
+                    -5, null
                 );
             }
         } else {
@@ -541,7 +541,7 @@ public class KillAura extends Module {
                 // 未就绪: 用前置预测做软追踪，减少攻击瞬间旋转角
                 Rotations.rotateWith(
                     () -> solveEntityAim(primary, true),
-                    50, null
+                    -10, null
                 );
             }
         }

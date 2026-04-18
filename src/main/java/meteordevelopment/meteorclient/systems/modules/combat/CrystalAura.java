@@ -1016,7 +1016,7 @@ public class CrystalAura extends Module {
 
             if (doYawSteps(yaw, pitch)) {
                 setRotation(true, crystal.getPos(), 0, 0);
-                Rotations.rotateToward(crystal.getPos(), 50, () -> attackCrystal(crystal));
+                Rotations.rotateToward(crystal.getPos(), 120, () -> attackCrystal(crystal));
 
                 breakTimer = breakDelay.get();
             }
@@ -1409,7 +1409,7 @@ public class CrystalAura extends Module {
                 setRotation(true, vec3d, 0, 0);
                 Vec3d hitTarget = new Vec3d(vec3d.x, vec3d.y, vec3d.z);
                 // W2 修正: placeTimer 仅在 placeCrystal 成功时递增
-                Rotations.rotateToward(hitTarget, 50, () -> {
+                Rotations.rotateToward(hitTarget, 70, () -> {
                     if (!hasProposal) return; // proposal 已被后续 tick 失效
                     if (placeCrystal(result, proposalDamage, supportBlock) && supportBlock == null)
                         placeTimer += getEffectivePlaceDelay();
@@ -1621,7 +1621,7 @@ public class CrystalAura extends Module {
                     setRotation(true, vec3d, 0, 0);
                     Vec3d hitTarget = new Vec3d(vec3d.x, vec3d.y, vec3d.z);
                     // W2 修正: placeTimer 仅在 placeCrystal 成功时递增
-                    Rotations.rotateToward(hitTarget, 50, () -> {
+                    Rotations.rotateToward(hitTarget, 70, () -> {
                         if (placeCrystal(result, dmg, supportBlock) && supportBlock == null)
                             placeTimer += getEffectivePlaceDelay();
                     });

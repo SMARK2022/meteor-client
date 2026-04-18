@@ -254,8 +254,8 @@ public class Surround extends Module implements PrinterTaskProvider {
 
     public ArrayList<Module> toActivate = new ArrayList<>();
 
-    /** 水晶防护旋转优先级（高于 Printer 的 50，确保抢占） */
-    private static final int PROTECT_ROTATION_PRIORITY = 200;
+    /** 水晶防护旋转优先级（T1 防御层，高于 KillAura 攻击的 150） */
+    private static final int PROTECT_ROTATION_PRIORITY = 250;
     /** 攻击距离 */
     private static final double ATTACK_REACH = 3.0;
 
@@ -414,6 +414,11 @@ public class Surround extends Module implements PrinterTaskProvider {
     @Override
     public int priority() {
         return 100;
+    }
+
+    @Override
+    public int rotationPriority() {
+        return 200; // T1 — 防御层，Surround 放置方块是生存关键动作
     }
 
     @Override

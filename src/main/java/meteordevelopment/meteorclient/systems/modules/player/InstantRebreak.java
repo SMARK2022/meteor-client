@@ -106,7 +106,7 @@ public class InstantRebreak extends Module {
             ticks = 0;
 
             if (shouldMine()) {
-                if (rotate.get()) Rotations.rotate(Rotations.getYaw(blockPos), Rotations.getPitch(blockPos), this::sendPacket);
+                if (rotate.get()) Rotations.rotate(Rotations.getYaw(blockPos), Rotations.getPitch(blockPos), 8, this::sendPacket);
                 else sendPacket();
 
                 mc.getNetworkHandler().sendPacket(new HandSwingC2SPacket(Hand.MAIN_HAND));

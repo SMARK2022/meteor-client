@@ -68,6 +68,15 @@ public interface PrinterTaskProvider {
     }
 
     /**
+     * 此输入源通过 Printer 管线提交旋转时使用的优先级。
+     * <p>数值越大越优先，语义与 {@link meteordevelopment.meteorclient.utils.player.Rotations#rotate} 的 priority 参数一致。
+     * 默认 40（标准蓝图级别 T4）。防御型模块（如 Surround）应覆盖为更高值。</p>
+     */
+    default int rotationPriority() {
+        return 40;
+    }
+
+    /**
      * 显示名称，用于日志输出。
      */
     String name();

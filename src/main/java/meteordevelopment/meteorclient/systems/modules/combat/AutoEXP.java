@@ -115,7 +115,7 @@ public class AutoEXP extends Module {
                     InvUtils.move().from(exp.slot()).toHotbar(slot.get() - 1);
                 }
 
-                Rotations.rotate(mc.player.getYaw(), 90, () -> {
+                Rotations.rotate(mc.player.getYaw(), 90, 5, () -> {
                     if (exp.getHand() != null) {
                         mc.interactionManager.interactItem(mc.player, exp.getHand());
                     }

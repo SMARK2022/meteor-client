@@ -268,7 +268,7 @@ public class ContainerFillManager {
                 // 提交旋转请求（如果启用），本 tick movement 会包含正确的 yaw/pitch
                 if (rotateEnabled) {
                     Rotations.requestPreMovement(
-                        armedInteraction.yaw(), armedInteraction.pitch(), 50, null
+                        armedInteraction.yaw(), armedInteraction.pitch(), 25, null
                     );
                 }
             }

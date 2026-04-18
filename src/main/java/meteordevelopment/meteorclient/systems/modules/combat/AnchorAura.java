@@ -366,7 +366,7 @@ public class AnchorAura extends Module {
         renderBlockPos = bestBreakPos;
 
         if (rotate.get()) {
-            Rotations.rotate(Rotations.getYaw(bestBreakPos), Rotations.getPitch(bestBreakPos), 40, () -> doInteract(glowStone));
+            Rotations.rotate(Rotations.getYaw(bestBreakPos), Rotations.getPitch(bestBreakPos), 30, () -> doInteract(glowStone));
         } else {
             doInteract(glowStone);
         }

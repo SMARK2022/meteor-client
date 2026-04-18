@@ -69,10 +69,10 @@ public class AntiBed extends Module {
         BlockPos head = mc.player.getBlockPos().up();
 
         if (mc.world.getBlockState(head).getBlock() instanceof BedBlock && !breaking) {
-            Rotations.rotate(Rotations.getYaw(head), Rotations.getPitch(head), 50, () -> sendMinePackets(head));
+            Rotations.rotate(Rotations.getYaw(head), Rotations.getPitch(head), 75, () -> sendMinePackets(head));
             breaking = true;
         } else if (breaking) {
-            Rotations.rotate(Rotations.getYaw(head), Rotations.getPitch(head), 50, () -> sendStopPackets(head));
+            Rotations.rotate(Rotations.getYaw(head), Rotations.getPitch(head), 75, () -> sendStopPackets(head));
             breaking = false;
         }
 

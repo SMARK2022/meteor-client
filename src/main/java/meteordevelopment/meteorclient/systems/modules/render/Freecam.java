@@ -225,13 +225,13 @@ public class Freecam extends Module {
 
             if (mc.crosshairTarget instanceof EntityHitResult) {
                 crossHairPos = ((EntityHitResult) mc.crosshairTarget).getEntity().getBlockPos();
-                Rotations.rotate(Rotations.getYaw(crossHairPos), Rotations.getPitch(crossHairPos), 0, null);
+                Rotations.rotate(Rotations.getYaw(crossHairPos), Rotations.getPitch(crossHairPos), -20, null);
             } else {
                 crossHairPosition = mc.crosshairTarget.getPos();
                 crossHairPos = ((BlockHitResult) mc.crosshairTarget).getBlockPos();
 
                 if (!mc.world.getBlockState(crossHairPos).isAir()) {
-                    Rotations.rotate(Rotations.getYaw(crossHairPosition), Rotations.getPitch(crossHairPosition), 0, null);
+                    Rotations.rotate(Rotations.getYaw(crossHairPosition), Rotations.getPitch(crossHairPosition), -20, null);
                 }
             }
         }

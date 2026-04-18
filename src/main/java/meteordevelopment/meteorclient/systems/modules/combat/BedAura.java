@@ -308,7 +308,7 @@ public class BedAura extends Module {
             default -> 0;
         };
 
-        Rotations.rotate(yaw, Rotations.getPitch(pos), () -> {
+        Rotations.rotate(yaw, Rotations.getPitch(pos), 15, () -> {
             BlockUtils.place(pos, bed, false, 0, swing.get(), true);
             breakPos = pos;
         });

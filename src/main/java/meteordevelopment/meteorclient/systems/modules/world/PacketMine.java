@@ -725,7 +725,7 @@ public class PacketMine extends Module {
 
         Vec3d anchor = getFaceAnchor(target.pos, target.face);
         final int pairsToSend = maxPairs;
-        Rotations.rotate(Rotations.getYaw(anchor), Rotations.getPitch(anchor), 50, () -> {
+        Rotations.rotate(Rotations.getYaw(anchor), Rotations.getPitch(anchor), 80, () -> {
             for (int i = 0; i < pairsToSend && localDelayBalance > drainTarget.get(); i++) {
                 sendStartPacket(target.pos, target.face);
                 sendAbortPacket(target.pos, target.face);
@@ -1304,7 +1304,7 @@ public class PacketMine extends Module {
             rotationPhaseToken = expectedPhase;
             rotationQueuedMs = System.currentTimeMillis();
             Vec3d anchor = getFaceAnchor(pos, face);
-            Rotations.rotate(Rotations.getYaw(anchor), Rotations.getPitch(anchor), 50, () -> {
+            Rotations.rotate(Rotations.getYaw(anchor), Rotations.getPitch(anchor), 80, () -> {
                 if (phase != rotationPhaseToken) { clearRotationState(); return; }
                 clearRotationState();
                 action.run();

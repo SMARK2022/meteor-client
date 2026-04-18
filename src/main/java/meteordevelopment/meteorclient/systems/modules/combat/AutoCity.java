@@ -209,7 +209,7 @@ public class AutoCity extends Module {
 
     public void mine(boolean done) {
         InvUtils.swap(pick.slot(), switchMode.get() == SwitchMode.Silent);
-        if (rotate.get()) Rotations.rotate(Rotations.getYaw(targetPos), Rotations.getPitch(targetPos));
+        if (rotate.get()) Rotations.rotate(Rotations.getYaw(targetPos), Rotations.getPitch(targetPos), 8);
 
         Direction direction = BlockUtils.getDirection(targetPos);
         if (!done) mc.interactionManager.sendSequencedPacket(mc.world, (sequence) -> new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.START_DESTROY_BLOCK, targetPos, direction, sequence));

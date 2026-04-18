@@ -224,7 +224,7 @@ public class VeinMiner extends Module {
                 mc.player.swingHand(Hand.MAIN_HAND);
                 mining = true;
             }
-            if (rotate.get()) Rotations.rotate(Rotations.getYaw(blockPos), Rotations.getPitch(blockPos), 50, this::updateBlockBreakingProgress);
+            if (rotate.get()) Rotations.rotate(Rotations.getYaw(blockPos), Rotations.getPitch(blockPos), 35, this::updateBlockBreakingProgress);
             else updateBlockBreakingProgress();
         }
 

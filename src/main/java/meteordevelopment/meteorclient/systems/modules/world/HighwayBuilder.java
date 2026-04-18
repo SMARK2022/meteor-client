@@ -1279,7 +1279,7 @@ public class HighwayBuilder extends Module {
 
                     // if we don't know what's in your echest, open it quickly while we have one available to check
                     if (!EChestMemory.isKnown()) {
-                        if (b.rotation.get().place) Rotations.rotate(Rotations.getYaw(bp), Rotations.getPitch(bp), () ->
+                        if (b.rotation.get().place) Rotations.rotate(Rotations.getYaw(bp), Rotations.getPitch(bp), 20, () ->
                             b.mc.interactionManager.interactBlock(b.mc.player, Hand.MAIN_HAND, new BlockHitResult(Vec3d.ofCenter(bp), Direction.UP, bp, false)));
                         else b.mc.interactionManager.interactBlock(b.mc.player, Hand.MAIN_HAND, new BlockHitResult(Vec3d.ofCenter(bp), Direction.UP, bp, false));
 
@@ -1317,7 +1317,7 @@ public class HighwayBuilder extends Module {
                         rebreakTimer = b.rebreakTimer.get();
 
                         if (b.rotation.get().mine) {
-                            Rotations.rotate(Rotations.getYaw(bp), Rotations.getPitch(bp), () ->
+                            Rotations.rotate(Rotations.getYaw(bp), Rotations.getPitch(bp), 20, () ->
                                 b.mc.interactionManager.sendSequencedPacket(b.mc.world, (sequence) ->
                                     new PlayerActionC2SPacket(PlayerActionC2SPacket.Action.STOP_DESTROY_BLOCK, bp, BlockUtils.getDirection(bp), sequence)
                                 )
@@ -1328,7 +1328,7 @@ public class HighwayBuilder extends Module {
                         );
                     }
                     else {
-                        if (b.rotation.get().mine) Rotations.rotate(Rotations.getYaw(bp), Rotations.getPitch(bp), () -> BlockUtils.breakBlock(bp, true));
+                        if (b.rotation.get().mine) Rotations.rotate(Rotations.getYaw(bp), Rotations.getPitch(bp), 20, () -> BlockUtils.breakBlock(bp, true));
                         else BlockUtils.breakBlock(bp, true);
                     }
                 }
@@ -1666,11 +1666,11 @@ public class HighwayBuilder extends Module {
                     int toolSlot = findAndMoveBestToolToHotbar(b, state, false);
                     InvUtils.swap(toolSlot, false);
 
-                    if (b.rotation.get().mine) Rotations.rotate(Rotations.getYaw(bp), Rotations.getPitch(bp), () -> BlockUtils.breakBlock(bp, true));
+                    if (b.rotation.get().mine) Rotations.rotate(Rotations.getYaw(bp), Rotations.getPitch(bp), 20, () -> BlockUtils.breakBlock(bp, true));
                     else BlockUtils.breakBlock(bp, true);
                 } else {
                     if (b.rotation.get().place) {
-                        Rotations.rotate(Rotations.getYaw(bp), Rotations.getPitch(bp), () ->
+                        Rotations.rotate(Rotations.getYaw(bp), Rotations.getPitch(bp), 20, () ->
                             b.mc.interactionManager.interactBlock(b.mc.player, Hand.MAIN_HAND, new BlockHitResult(Vec3d.ofCenter(bp), Direction.UP, bp, false))
                         );
                     }
@@ -1917,7 +1917,7 @@ public class HighwayBuilder extends Module {
                 BlockPos mcPos = pos.getBlockPos();
                 boolean multiBreak = b.blocksPerTick.get() > 1 && BlockUtils.canInstaBreak(mcPos) && !b.rotation.get().mine;
                 if (BlockUtils.canBreak(mcPos)) {
-                    if (b.rotation.get().mine) Rotations.rotate(Rotations.getYaw(mcPos), Rotations.getPitch(mcPos), () -> BlockUtils.breakBlock(mcPos, true));
+                    if (b.rotation.get().mine) Rotations.rotate(Rotations.getYaw(mcPos), Rotations.getPitch(mcPos), 20, () -> BlockUtils.breakBlock(mcPos, true));
                     else BlockUtils.breakBlock(mcPos, true);
                     breaking = true;
 

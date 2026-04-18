@@ -150,7 +150,7 @@ public class NoFall extends Module {
             // Center and place block
             if (anchor.get()) PlayerUtils.centerPlayer();
 
-            Rotations.rotate(mc.player.getYaw(), 90, Integer.MAX_VALUE, () -> {
+            Rotations.rotate(mc.player.getYaw(), 90, 1000, () -> {
                 double preY = mc.player.getVelocity().y;
                 ((IVec3d) mc.player.getVelocity()).meteor$setY(0);
 
@@ -207,7 +207,7 @@ public class NoFall extends Module {
         if (!item.found()) return;
 
         if (interactItem) {
-            Rotations.rotate(Rotations.getYaw(blockPos), Rotations.getPitch(blockPos), 10, true, () -> {
+            Rotations.rotate(Rotations.getYaw(blockPos), Rotations.getPitch(blockPos), 900, true, () -> {
                 if (item.isOffhand()) {
                     mc.interactionManager.interactItem(mc.player, Hand.OFF_HAND);
                 } else {

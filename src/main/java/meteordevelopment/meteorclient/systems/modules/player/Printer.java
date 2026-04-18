@@ -477,7 +477,7 @@ public class Printer extends Module {
      * ArmedAction - 已就绪的动作（含计划和确认的手）
      * 在 TickEvent.Pre 中创建，在 SendMovementPacketsEvent.Post 中消费。
      */
-    private record ArmedAction(ActionPlan plan, Hand hand) {}
+    private record ArmedAction(ActionPlan plan, Hand hand, int rotationPriority) {}
 
     /**
      * PreviewCandidate - 通过完整 behavior.plan() 过滤的候选（含评分）
@@ -511,7 +511,7 @@ public class Printer extends Module {
      * PlannedTask - 携带匹配行为的任务
      * 扫描阶段即绑定行为，避免 selectBestAction 二次查找。
      */
-    private record PlannedTask(PrinterTask task, PrinterBehavior behavior) {}
+    private record PlannedTask(PrinterTask task, PrinterBehavior behavior, int rotationPriority) {}
 
     /** 当前 tick 可修复的任务列表（已绑定行为） */
     private final List<PlannedTask> tasks = new ArrayList<>();
@@ -760,7 +760,7 @@ public class Printer extends Module {
                 publishRenderPlan(armed.plan());
                 if (rotate.get()) {
                     ActionPlan.Interaction inter = armed.plan().interaction();
-                    Rotations.requestPreMovementToward(inter.hitVec(), 50, null);
+                    Rotations.requestPreMovementToward(inter.hitVec(), armed.rotationPriority(), null);
                 }
                 return; // plan 已就绪，本 tick 不再启动容器
             }
@@ -811,7 +811,7 @@ public class Printer extends Module {
         }
         if (armed != null && rotate.get()) {
             ActionPlan.Interaction inter = armed.plan().interaction();
-            Rotations.requestPreMovementToward(inter.hitVec(), 50, null);
+            Rotations.requestPreMovementToward(inter.hitVec(), armed.rotationPriority(), null);
         }
     }
 
@@ -924,7 +924,7 @@ public class Printer extends Module {
         for (PreviewCandidate c : previewCandidates) {
             Hand hand = getReadyHand(c.plan);
             if (hand != null && isSneakStateOk(c.plan.sneakPolicy())) {
-                return new SelectionResult.Ready(new ArmedAction(c.plan, hand));
+                return new SelectionResult.Ready(new ArmedAction(c.plan, hand, c.plannedTask().rotationPriority()));
             }
         }
 
@@ -935,7 +935,7 @@ public class Printer extends Module {
 
             SneakReadiness sr = prepareSneakState(c.plan.sneakPolicy());
             if (sr == SneakReadiness.READY) {
-                return new SelectionResult.Ready(new ArmedAction(c.plan, hand));
+                return new SelectionResult.Ready(new ArmedAction(c.plan, hand, c.plannedTask().rotationPriority()));
             }
             if (sr == SneakReadiness.PREPARING) {
                 return new SelectionResult.AwaitingPrep();
@@ -1352,7 +1352,7 @@ public class Printer extends Module {
             // 实体阻挡检查（仅对放置类行为有意义）
             if (behavior instanceof BlockPlacementBehavior && hasBlockingEntity(pos)) continue;
 
-            tasks.add(new PlannedTask(task, behavior));
+            tasks.add(new PlannedTask(task, behavior, 40)); // T4 — 标准蓝图打印
         }
 
         // 按距离排序（最近的优先）
@@ -1422,6 +1422,7 @@ public class Printer extends Module {
 
             Set<PrinterBehavior.Group> allowed = provider.allowedGroups();
             boolean bypass = provider.bypassSchematicCheck();
+            int rotPri = provider.rotationPriority();
 
             for (BlockPos pos : positions) {
                 double dist2 = eye.squaredDistanceTo(pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5);
@@ -1442,7 +1443,7 @@ public class Printer extends Module {
                 if (behavior == null || behavior.isSatisfied(task)) continue;
                 if (behavior instanceof BlockPlacementBehavior && hasBlockingEntity(pos)) continue;
 
-                tasks.add(new PlannedTask(task, behavior));
+                tasks.add(new PlannedTask(task, behavior, rotPri));
             }
         }
     }
