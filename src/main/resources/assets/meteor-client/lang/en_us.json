@@ -1,4 +1,15 @@
 {
   "key.meteor-client.open-gui": "Open GUI",
-  "key.meteor-client.open-commands": "Open Commands"
+  "key.meteor-client.open-commands": "Open Commands",
+  "meteor.meteor_client.misc.notifier.chat.player.entered_visual_range": "%1$s has entered your visual range!",
+  "meteor.meteor_client.misc.notifier.chat.entity.spawned_at": "%1$s has spawned at %2$s.",
+  "meteor.meteor_client.misc.notifier.chat.player.left_visual_range": "%1$s has left your visual range!",
+  "meteor.meteor_client.misc.notifier.chat.entity.despawned_at": "%1$s has despawned at %2$s.",
+  "meteor.meteor_client.misc.notifier.chat.player.pearl_landed": "%1$s's pearl landed at %2$s, %3$s, %4$s (%5$sm away, travelled %6$sm).",
+  "meteor.meteor_client.misc.notifier.chat.player.popped_totems": "%1$s popped %2$s %3$s.",
+  "meteor.meteor_client.misc.notifier.chat.player.died_after_popping": "%1$s died after popping %2$s %3$s.",
+  "meteor.meteor_client.misc.notifier.chat.player.joined": "%1$s joined.",
+  "meteor.meteor_client.misc.notifier.chat.player.left": "%1$s left.",
+  "meteor.meteor_client.misc.notifier.chat.totem.single": "totem",
+  "meteor.meteor_client.misc.notifier.chat.totem.plural": "totems"
 }

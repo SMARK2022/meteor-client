@@ -42,7 +42,25 @@ import java.util.*;
 
 import static meteordevelopment.meteorclient.utils.player.ChatUtils.formatCoords;
 
+/**
+ * 通知器模块的职责是“被动观测并反馈”，而不是“主动干预战斗流程”。
+ *
+ * 设计原因（Why）：
+ * 1. 战斗与态势判断依赖实时事件（图腾弹出、珍珠落点、可视范围、上下线），统一由该模块输出，避免多个模块各自刷屏。
+ * 2. 聊天提示改为 i18n key 后，运行时输出可跟随语言包变化，避免中文分支与英文分支逻辑分叉。
+ *
+ * 底层机制与时序（Timeline）：
+ * - 视觉范围：基于实体加入/移除事件触发（EntityAdded / EntityRemoved）。
+ * - 图腾弹出：监听 EntityStatusS2CPacket 中 USE_TOTEM_OF_UNDYING 状态。
+ * - 上下线：监听 PlayerListS2CPacket / PlayerRemoveS2CPacket，先入队，再在 Tick.Post 按延迟出队。
+ *
+ * 反作弊相关原则：
+ * - 本模块只消费客户端侧事件和 S2C 信息，不注入攻击/交互 C2S 包，不改变服务端判定链路。
+ * - 因此它在反作弊视角下属于“只读观测层”，不会新增行为学特征。
+ */
 public class Notifier extends Module {
+    private static final String CHAT_KEY_PREFIX = "meteor.meteor_client.misc.notifier.chat.";
+
     private final SettingGroup sgTotemPops = settings.createGroup("Totem Pops");
     private final SettingGroup sgVisualRange = settings.createGroup("Visual Range");
     private final SettingGroup sgPearl = settings.createGroup("Pearl");
@@ -208,16 +226,18 @@ public class Notifier extends Module {
         if (!event.entity.getUuid().equals(mc.player.getUuid()) && entities.get().contains(event.entity.getType()) && visualRange.get() && this.event.get() != Event.Despawn) {
             if (event.entity instanceof PlayerEntity) {
                 if ((!visualRangeIgnoreFriends.get() || !Friends.get().isFriend(((PlayerEntity) event.entity))) && (!visualRangeIgnoreFakes.get() || !(event.entity instanceof FakePlayerEntity))) {
-                    ChatUtils.sendMsg(event.entity.getId() + 100, Formatting.GRAY, "(highlight)%s(default) has entered your visual range!", event.entity.getName().getString());
+                    ChatUtils.sendMsg(event.entity.getId() + 100, null, null,
+                        chat("player.entered_visual_range", white(event.entity.getName().getString()))
+                    );
 
                     if (visualMakeSound.get())
                         mc.world.playSoundFromEntity(mc.player, mc.player, SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, SoundCategory.AMBIENT, 3.0F, 1.0F);
                 }
             } else {
-                MutableText text = Text.literal(event.entity.getType().getName().getString()).formatted(Formatting.WHITE);
-                text.append(Text.literal(" has spawned at ").formatted(Formatting.GRAY));
-                text.append(formatCoords(event.entity.getPos()));
-                text.append(Text.literal(".").formatted(Formatting.GRAY));
+                MutableText text = chat("entity.spawned_at",
+                    white(event.entity.getType().getName().getString()),
+                    formatCoords(event.entity.getPos())
+                );
                 info(text);
             }
         }
@@ -232,16 +252,18 @@ public class Notifier extends Module {
         if (!event.entity.getUuid().equals(mc.player.getUuid()) && entities.get().contains(event.entity.getType()) && visualRange.get() && this.event.get() != Event.Spawn) {
             if (event.entity instanceof PlayerEntity) {
                 if ((!visualRangeIgnoreFriends.get() || !Friends.get().isFriend(((PlayerEntity) event.entity))) && (!visualRangeIgnoreFakes.get() || !(event.entity instanceof FakePlayerEntity))) {
-                    ChatUtils.sendMsg(event.entity.getId() + 100, Formatting.GRAY, "(highlight)%s(default) has left your visual range!", event.entity.getName().getString());
+                    ChatUtils.sendMsg(event.entity.getId() + 100, null, null,
+                        chat("player.left_visual_range", white(event.entity.getName().getString()))
+                    );
 
                     if (visualMakeSound.get())
                         mc.world.playSoundFromEntity(mc.player, mc.player, SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, SoundCategory.AMBIENT, 3.0F, 1.0F);
                 }
             } else {
-                MutableText text = Text.literal(event.entity.getType().getName().getString()).formatted(Formatting.WHITE);
-                text.append(Text.literal(" has despawned at ").formatted(Formatting.GRAY));
-                text.append(formatCoords(event.entity.getPos()));
-                text.append(Text.literal(".").formatted(Formatting.GRAY));
+                MutableText text = chat("entity.despawned_at",
+                    white(event.entity.getType().getName().getString()),
+                    formatCoords(event.entity.getPos())
+                );
                 info(text);
             }
         }
@@ -254,7 +276,14 @@ public class Notifier extends Module {
                 if (pearl.getOwner() != null && pearl.getOwner() instanceof PlayerEntity p) {
                     double d = pearlStartPosMap.get(i).distanceTo(e.getPos());
                     if ((!Friends.get().isFriend(p) || !pearlIgnoreFriends.get()) && (!p.equals(mc.player) || !pearlIgnoreOwn.get())) {
-                        info("(highlight)%s's(default) pearl landed at %d, %d, %d (highlight)(%.1fm away, travelled %.1fm)(default).", pearl.getOwner().getName().getString(), pearl.getBlockPos().getX(), pearl.getBlockPos().getY(), pearl.getBlockPos().getZ(), pearl.distanceTo(mc.player), d);
+                        info(chat("player.pearl_landed",
+                            white(pearl.getOwner().getName().getString()),
+                            white(pearl.getBlockPos().getX()),
+                            white(pearl.getBlockPos().getY()),
+                            white(pearl.getBlockPos().getZ()),
+                            white(String.format(Locale.ROOT, "%.1f", pearl.distanceTo(mc.player))),
+                            white(String.format(Locale.ROOT, "%.1f", d))
+                        ));
                     }
                 }
                 pearlStartPosMap.remove(i);
@@ -293,6 +322,14 @@ public class Notifier extends Module {
 
     @EventHandler
     private void onReceivePacket(PacketEvent.Receive event) {
+        /**
+         * 时序说明：
+         * 1. 登录阶段首个 PlayerListS2CPacket 往往是全量同步，不代表“新玩家刚加入”，因此用 loginPacket 跳过一次。
+         * 2. 图腾弹出来自服务端实体状态包，先计数再输出，保证同一玩家消息替换 id 连续。
+         *
+         * 反作弊侧说明：
+         * - 此处仅消费 S2C 并更新本地状态，不产生额外交互包，避免触发任何行为检测链路。
+         */
         switch (event.packet) {
             case PlayerListS2CPacket packet when joinsLeavesMode.get().equals(JoinLeaveModes.Both) || joinsLeavesMode.get().equals(JoinLeaveModes.Joins) -> {
                 if (loginPacket) {
@@ -320,7 +357,11 @@ public class Notifier extends Module {
                     double distance = PlayerUtils.distanceTo(entity);
                     if (totemsDistanceCheck.get() && distance > totemsDistance.get()) return;
 
-                    ChatUtils.sendMsg(getChatId(entity), Formatting.GRAY, "(highlight)%s (default)popped (highlight)%d (default)%s.", entity.getName().getString(), pops, pops == 1 ? "totem" : "totems");
+                    ChatUtils.sendMsg(getChatId(entity), null, null, chat("player.popped_totems",
+                        white(entity.getName().getString()),
+                        white(pops),
+                        chat(pops == 1 ? "totem.single" : "totem.plural")
+                    ));
                 }
             }
             default -> {}
@@ -349,7 +390,11 @@ public class Notifier extends Module {
                 if (player.deathTime > 0 || player.getHealth() <= 0) {
                     int pops = totemPopMap.removeInt(player.getUuid());
 
-                    ChatUtils.sendMsg(getChatId(player), Formatting.GRAY, "(highlight)%s (default)died after popping (highlight)%d (default)%s.", player.getName().getString(), pops, pops == 1 ? "totem" : "totems");
+                    ChatUtils.sendMsg(getChatId(player), null, null, chat("player.died_after_popping",
+                        white(player.getName().getString()),
+                        white(pops),
+                        chat(pops == 1 ? "totem.single" : "totem.plural")
+                    ));
                     chatIdMap.removeInt(player.getUuid());
                 }
             }
@@ -361,6 +406,11 @@ public class Notifier extends Module {
     }
 
     private void createJoinNotifications(PlayerListS2CPacket packet) {
+        /**
+         * 这里采用“先入队、后在 Tick.Post 出队”的节流模式：
+         * - Why：服务器切服/重连时可能瞬间同步大量玩家，直接刷 chat 会淹没关键战斗信息。
+         * - Timeline：网络线程收包 -> 入队 -> 主线程 tick 按 notificationDelay 发送。
+         */
         for (PlayerListS2CPacket.Entry entry : packet.getPlayerAdditionEntries()) {
             if (entry.profile() == null) continue;
 
@@ -372,11 +422,7 @@ public class Notifier extends Module {
                         + entry.profile().getName()
                 ));
             } else {
-                messageQueue.addLast(Text.literal(
-                    Formatting.WHITE
-                        + entry.profile().getName()
-                        + Formatting.GRAY + " joined."
-                ));
+                messageQueue.addLast(chat("player.joined", white(entry.profile().getName())));
             }
         }
     }
@@ -396,13 +442,17 @@ public class Notifier extends Module {
                         + toRemove.getProfile().getName()
                 ));
             } else {
-                messageQueue.addLast(Text.literal(
-                    Formatting.WHITE
-                        + toRemove.getProfile().getName()
-                        + Formatting.GRAY + " left."
-                ));
+                messageQueue.addLast(chat("player.left", white(toRemove.getProfile().getName())));
             }
         }
+    }
+
+    private MutableText chat(String key, Object... args) {
+        return Text.translatable(CHAT_KEY_PREFIX + key, args).formatted(Formatting.GRAY);
+    }
+
+    private static Text white(Object value) {
+        return Text.literal(String.valueOf(value)).formatted(Formatting.WHITE);
     }
 
     public enum Event {
