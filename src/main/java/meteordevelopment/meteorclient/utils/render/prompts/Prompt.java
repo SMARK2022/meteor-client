@@ -6,6 +6,7 @@ import meteordevelopment.meteorclient.gui.WindowScreen;
 import meteordevelopment.meteorclient.gui.widgets.containers.WHorizontalList;
 import meteordevelopment.meteorclient.gui.widgets.pressable.WCheckbox;
 import meteordevelopment.meteorclient.systems.config.Config;
+import meteordevelopment.meteorclient.utils.TranslationHelper;
 import net.minecraft.client.gui.screen.Screen;
 
 import java.util.ArrayList;
@@ -15,6 +16,8 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 @SuppressWarnings("unchecked") // cant instantiate a Prompt directly so this is fine
 public abstract class Prompt<T> {
+    private static final String KEY_PREFIX = "meteor.meteor_client.gui.prompt";
+
     protected final GuiTheme theme;
     protected final Screen parent;
 
@@ -92,7 +95,7 @@ public abstract class Prompt<T> {
             if (dontShowAgainCheckboxVisible) {
                 WHorizontalList checkboxContainer = add(theme.horizontalList()).expandX().widget();
                 dontShowAgainCheckbox = checkboxContainer.add(theme.checkbox(false)).widget();
-                checkboxContainer.add(theme.label("Don't show this again.")).expandX();
+                checkboxContainer.add(theme.label(TranslationHelper.translate(KEY_PREFIX + ".label.dont_show_again", "Don't show this again."))).expandX();
             } else dontShowAgainCheckbox = null;
 
             list = add(theme.horizontalList()).expandX().widget();

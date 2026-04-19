@@ -16,6 +16,7 @@ import meteordevelopment.meteorclient.gui.widgets.pressable.WButton;
 import meteordevelopment.meteorclient.gui.widgets.pressable.WCheckbox;
 import meteordevelopment.meteorclient.systems.hud.Hud;
 import meteordevelopment.meteorclient.systems.hud.screens.HudEditorScreen;
+import meteordevelopment.meteorclient.utils.TranslationHelper;
 import meteordevelopment.meteorclient.utils.misc.NbtUtils;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
@@ -23,8 +24,15 @@ import net.minecraft.client.gui.screen.Screen;
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 public class HudTab extends Tab {
+    private static final String KEY_PREFIX = "meteor.meteor_client.gui.tab.hud";
+
     public HudTab() {
         super("HUD");
+    }
+
+    @Override
+    protected String translationKey() {
+        return KEY_PREFIX + ".title";
     }
 
     @Override
@@ -55,24 +63,24 @@ public class HudTab extends Tab {
 
             add(theme.horizontalSeparator()).expandX();
 
-            WButton openEditor = add(theme.button("Edit")).expandX().widget();
+            WButton openEditor = add(theme.button(tr("button.edit", "Edit"))).expandX().widget();
             openEditor.action = () -> mc.setScreen(new HudEditorScreen(theme));
 
             WHorizontalList buttons = add(theme.horizontalList()).expandX().widget();
-            buttons.add(theme.confirmedButton("Clear", "Confirm")).expandX().widget().action = hud::clear;
-            buttons.add(theme.confirmedButton("Reset to default elements", "Confirm")).expandX().widget().action = hud::resetToDefaultElements;
+            buttons.add(theme.confirmedButton(tr("button.clear", "Clear"), tr("button.confirm", "Confirm"))).expandX().widget().action = hud::clear;
+            buttons.add(theme.confirmedButton(tr("button.reset_default_elements", "Reset to default elements"), tr("button.confirm", "Confirm"))).expandX().widget().action = hud::resetToDefaultElements;
 
             add(theme.horizontalSeparator()).expandX();
 
             WHorizontalList bottom = add(theme.horizontalList()).expandX().widget();
 
-            bottom.add(theme.label("Active: "));
+            bottom.add(theme.label(tr("label.active", "Active: ")));
             WCheckbox active = bottom.add(theme.checkbox(hud.active)).expandCellX().widget();
             active.action = () -> hud.active = active.checked;
 
             WButton resetSettings = bottom.add(theme.button(GuiRenderer.RESET)).widget();
             resetSettings.action = hud.settings::reset;
-            resetSettings.tooltip = "Reset";
+            resetSettings.tooltip = tr("tooltip.reset", "Reset");
         }
 
         @Override
@@ -95,6 +103,10 @@ public class HudTab extends Tab {
         @Override
         public boolean fromClipboard() {
             return NbtUtils.fromClipboard(hud);
+        }
+
+        private static String tr(String key, String fallback, Object... args) {
+            return TranslationHelper.translate(KEY_PREFIX + "." + key, fallback, args);
         }
     }
 }

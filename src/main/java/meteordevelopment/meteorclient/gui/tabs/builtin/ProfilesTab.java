@@ -22,6 +22,7 @@ import meteordevelopment.meteorclient.gui.widgets.pressable.WConfirmedMinus;
 import meteordevelopment.meteorclient.settings.Setting;
 import meteordevelopment.meteorclient.systems.profiles.Profile;
 import meteordevelopment.meteorclient.systems.profiles.Profiles;
+import meteordevelopment.meteorclient.utils.TranslationHelper;
 import meteordevelopment.meteorclient.utils.Utils;
 import meteordevelopment.meteorclient.utils.misc.NbtUtils;
 import meteordevelopment.meteorclient.utils.render.prompts.OkPrompt;
@@ -47,6 +48,7 @@ import java.util.Map;
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 public class ProfilesTab extends Tab {
+    private static final String KEY_PREFIX = "meteor.meteor_client.gui.tab.profiles";
     private static final PointerBuffer filters;
 
     static {
@@ -60,6 +62,11 @@ public class ProfilesTab extends Tab {
 
     public ProfilesTab() {
         super("Profiles");
+    }
+
+    @Override
+    protected String translationKey() {
+        return KEY_PREFIX + ".title";
     }
 
     @Override
@@ -87,13 +94,13 @@ public class ProfilesTab extends Tab {
             WHorizontalList l = add(theme.horizontalList()).expandX().widget();
 
             // Create
-            WButton create = l.add(theme.button("Create")).expandX().widget();
-            create.tooltip = "Create new profile";
+            WButton create = l.add(theme.button(tr("button.create", "Create"))).expandX().widget();
+            create.tooltip = tr("tooltip.create_profile", "Create new profile");
             create.action = () -> mc.setScreen(new EditProfileScreen(theme, null, this::reload));
 
             // Import
-            WButton importBtn = l.add(theme.button("Import")).expandX().widget();
-            importBtn.tooltip = "Import profile";
+            WButton importBtn = l.add(theme.button(tr("button.import", "Import"))).expandX().widget();
+            importBtn.tooltip = tr("tooltip.import_profile", "Import profile");
             importBtn.action = () -> {
                 try {
                     Profile imported = importProfile();
@@ -102,9 +109,9 @@ public class ProfilesTab extends Tab {
                 } catch (IOException e) {
                     MeteorClient.LOG.error("Error importing profile", e);
                     OkPrompt.create()
-                        .title("Failure importing profile")
-                        .message("There was an error importing the profile.")
-                        .message("Error: %d", e.getMessage())
+                        .title(tr("prompt.import_failure.title", "Failure importing profile"))
+                        .message(tr("prompt.import_failure.line_1", "There was an error importing the profile."))
+                        .message(tr("prompt.import_failure.line_2", "Error: %s", e.getMessage()))
                         .dontShowAgainCheckboxVisible(false)
                         .show();
                 }
@@ -118,14 +125,14 @@ public class ProfilesTab extends Tab {
             for (Profile profile : Profiles.get()) {
                 table.add(theme.label(profile.name.get())).expandCellX();
 
-                WConfirmedButton save = theme.confirmedButton("Save", "Confirm");
+                WConfirmedButton save = theme.confirmedButton(tr("button.save", "Save"), tr("button.confirm", "Confirm"));
                 save.action = profile::save;
                 table.add(save).right();
 
-                WButton load = table.add(theme.button("Load")).widget();
+                WButton load = table.add(theme.button(tr("button.load", "Load"))).widget();
                 load.action = profile::load;
 
-                WButton export = table.add(theme.button("Export")).widget();
+                WButton export = table.add(theme.button(tr("button.export", "Export"))).widget();
                 export.action = () -> mc.setScreen(new ExportProfileScreen(theme, profile));
 
                 WButton edit = table.add(theme.button(GuiRenderer.EDIT)).widget();
@@ -142,7 +149,7 @@ public class ProfilesTab extends Tab {
         }
 
         private Profile importProfile() throws IOException {
-            String file = TinyFileDialogs.tinyfd_openFileDialog("Select profile to import", null, filters, null, false);
+            String file = TinyFileDialogs.tinyfd_openFileDialog(tr("dialog.select_profile_to_import", "Select profile to import"), null, filters, null, false);
             if (file == null) return null;
             File profileFile = new File(file);
 
@@ -185,6 +192,10 @@ public class ProfilesTab extends Tab {
         public boolean fromClipboard() {
             return NbtUtils.fromClipboard(Profiles.get());
         }
+
+        private static String tr(String key, String fallback, Object... args) {
+            return TranslationHelper.translate(KEY_PREFIX + "." + key, fallback, args);
+        }
     }
 
     private static class EditProfileScreen extends WindowScreen {
@@ -194,7 +205,7 @@ public class ProfilesTab extends Tab {
         private final Runnable action;
 
         public EditProfileScreen(GuiTheme theme, Profile profile, Runnable action) {
-            super(theme, profile == null ? "New Profile" : "Edit Profile");
+            super(theme, profile == null ? tr("screen.new_profile", "New Profile") : tr("screen.edit_profile", "Edit Profile"));
 
             this.isNew = profile == null;
             this.profile = isNew ? new Profile() : profile;
@@ -208,7 +219,7 @@ public class ProfilesTab extends Tab {
 
             add(theme.horizontalSeparator()).expandX();
 
-            WButton save = add(theme.button(isNew ? "Create" : "Save")).expandX().widget();
+            WButton save = add(theme.button(isNew ? tr("button.create", "Create") : tr("button.save", "Save"))).expandX().widget();
             save.action = () -> {
                 if (profile.name.get().isEmpty()) return;
 
@@ -245,19 +256,23 @@ public class ProfilesTab extends Tab {
         protected void onClosed() {
             if (action != null) action.run();
         }
+
+        private static String tr(String key, String fallback, Object... args) {
+            return TranslationHelper.translate(KEY_PREFIX + "." + key, fallback, args);
+        }
     }
 
     private static class ExportProfileScreen extends WindowScreen {
         private final Profile profile;
 
         public ExportProfileScreen(GuiTheme theme, Profile profile) {
-            super(theme, "Export Profile");
+            super(theme, tr("screen.export_profile", "Export Profile"));
             this.profile = profile;
         }
 
         @Override
         public void initWidgets() {
-            add(theme.label("Select which profile settings to export."));
+            add(theme.label(tr("label.select_settings_to_export", "Select which profile settings to export.")));
 
             WContainer settingsContainer = add(theme.verticalList()).expandX().minWidth(400).widget();
 
@@ -270,7 +285,7 @@ public class ProfilesTab extends Tab {
 
             add(theme.horizontalSeparator()).expandX().widget();
 
-            WButton export = add(theme.button("Export profile")).expandX().widget();
+            WButton export = add(theme.button(tr("button.export_profile", "Export profile"))).expandX().widget();
             export.action = () -> {
                 exportProfile(profile, hud.checked, macros.checked, modules.checked, waypoints.checked);
                 close();
@@ -288,7 +303,7 @@ public class ProfilesTab extends Tab {
         }
 
         private void exportProfile(Profile profile, boolean hud, boolean macros, boolean modules, boolean waypoints) {
-            String path = TinyFileDialogs.tinyfd_saveFileDialog("Save profile", profile.name.get(), filters, null);
+            String path = TinyFileDialogs.tinyfd_saveFileDialog(tr("dialog.save_profile", "Save profile"), profile.name.get(), filters, null);
             if (path == null) return;
             Path p = Path.of(path.endsWith(".nbt") ? path : path + ".nbt");
 
@@ -311,12 +326,16 @@ public class ProfilesTab extends Tab {
             } catch (IOException e) {
                 MeteorClient.LOG.error("Error serialising profile {} to a file", profile.name.get(), e);
                 OkPrompt.create()
-                    .title("Failure exporting profile")
-                    .message("There was an error serialising or exporting the profile %d.", profile.name.get())
-                    .message("Error: %d", e.getMessage())
+                    .title(tr("prompt.export_failure.title", "Failure exporting profile"))
+                    .message(tr("prompt.export_failure.line_1", "There was an error serialising or exporting the profile %s.", profile.name.get()))
+                    .message(tr("prompt.export_failure.line_2", "Error: %s", e.getMessage()))
                     .dontShowAgainCheckboxVisible(false)
                     .show();
             }
+        }
+
+        private static String tr(String key, String fallback, Object... args) {
+            return TranslationHelper.translate(KEY_PREFIX + "." + key, fallback, args);
         }
     }
 }

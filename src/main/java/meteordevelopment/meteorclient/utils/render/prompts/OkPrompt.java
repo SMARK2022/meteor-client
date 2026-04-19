@@ -8,11 +8,14 @@ package meteordevelopment.meteorclient.utils.render.prompts;
 import meteordevelopment.meteorclient.gui.GuiTheme;
 import meteordevelopment.meteorclient.gui.GuiThemes;
 import meteordevelopment.meteorclient.gui.widgets.pressable.WButton;
+import meteordevelopment.meteorclient.utils.TranslationHelper;
 import net.minecraft.client.gui.screen.Screen;
 
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 public class OkPrompt extends Prompt<OkPrompt> {
+    private static final String KEY_PREFIX = "meteor.meteor_client.gui.prompt.button";
+
     private Runnable onOk = () -> {};
 
     private OkPrompt(GuiTheme theme, Screen parent) {
@@ -34,7 +37,7 @@ public class OkPrompt extends Prompt<OkPrompt> {
 
     @Override
     protected void initialiseWidgets(PromptScreen screen) {
-        WButton okButton = screen.list.add(theme.button("Ok")).expandX().widget();
+        WButton okButton = screen.list.add(theme.button(TranslationHelper.translate(KEY_PREFIX + ".ok", "Ok"))).expandX().widget();
         okButton.action = () -> {
             dontShowAgain(screen);
             onOk.run();

@@ -8,11 +8,14 @@ package meteordevelopment.meteorclient.utils.render.prompts;
 import meteordevelopment.meteorclient.gui.GuiTheme;
 import meteordevelopment.meteorclient.gui.GuiThemes;
 import meteordevelopment.meteorclient.gui.widgets.pressable.WButton;
+import meteordevelopment.meteorclient.utils.TranslationHelper;
 import net.minecraft.client.gui.screen.Screen;
 
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 public class YesNoPrompt extends Prompt<YesNoPrompt> {
+    private static final String KEY_PREFIX = "meteor.meteor_client.gui.prompt.button";
+
     private Runnable onYes = () -> {};
     private Runnable onNo = () -> {};
 
@@ -40,14 +43,14 @@ public class YesNoPrompt extends Prompt<YesNoPrompt> {
 
     @Override
     protected void initialiseWidgets(PromptScreen screen) {
-        WButton yesButton = screen.list.add(theme.button("Yes")).expandX().widget();
+        WButton yesButton = screen.list.add(theme.button(TranslationHelper.translate(KEY_PREFIX + ".yes", "Yes"))).expandX().widget();
         yesButton.action = () -> {
             dontShowAgain(screen);
             onYes.run();
             screen.close();
         };
 
-        WButton noButton = screen.list.add(theme.button("No")).expandX().widget();
+        WButton noButton = screen.list.add(theme.button(TranslationHelper.translate(KEY_PREFIX + ".no", "No"))).expandX().widget();
         noButton.action = () -> {
             dontShowAgain(screen);
             onNo.run();
