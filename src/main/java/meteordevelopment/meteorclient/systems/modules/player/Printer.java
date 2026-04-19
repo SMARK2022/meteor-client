@@ -66,20 +66,27 @@ import net.minecraft.network.packet.c2s.play.HandSwingC2SPacket;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
 import net.minecraft.util.math.*;
+import net.minecraft.util.function.BooleanBiFunction;
+import net.minecraft.util.shape.VoxelShapes;
 
 import java.util.*;
 
 /**
- * Printer Module - Automatically places blocks based on Litematica schematic.
+ * Printer：基于 Litematica 的自动放置执行器。
  *
- * 事件执行顺序：
- * 1. TickEvent.Pre (MinecraftClient.tick HEAD) → 规划阶段 + 提交旋转请求
- * 2. Rotations.onPlayerTickMovement → 自动预应用 yaw/pitch (由协调器处理)
- * 3. sendMovementPackets → vanilla movement packet（带有正确的 yaw/pitch）
- * 4. SendMovementPacketsEvent.Post (sendMovementPackets TAIL) → 执行放置
- *    (Rotations 协调器在此之后自动恢复视角)
+ * 架构 Why：
+ * - 放置逻辑必须在高频 Tick 中保持“可预测、可回放、可限速”，否则在高延迟或反作弊环境下会出现抖动与误放。
+ * - 因此模块将“候选扫描与计划生成”放在 Pre，将“真实交互发包”放在 Movement 之后的 Post，避免同拍内读写状态互相污染。
  *
- * 这样 movement 物理、movement packet、place packet 使用同一个角度。
+ * 底层机制：
+ * - 服务端以交互包到达顺序和命中姿态判定合法性；客户端若在错误时机旋转/交互，会造成 hitVec 与视角不一致。
+ * - Rotations 协调器负责在移动包前预应用角度，让 movement 与 place 共享同一拍姿态。
+ *
+ * Timeline：
+ * 1) TickEvent.Pre：读取世界快照、构建 ActionPlan、提交旋转请求。
+ * 2) Rotations.onPlayerTickMovement：预应用 yaw/pitch。
+ * 3) sendMovementPackets：发送 vanilla movement 包。
+ * 4) SendMovementPacketsEvent.Post：在同拍姿态下执行交互包发送，随后由协调器恢复视角。
  */
 public class Printer extends Module {
 
@@ -865,7 +872,7 @@ public class Printer extends Module {
             if (plan == null) continue;
 
             // 放置目标位置实体阻挡检查
-            if (plan instanceof ActionPlan.PlaceBlock pb && hasBlockingEntity(pb.targetPos())) continue;
+            if (plan instanceof ActionPlan.PlaceBlock pb && hasBlockingEntity(pb.targetPos(), pb.desiredState())) continue;
 
             planned++;
 
@@ -1134,7 +1141,7 @@ public class Printer extends Module {
 
     private boolean isPlaceBlockStillValid(ActionPlan.PlaceBlock plan, Hand hand) {
         // 实体阻挡复查（执行前最后防线）
-        if (hasBlockingEntity(plan.targetPos())) return false;
+        if (hasBlockingEntity(plan.targetPos(), plan.desiredState())) return false;
 
         ActionPlan.Interaction inter = plan.interaction();
 
@@ -1350,7 +1357,7 @@ public class Printer extends Module {
             if (behavior.isSatisfied(task)) continue;
 
             // 实体阻挡检查（仅对放置类行为有意义）
-            if (behavior instanceof BlockPlacementBehavior && hasBlockingEntity(pos)) continue;
+            if (behavior instanceof BlockPlacementBehavior && hasBlockingEntity(pos, effectiveDesired)) continue;
 
             tasks.add(new PlannedTask(task, behavior, 40)); // T4 — 标准蓝图打印
         }
@@ -1441,7 +1448,7 @@ public class Printer extends Module {
 
                 PrinterBehavior behavior = findEnabledBehaviorForProvider(task, allowed);
                 if (behavior == null || behavior.isSatisfied(task)) continue;
-                if (behavior instanceof BlockPlacementBehavior && hasBlockingEntity(pos)) continue;
+                if (behavior instanceof BlockPlacementBehavior && hasBlockingEntity(pos, desired)) continue;
 
                 tasks.add(new PlannedTask(task, behavior, rotPri));
             }
@@ -1573,47 +1580,53 @@ public class Printer extends Module {
     }
 
     /**
-     * Checks if there's an entity blocking placement at the given position.
-     * [修复版] 解决了掉落物、经验球、旁观者导致无法放置的问题
+     * Why：最小化客户端预检与服务端判定的语义偏差，同时把高频 Tick 下的实体扫描成本压低。
+     *
+     * 底层机制：
+     * - Vanilla 放置路径最终会走到 world.canPlace(state, pos, ShapeContext.ofPlacement(player))，
+     *   其核心不是“整格有无实体”，而是“目标碰撞形状与实体包围盒是否相交”。
+     * - 原版在 EntityView.doesNotIntersectEntities() 中也是先按 shape.boundingBox 做实体粗筛，
+     *   再用 VoxelShapes.matchesAnywhere(...) 做最终精判。
+     * - 因此这里不能简单退回“整格 Box + 类型黑名单”的老做法，否则会重新引入半砖、活板门、薄形方块的误拒绝。
+     *
+     * 性能策略：
+     * - 先在 getOtherEntities 的 Predicate 中复用原版等价过滤条件，尽量减少进入精判的实体数量。
+     * - 再只对筛出的候选做 VoxelShape 相交检测，把昂贵几何计算限制在最小集合内。
      */
-    private boolean hasBlockingEntity(BlockPos pos) {
-        net.minecraft.util.math.Box box = new net.minecraft.util.math.Box(pos);
+    private boolean hasBlockingEntity(BlockPos pos, BlockState desiredState) {
+        // 1. 先取目标方块在当前上下文下的真实 collision shape。
+        //    这里必须使用 ofPlacement(player)，否则某些依赖放置上下文的方块形状会与服务端判定脱节。
+        var shape = desiredState.getCollisionShape(mc.world, pos, ShapeContext.ofPlacement(mc.player));
 
-        // 性能优化：可以直接在这里传入 Predicate 进行初步过滤
-        return !mc.world.getEntitiesByClass(Entity.class, box, entity -> {
-            // 1. 基础存活检查
-            if (!entity.isAlive())
-                return false;
+        // 2. 无碰撞形状的方块天然不会被实体阻挡，直接早退。
+        if (shape.isEmpty()) return false;
 
-            // 2. 排除旁观者 (旁观者不有碰撞体积)
-            if (entity.isSpectator())
-                return false;
+        // 3. 先用 shape 的外接盒做粗筛。
+        //    这一步与 vanilla doesNotIntersectEntities 的第一层扫描一致，能把绝大多数远离目标的实体挡在外面。
+        Box queryBox = shape.getBoundingBox().offset(pos);
 
-            // 3. 排除非阻挡性实体
-            if (entity instanceof ItemEntity)
-                return false; // 掉落物
-            if (entity instanceof ExperienceOrbEntity)
-                return false; // 经验球
-            // if (entity instanceof AbstractMinecartEntity) return false; // (可选)
-            // 矿车通常可以重叠放置
+        // 4. 在实体查询阶段直接剔除“不可能阻挡放置”的对象，减少后续 VoxelShape 精判次数。
+        //    这里只保留与 vanilla 等价的过滤：removed / intersectionChecked。
+        //    不额外引入按实体类型的黑名单，避免与原版未来语义产生分叉。
+        var entities = mc.world.getOtherEntities(null, queryBox, entity -> !entity.isRemoved() && entity.intersectionChecked);
 
-            // 4. 排除装饰性实体 (展示框、画等)
-            // EndCrystal 和 ArmorStand 有时确实会阻挡，视具体需求而定，原代码排除了它们
-            if (entity instanceof ItemFrameEntity)
-                return false;
-            if (entity instanceof ArmorStandEntity)
-                return false;
-            if (entity instanceof EndCrystalEntity)
-                return false;
+        // 5. 没有候选实体，说明目标 shape 周围没有任何需要进一步精判的对象。
+        if (entities.isEmpty()) return false;
 
-            // 5. 排除与方块无碰撞的实体 (如箭矢)
-            // 这一步比较激进，通常 ProjectileEntity 也可以排除
-            if (entity instanceof net.minecraft.entity.projectile.ProjectileEntity)
-                return false;
+        // 6. 将局部 shape 一次偏移到世界坐标。
+        //    后续循环复用同一个 worldShape，避免每个实体都重复 offset 产生额外对象与计算。
+        var worldShape = shape.offset(pos);
 
-            // 剩下的通常是：玩家(Player)、生物(Mobs)、船(Boats) -> 这些应该视为阻挡
-            return true;
-        }).isEmpty(); // 如果列表不为空，说明存在阻挡实体
+        // 7. 逐个候选实体做最终精判。
+        //    只有实体 AABB 与目标方块 collision shape 真正发生体积相交时，才视为“阻挡放置”。
+        for (var entity : entities) {
+            if (VoxelShapes.matchesAnywhere(worldShape, VoxelShapes.cuboid(entity.getBoundingBox()), BooleanBiFunction.AND)) {
+                return true;
+            }
+        }
+
+        // 8. 所有候选实体都未与目标 shape 真正相交，说明当前点位在 vanilla 语义下可放。
+        return false;
     }
 
     /**
@@ -1653,7 +1666,8 @@ public class Printer extends Module {
     }
 
     /**
-     * Checks if the player is currently moving.
+     * Why：移动中暂停是风控开关，给上层节拍器一个廉价的“是否允许执行”信号。
+     * Timeline：在 Pre 阶段快速读取输入状态，决定当拍是否进入计划/执行流程。
      */
     private boolean isPlayerMoving() {
         return mc.options.forwardKey.isPressed() ||
