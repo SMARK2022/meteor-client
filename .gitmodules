@@ -2,3 +2,7 @@
 	path = addon/Catpuccin-Addon
 	url = https://github.com/SMARK2022/catppuccin-addon
 	branch = 1.21.8-smark
+[submodule "addon/meteor-villager-roller"]
+	path = addon/meteor-villager-roller
+	url = https://github.com/SMARK2022/meteor-villager-roller
+	branch = 1.21.8-smark
