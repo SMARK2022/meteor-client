@@ -11,5 +11,11 @@
   "meteor.meteor_client.misc.notifier.chat.player.joined": "%1$s joined.",
   "meteor.meteor_client.misc.notifier.chat.player.left": "%1$s left.",
   "meteor.meteor_client.misc.notifier.chat.totem.single": "totem",
-  "meteor.meteor_client.misc.notifier.chat.totem.plural": "totems"
+  "meteor.meteor_client.misc.notifier.chat.totem.plural": "totems",
+  "meteor.meteor_client.gui.tab.gui.title": "GUI",
+  "meteor.meteor_client.gui.tab.gui.label.theme": "Theme:",
+  "meteor.meteor_client.gui.tab.gui.button.reset_layout": "Reset Layout",
+  "meteor.meteor_client.gui.tab.gui.button.reset_colors": "Reset Colors",
+  "meteor.meteor_client.gui.tab.gui.tooltip.copy_config": "Copy config",
+  "meteor.meteor_client.gui.tab.gui.tooltip.paste_config": "Paste config"
 }

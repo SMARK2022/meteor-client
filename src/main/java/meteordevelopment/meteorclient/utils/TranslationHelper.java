@@ -16,6 +16,7 @@ import meteordevelopment.meteorclient.systems.modules.Modules;
 import net.minecraft.client.resource.language.I18n;
 
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 
 public class TranslationHelper {
@@ -199,6 +200,25 @@ public class TranslationHelper {
         return initialized;
     }
 
+    /**
+     * Returns whether user-controlled translations are currently enabled.
+     */
+    public static boolean shouldTranslate() {
+        return Config.get() != null && Config.get().translateModules.get();
+    }
+
+    /**
+     * Translates a runtime UI string under the same Config-controlled switch used by module translations.
+     * Falls back to the provided default text if translation is disabled or the key is missing.
+     */
+    public static String translate(String key, String fallback, Object... args) {
+        String fallbackText = formatFallback(fallback, args);
+        if (!shouldTranslate()) return fallbackText;
+
+        String translated = I18n.translate(key, args);
+        return translated.equals(key) ? fallbackText : translated;
+    }
+
     // --- Key generation ---
 
     private static String baseFormat(String name) {
@@ -239,5 +259,10 @@ public class TranslationHelper {
     private static String tryTranslate(String key) {
         String result = I18n.translate(key);
         return result.equals(key) ? null : result;
+    }
+
+    private static String formatFallback(String fallback, Object... args) {
+        if (args == null || args.length == 0) return fallback;
+        return String.format(Locale.ROOT, fallback, args);
     }
 }

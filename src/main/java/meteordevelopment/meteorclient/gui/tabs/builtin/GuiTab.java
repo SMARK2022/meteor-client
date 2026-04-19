@@ -14,14 +14,22 @@ import meteordevelopment.meteorclient.gui.tabs.WindowTabScreen;
 import meteordevelopment.meteorclient.gui.widgets.containers.WHorizontalList;
 import meteordevelopment.meteorclient.gui.widgets.input.WDropdown;
 import meteordevelopment.meteorclient.gui.widgets.pressable.WButton;
+import meteordevelopment.meteorclient.utils.TranslationHelper;
 import meteordevelopment.meteorclient.utils.misc.NbtUtils;
 import net.minecraft.client.gui.screen.Screen;
 
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 public class GuiTab extends Tab {
+    private static final String KEY_PREFIX = "meteor.meteor_client.gui.tab.gui";
+
     public GuiTab() {
         super("GUI");
+    }
+
+    @Override
+    protected String translationKey() {
+        return KEY_PREFIX + ".title";
     }
 
     @Override
@@ -45,7 +53,7 @@ public class GuiTab extends Tab {
         public void initWidgets() {
             WHorizontalList opts = add(theme.horizontalList()).expandX().widget();
 
-            opts.add(theme.label("Theme:"));
+            opts.add(theme.label(tr("label.theme", "Theme:")));
             WDropdown<String> themeW = opts.add(theme.dropdown(GuiThemes.getNames(), GuiThemes.get().name)).widget();
             themeW.action = () -> {
                 GuiThemes.select(themeW.get());
@@ -54,10 +62,10 @@ public class GuiTab extends Tab {
                 tab.openScreen(GuiThemes.get());
             };
 
-            WButton resetLayout = opts.add(theme.button("Reset Layout")).expandX().widget();
+            WButton resetLayout = opts.add(theme.button(tr("button.reset_layout", "Reset Layout"))).expandX().widget();
             resetLayout.action = theme::clearWindowConfigs;
 
-            WButton reset = opts.add(theme.button("Reset Colors")).right().widget();
+            WButton reset = opts.add(theme.button(tr("button.reset_colors", "Reset Colors"))).right().widget();
             reset.action = () -> {
                 theme.settings.reset();
                 mc.setScreen(null);
@@ -66,11 +74,11 @@ public class GuiTab extends Tab {
 
             WButton copyButton = opts.add(theme.button(GuiRenderer.COPY)).widget();
             copyButton.action = this::toClipboard;
-            copyButton.tooltip = "Copy config";
+            copyButton.tooltip = tr("tooltip.copy_config", "Copy config");
 
             WButton pasteButton = opts.add(theme.button(GuiRenderer.PASTE)).right().widget();
             pasteButton.action = this::fromClipboard;
-            pasteButton.tooltip = "Paste config";
+            pasteButton.tooltip = tr("tooltip.paste_config", "Paste config");
 
             add(theme.settings(theme.settings)).expandX();
         }
@@ -83,6 +91,10 @@ public class GuiTab extends Tab {
         @Override
         public boolean fromClipboard() {
             return NbtUtils.fromClipboard(theme);
+        }
+
+        private static String tr(String key, String fallback, Object... args) {
+            return TranslationHelper.translate(KEY_PREFIX + "." + key, fallback, args);
         }
     }
 }
