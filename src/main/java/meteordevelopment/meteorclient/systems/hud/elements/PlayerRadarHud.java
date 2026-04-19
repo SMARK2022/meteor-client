@@ -195,7 +195,7 @@ public class PlayerRadarHud extends HudElement {
             double x = this.x + border.get() + alignX(width, alignment.get());
             y += renderer.textHeight(shadow.get(), getScale()) + 2;
 
-            x = renderer.text(text, x, y, color, shadow.get());
+            x = renderer.text(text, x, y, color, shadow.get(), getScale());
             if (distance.get()) renderer.text(distanceText, x + spaceWidth, y, secondaryColor.get(), shadow.get(), getScale());
         }
     }
