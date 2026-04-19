@@ -23,29 +23,32 @@ import net.minecraft.util.shape.VoxelShapes;
 import net.minecraft.world.BlockView;
 import net.minecraft.world.Difficulty;
 
-import java.util.Arrays;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicIntegerArray;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.LockSupport;
 
 /**
- * 异步水晶放置扫描器。
+ * 事件驱动的异步水晶放置扫描器。
  *
  * 架构说明：
- * 1. 主线程维护一个「爆炸抗性快照」浮点数组，在 BlockUpdateEvent 时增量更新、玩家移动时全量重建。
- * 2. 每次提交扫描前用 Arrays.copyOf 生成快照副本，传递给后台线程，保证线程安全。
- * 3. 后台守护线程对所有候选基座位置做完整伤害评估（自伤 + 全目标），输出 bestDirect / bestSupport。
- * 4. 主线程下一 tick 消费结果，做快速验证后执行放置。
+ * 1. 主线程维护一个「活体爆炸抗性张量」(AtomicIntegerArray)，方块变化时 O(1) 增量写入。
+ * 2. 后台线程常驻，采用事件触发 + 10ms 窗口节流，合并高频 BlockUpdate 风暴。
+ * 3. 后台线程每次只消费最新一份候选快照，自动丢弃中间过期请求（latest-wins）。
+ * 4. 结果携带世界版本和生成时戳，主线程可按“新鲜度”门控，避免使用过期 proposal。
  *
- * 快照半径分析：
+ * 为什么不用直接异步读 mc.world：
+ * - ClientWorld/Chunk/Entity 容器是主线程结构，不具备并发可见性和一致性保证。
+ * - 让后台线程读实时 world 会引入竞态读取和偶发崩溃风险（尤其在 chunk 更新/实体增删阶段）。
+ * - 因此采用“领域快照张量 + 主线程增量同步”的模型，用极低复制成本换线程安全。
+ *
+ * 张量半径分析：
  * - 曝光度射线从目标包围盒顶点出发，指向水晶位置（玩家附近 placeRange 以内）。
  * - 射线经过的方块均在 max(targetRange, placeRange) 以内（距快照中心/玩家位置）。
  * - 默认 targetRange=10 → 射线最远到距中心 ~10.5 格 → SNAP_R=10 即可覆盖。
  * - 超出范围的方块返回 blastRes=0（视为非防爆），等同于空气，不影响射线判定。
- * - 在水晶 PvP 中，防爆方块（黑曜石/基岩）集中在玩家基地附近 5 格内，远端几乎没有。
- * - 即使在极端情况下远处有黑曜石被忽略，误差也是保守的（高估目标伤害，行为偏激进）。
  *
- * 快照规模：SNAP_R=10 → SNAP_D=21 → 9261 entries = 37KB 内存，全量重建 ~0.5ms。
+ * 规模：SNAP_R=10 → SNAP_D=21 → 9261 entries，内存约 37KB。
  */
 public class CrystalPlanner {
 
@@ -55,25 +58,39 @@ public class CrystalPlanner {
     private static final int SNAP_D = SNAP_R * 2 + 1;
     private static final int SNAP_SIZE = SNAP_D * SNAP_D * SNAP_D;
 
-    // 持久化爆炸抗性快照（主线程写入，提交时拷贝给后台线程）
-    private final float[] blastRes = new float[SNAP_SIZE];
-    private int centerX, centerY, centerZ;
-    private boolean snapshotReady;
+    // ====== 主线程写入的活体张量（后台线程无锁读取） ======
+    private final AtomicIntegerArray blastResBits = new AtomicIntegerArray(SNAP_SIZE);
+    private volatile int centerX, centerY, centerZ;
+    private volatile boolean snapshotReady;
 
-    // ====== 后台线程 ======
-    // 单线程守护线程，低于正常优先级，避免影响主线程帧率
-    private final ExecutorService thread = Executors.newSingleThreadExecutor(r -> {
-        Thread t = new Thread(r, "CA-Planner");
-        t.setDaemon(true);
-        t.setPriority(Thread.NORM_PRIORITY - 1);
-        return t;
-    });
+    // 世界版本号：任意方块同步都会递增，用于结果新鲜度判定
+    private final AtomicLong worldVersion = new AtomicLong();
+
+    // ====== 后台线程（常驻 + 事件驱动） ======
+    private static final long MIN_SCAN_INTERVAL_NS = 10_000_000L; // 10ms 合并窗口
+    private final Object trigger = new Object();
+    private final Thread worker;
+    private volatile boolean running = true;
 
     // ====== 结果（后台线程写入，主线程原子消费）======
-    /** 组合结果 —— AtomicReference 保证读取+清空的原子性 */
-    public record ResultSet(PlaceResult direct, PlaceResult support) {}
+    /**
+     * 组合结果：
+     * - requestSeq: 结果对应的候选请求序号（latest-wins）
+     * - worldVersion: 计算结束时的世界版本
+     * - computedAtNs: 结果产出时间（用于 age 门控）
+     */
+    public record ResultSet(PlaceResult direct, PlaceResult support, long requestSeq, long worldVersion, long computedAtNs) {}
     private final AtomicReference<ResultSet> latestResult = new AtomicReference<>();
     private volatile boolean busy;
+
+    // latest-wins 请求缓冲
+    private final AtomicLong requestSeq = new AtomicLong();
+    private volatile long pendingSeq;
+    private volatile boolean pendingScan;
+    private volatile Candidate[] pendingCandidates;
+    private volatile TargetSnap[] pendingTargets;
+    private volatile TargetSnap pendingSelf;
+    private volatile ScanSettings pendingSettings;
 
     // ====== 数据结构 ======
 
@@ -103,6 +120,13 @@ public class CrystalPlanner {
         double maxDmg, boolean antiSui, double safetyMargin, double minDmg, boolean smart,
         boolean facePlace, boolean supportFast, float tps, Difficulty difficulty, double damageRatio) {}
 
+    public CrystalPlanner() {
+        worker = new Thread(this::runLoop, "CA-Planner");
+        worker.setDaemon(true);
+        worker.setPriority(Thread.NORM_PRIORITY - 1);
+        worker.start();
+    }
+
     // ============================== 快照管理 ==============================
 
     /** 判断是否需要全量重建（首次运行、或玩家移动超过 2 格）。 */
@@ -121,9 +145,11 @@ public class CrystalPlanner {
         for (int dx = -SNAP_R; dx <= SNAP_R; dx++)
             for (int dy = -SNAP_R; dy <= SNAP_R; dy++)
                 for (int dz = -SNAP_R; dz <= SNAP_R; dz++)
-                    blastRes[idx++] = world.getBlockState(mutable.set(cx + dx, cy + dy, cz + dz))
-                        .getBlock().getBlastResistance();
+                    blastResBits.set(idx++, Float.floatToRawIntBits(world.getBlockState(mutable.set(cx + dx, cy + dy, cz + dz))
+                        .getBlock().getBlastResistance()));
         snapshotReady = true;
+        worldVersion.incrementAndGet();
+        triggerScanIfPending();
     }
 
     /**
@@ -134,12 +160,19 @@ public class CrystalPlanner {
         if (!snapshotReady) return;
         int dx = x - centerX + SNAP_R, dy = y - centerY + SNAP_R, dz = z - centerZ + SNAP_R;
         if (dx < 0 || dx >= SNAP_D || dy < 0 || dy >= SNAP_D || dz < 0 || dz >= SNAP_D) return;
-        blastRes[dx * SNAP_D * SNAP_D + dy * SNAP_D + dz] = newBlastRes;
+        blastResBits.set(dx * SNAP_D * SNAP_D + dy * SNAP_D + dz, Float.floatToRawIntBits(newBlastRes));
+        worldVersion.incrementAndGet();
+        triggerScanIfPending();
     }
 
     // ============================== 扫描提交 ==============================
 
     public boolean isBusy() { return busy; }
+
+    /** 当前活体世界版本（仅用于上层诊断/门控）。 */
+    public long getWorldVersion() {
+        return worldVersion.get();
+    }
 
     /**
      * 原子消费扫描结果 —— 读取并清空。AtomicReference.getAndSet 保证无竞态窗口。
@@ -150,32 +183,99 @@ public class CrystalPlanner {
     }
 
     /**
+     * 结果新鲜度门控：
+     * - age 超过阈值直接丢弃（慢线程/卡顿下防陈旧方案）
+     * - worldVersion 漂移过大直接丢弃（高频环境变化下防错位方案）
+     */
+    public boolean isResultFresh(ResultSet result, long maxAgeMs, long maxWorldDrift) {
+        if (result == null) return false;
+        long ageNs = System.nanoTime() - result.computedAtNs();
+        if (ageNs > maxAgeMs * 1_000_000L) return false;
+        return worldVersion.get() - result.worldVersion() <= maxWorldDrift;
+    }
+
+    /**
      * 提交候选位置到后台线程进行伤害评估。
      * 候选仅需范围/碰撞预过滤（LOS 在主线程消费结果时实时验证）。
      * 在提交前拷贝快照数组（Arrays.copyOf），保证后台线程读取的是主线程提交时刻的一致性快照，
      * 主线程可在此之后继续通过 updateBlock 修改原始数组而不影响正在运行的扫描。
      */
     public void submitScan(Candidate[] candidates, TargetSnap[] targets, TargetSnap self, ScanSettings settings) {
-        if (busy || !snapshotReady) return;
+        if (!snapshotReady) return;
 
-        // 线程安全：拷贝快照 + 中心坐标后提交
-        float[] snapCopy = Arrays.copyOf(blastRes, SNAP_SIZE);
-        int cx = centerX, cy = centerY, cz = centerZ;
-        busy = true;
-        thread.submit(() -> {
-            try {
-                runScan(snapCopy, cx, cy, cz, candidates, targets, self, settings);
-            } finally {
-                busy = false;
-            }
-        });
+        pendingCandidates = candidates;
+        pendingTargets = targets;
+        pendingSelf = self;
+        pendingSettings = settings;
+        pendingSeq = requestSeq.incrementAndGet();
+        pendingScan = true;
+        signalWorker();
     }
 
     // ============================== 后台线程（禁止访问 mc.world）==============================
 
-    private void runScan(float[] snap, int cx, int cy, int cz,
-                         Candidate[] candidates, TargetSnap[] targets, TargetSnap self,
-                         ScanSettings s) {
+    private void runLoop() {
+        long lastRunNs = 0;
+
+        while (running) {
+            waitForWork();
+            if (!running) break;
+
+            long waitNs = MIN_SCAN_INTERVAL_NS - (System.nanoTime() - lastRunNs);
+            if (waitNs > 0) LockSupport.parkNanos(waitNs);
+
+            Candidate[] candidates = pendingCandidates;
+            TargetSnap[] targets = pendingTargets;
+            TargetSnap self = pendingSelf;
+            ScanSettings settings = pendingSettings;
+            long seq = pendingSeq;
+
+            if (!snapshotReady || candidates == null || targets == null || self == null || settings == null) {
+                pendingScan = false;
+                continue;
+            }
+
+            busy = true;
+            int cx = centerX, cy = centerY, cz = centerZ;
+            ResultSet result = runScanLive(cx, cy, cz, candidates, targets, self, settings, seq);
+            latestResult.set(result);
+            busy = false;
+
+            lastRunNs = System.nanoTime();
+
+            // latest-wins：若期间有新提交或世界版本继续漂移，则继续下一轮
+            if (seq == pendingSeq) pendingScan = false;
+        }
+    }
+
+    private void waitForWork() {
+        synchronized (trigger) {
+            while (running && !pendingScan) {
+                try {
+                    trigger.wait();
+                } catch (InterruptedException ignored) {
+                    Thread.currentThread().interrupt();
+                    running = false;
+                    return;
+                }
+            }
+        }
+    }
+
+    private void signalWorker() {
+        synchronized (trigger) {
+            trigger.notify();
+        }
+    }
+
+    private void triggerScanIfPending() {
+        if (!pendingScan) return;
+        signalWorker();
+    }
+
+    private ResultSet runScanLive(int cx, int cy, int cz,
+                                  Candidate[] candidates, TargetSnap[] targets, TargetSnap self,
+                                  ScanSettings s, long seq) {
         PlaceResult bestDirect = null, bestSupport = null;
 
         float effectiveMaxDmg = (float) s.maxDmg;
@@ -185,18 +285,18 @@ public class CrystalPlanner {
             double expX = cand.x + 0.5, expY = cand.y + 1, expZ = cand.z + 0.5;
 
             // 自伤检测
-            float selfDmg = crystalDamage(snap, cx, cy, cz, self, expX, expY, expZ, cand.x, cand.y, cand.z, s.difficulty);
+            float selfDmg = crystalDamage(cx, cy, cz, self, expX, expY, expZ, cand.x, cand.y, cand.z, s.difficulty);
             if (selfDmg > effectiveMaxDmg || (s.antiSui && selfDmg >= (self.health - s.safetyMargin))) continue;
 
             // 目标伤害 —— 对所有目标进行完整评估（异步只做 place，不受 smartDelay 限制）
             double damage = 0;
             boolean useFast = !cand.hasBlock && s.supportFast;
             if (useFast && targets.length > 0) {
-                float dmg = crystalDamage(snap, cx, cy, cz, targets[0], expX, expY, expZ, cand.x, cand.y, cand.z, s.difficulty);
+                float dmg = crystalDamage(cx, cy, cz, targets[0], expX, expY, expZ, cand.x, cand.y, cand.z, s.difficulty);
                 damage = dmg;
             } else {
                 for (TargetSnap t : targets) {
-                    float dmg = crystalDamage(snap, cx, cy, cz, t, expX, expY, expZ, cand.x, cand.y, cand.z, s.difficulty);
+                    float dmg = crystalDamage(cx, cy, cz, t, expX, expY, expZ, cand.x, cand.y, cand.z, s.difficulty);
                     damage = Math.max(damage, dmg);
                 }
             }
@@ -216,19 +316,19 @@ public class CrystalPlanner {
             }
         }
 
-        latestResult.set(new ResultSet(bestDirect, bestSupport));
+        return new ResultSet(bestDirect, bestSupport, seq, worldVersion.get(), System.nanoTime());
     }
 
     // ------ 纯数学伤害计算（线程安全，不访问 mc.world）------
 
-    private float crystalDamage(float[] snap, int cx, int cy, int cz,
+    private float crystalDamage(int cx, int cy, int cz,
                                 TargetSnap t, double expX, double expY, double expZ,
                                 int obsX, int obsY, int obsZ, Difficulty difficulty) {
         double dx = t.posX - expX, dy = t.posY - expY, dz = t.posZ - expZ;
         double dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
         if (dist > 12) return 0;
 
-        double exposure = calcExposure(snap, cx, cy, cz, expX, expY, expZ,
+        double exposure = calcExposure(cx, cy, cz, expX, expY, expZ,
             t.bMinX, t.bMinY, t.bMinZ, t.bMaxX, t.bMaxY, t.bMaxZ, obsX, obsY, obsZ);
         double impact = (1 - dist / 12.0) * exposure;
         float rawDmg = (int) ((impact * impact + impact) / 2.0 * 7.0 * 12.0 + 1);
@@ -254,7 +354,7 @@ public class CrystalPlanner {
         return Math.max(damage, 0);
     }
 
-    private double calcExposure(float[] snap, int cx, int cy, int cz,
+    private double calcExposure(int cx, int cy, int cz,
                                 double srcX, double srcY, double srcZ,
                                 double bMinX, double bMinY, double bMinZ,
                                 double bMaxX, double bMaxY, double bMaxZ,
@@ -271,7 +371,7 @@ public class CrystalPlanner {
         for (double x = bMinX + xOff; x <= bMaxX + xOff; x += xStep)
             for (double y = bMinY; y <= bMaxY; y += yStep)
                 for (double z = bMinZ + zOff; z <= bMaxZ + zOff; z += zStep) {
-                    if (!rayBlocked(snap, cx, cy, cz, x, y, z, srcX, srcY, srcZ, obsX, obsY, obsZ))
+                    if (!rayBlocked(cx, cy, cz, x, y, z, srcX, srcY, srcZ, obsX, obsY, obsZ))
                         misses++;
                     total++;
                 }
@@ -285,7 +385,7 @@ public class CrystalPlanner {
      * - 抗性 < 600：返回 null（射线穿透）
      * - obsX/Y/Z 位置强制返回 1200（模拟 support 位置放置的黑曜石）
      */
-    private boolean rayBlocked(float[] snap, int cx, int cy, int cz,
+    private boolean rayBlocked(int cx, int cy, int cz,
                                double startX, double startY, double startZ,
                                double endX, double endY, double endZ,
                                int obsX, int obsY, int obsZ) {
@@ -297,7 +397,7 @@ public class CrystalPlanner {
             if (bp.getX() == obsX && bp.getY() == obsY && bp.getZ() == obsZ) {
                 br = 1200.0f; // 强制视为黑曜石，模拟 support 块已放置
             } else {
-                br = getBlastRes(snap, cx, cy, cz, bp.getX(), bp.getY(), bp.getZ());
+                br = getBlastRes(cx, cy, cz, bp.getX(), bp.getY(), bp.getZ());
             }
             if (br < 600) return null;
             return VoxelShapes.fullCube().raycast(c.start(), c.end(), bp);
@@ -306,10 +406,10 @@ public class CrystalPlanner {
         return BlockView.raycast(ctx.start(), ctx.end(), ctx, factory, c -> null) != null;
     }
 
-    private static float getBlastRes(float[] snap, int cx, int cy, int cz, int x, int y, int z) {
+    private float getBlastRes(int cx, int cy, int cz, int x, int y, int z) {
         int dx = x - cx + SNAP_R, dy = y - cy + SNAP_R, dz = z - cz + SNAP_R;
         if (dx < 0 || dx >= SNAP_D || dy < 0 || dy >= SNAP_D || dz < 0 || dz >= SNAP_D) return 0;
-        return snap[dx * SNAP_D * SNAP_D + dy * SNAP_D + dz];
+        return Float.intBitsToFloat(blastResBits.get(dx * SNAP_D * SNAP_D + dy * SNAP_D + dz));
     }
 
     // ============================== 目标快照（主线程）==============================
@@ -348,5 +448,11 @@ public class CrystalPlanner {
         latestResult.set(null);
         busy = false;
         snapshotReady = false;
+        pendingScan = false;
+        pendingCandidates = null;
+        pendingTargets = null;
+        pendingSelf = null;
+        pendingSettings = null;
+        worldVersion.incrementAndGet();
     }
 }

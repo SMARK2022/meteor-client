@@ -1278,8 +1278,6 @@ public class CrystalAura extends Module {
             planner.rebuildSnapshot(mc.world, pp.getX(), pp.getY(), pp.getZ());
         }
 
-        if (planner.isBusy()) return;
-
         // 2. Snapshot targets
         boolean predict = predictMovement.get();
         CrystalPlanner.TargetSnap[] tSnaps = new CrystalPlanner.TargetSnap[targets.size()];
@@ -1459,6 +1457,8 @@ public class CrystalAura extends Module {
 
         // === Async 结果消费 → 仅写入 proposal（不直接放置，伤害排序基于过时快照） ===
         CrystalPlanner.ResultSet asyncRes = planner.consumeResult();
+        // 新鲜度门控：超过窗口或世界变化过大时直接丢弃，避免 support 重复发包与过时最优解。
+        if (asyncRes != null && !planner.isResultFresh(asyncRes, 45, 8)) asyncRes = null;
         if (asyncRes != null) {
             CrystalPlanner.PlaceResult directRes = asyncRes.direct();
             CrystalPlanner.PlaceResult supportRes = asyncRes.support();
