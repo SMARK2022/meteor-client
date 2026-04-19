@@ -487,7 +487,9 @@ public class PacketMine extends Module {
                 b.blockState = newState;
                 b.block = newState.getBlock();
                 b.watching = false;
-                b.mining = true;
+                // stored-break 重触发不会发送新的 START，不能标记为 mining=true。
+                // 否则若 STOP 因旋转延后一拍且方块先变 AIR，会误走 ABORTING 并发送无效 ABORT。
+                b.mining = false;
                 b.progress = 1.0;
                 b.lockedToolSlot = findBestToolSlot(newState);
                 b.phase = Phase.PENDING_STOP;
@@ -1352,7 +1354,10 @@ public class PacketMine extends Module {
             // 锁定工具并预判瞬破
             lockedToolSlot = findBestToolSlot(blockState);
             ensureTaskToolSelected(MyBlock.this);
-            int effectiveSlot = mc.player.getInventory().getSelectedSlot();
+
+            // Why: setSelectedSlot + syncSelected 的网络同步与本地读槽位不保证同拍一致。
+            // Timeline: START 发包前必须使用“本次任务锁定槽位”计算 delta，避免旧槽位把 instaMine 误判成普通挖掘。
+            int effectiveSlot = lockedToolSlot != -1 ? lockedToolSlot : mc.player.getInventory().getSelectedSlot();
             boolean instaMine = BlockUtils.getBreakDelta(effectiveSlot, blockState) >= 1.0;
 
             // 在真正发 START 前刷新面：入队后玩家可能已移动，旧 direction 可能不是最优/最稳的面
@@ -1365,6 +1370,12 @@ public class PacketMine extends Module {
                 sendStartPacket(blockPos, currentFace);
                 direction = currentFace; // 记录实际使用的 START face
                 commitStartDelayBudget();
+
+                // Why: canStopNow() 依赖 maxDelta 估算 predictedTime。
+                // 若首拍不初始化，误入 MINING 时第一拍会因 maxDelta==0 被硬拒绝，STOP 至少滞后一拍。
+                // 这里在 START 成功后立刻写入首个 delta，保证时序估算从第一拍就与服务端一致。
+                double firstDelta = BlockUtils.getBreakDelta(effectiveSlot, blockState);
+                maxDelta = firstDelta;
 
                 // exploit: 在合法 START(A) 之后发送瞬破方块的 START(E, wrongFace)
                 // 效果: GrimAC FastBreak.maxDmg 被覆盖为 ∞ (或 >= 1)，后续 STOP diff 为负
