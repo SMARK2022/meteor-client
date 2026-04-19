@@ -6,10 +6,10 @@
  *
  * 两阶段架构 (旋转由 Rotations 协调器统一管理)：
  * 1. TickEvent.Pre: 规划（选块、切物品、sneak、生成 PlacementPlan、提交旋转请求）
- * 2. SendMovementPacketsEvent.Post: 执行放置（movement 包发出后立即 place）
+ * 2. SendMovementPacketsEvent.Pre: 在 rotation callback 中提交交互副作用（interact/swing）
  *
  * Rotations 协调器在 PlayerTickMovementEvent 中预应用角度，确保
- * movement 物理、movement packet、place packet 使用同一拍同一个角度。
+ * movement 物理、movement packet、place packet 使用同一拍同一个角度，且交互包位于 Flying 之前。
  */
 
 package meteordevelopment.meteorclient.systems.modules.player;
@@ -65,9 +65,11 @@ import net.minecraft.entity.decoration.ItemFrameEntity;
 import net.minecraft.network.packet.c2s.play.HandSwingC2SPacket;
 import net.minecraft.util.Hand;
 import net.minecraft.util.hit.BlockHitResult;
+import net.minecraft.util.hit.HitResult;
 import net.minecraft.util.math.*;
 import net.minecraft.util.function.BooleanBiFunction;
 import net.minecraft.util.shape.VoxelShapes;
+import net.minecraft.world.RaycastContext;
 
 import java.util.*;
 
@@ -76,7 +78,8 @@ import java.util.*;
  *
  * 架构 Why：
  * - 放置逻辑必须在高频 Tick 中保持“可预测、可回放、可限速”，否则在高延迟或反作弊环境下会出现抖动与误放。
- * - 因此模块将“候选扫描与计划生成”放在 Pre，将“真实交互发包”放在 Movement 之后的 Post，避免同拍内读写状态互相污染。
+ * - 因此模块将“候选扫描与计划生成”放在 Tick.Pre，将“真实交互发包”放到 Rotations 的
+ *   SendMovementPackets.Pre callback，避免同拍内读写状态互相污染并规避 Grim PacketOrderO。
  *
  * 底层机制：
  * - 服务端以交互包到达顺序和命中姿态判定合法性；客户端若在错误时机旋转/交互，会造成 hitVec 与视角不一致。
@@ -85,8 +88,9 @@ import java.util.*;
  * Timeline：
  * 1) TickEvent.Pre：读取世界快照、构建 ActionPlan、提交旋转请求。
  * 2) Rotations.onPlayerTickMovement：预应用 yaw/pitch。
- * 3) sendMovementPackets：发送 vanilla movement 包。
- * 4) SendMovementPacketsEvent.Post：在同拍姿态下执行交互包发送，随后由协调器恢复视角。
+ * 3) SendMovementPacketsEvent.Pre：在 winner rotation 的 callback 中执行 interact/swing（Pre-Flying）。
+ * 4) sendMovementPackets：发送 vanilla movement 包（携带同拍旋转）。
+ * 5) SendMovementPacketsEvent.Post：仅恢复视角与状态清理。
  */
 public class Printer extends Module {
 
@@ -482,7 +486,10 @@ public class Printer extends Module {
 
     /**
      * ArmedAction - 已就绪的动作（含计划和确认的手）
-     * 在 TickEvent.Pre 中创建，在 SendMovementPacketsEvent.Post 中消费。
+        * 在 TickEvent.Pre 中创建：
+        * - rotate=true 时，在 Rotations Pre-Flying callback 中消费。
+        * - rotate=false 时，在 SendMovementPacketsEvent.Pre 中直接消费。
+        * 若本 tick 的 rotation 仲裁失败（非 winner），则在 SendMovementPacketsEvent.Post 中兜底清空。
      */
     private record ArmedAction(ActionPlan plan, Hand hand, int rotationPriority) {}
 
@@ -728,7 +735,7 @@ public class Printer extends Module {
         }
 
         // ── 前置守卫 ──
-        if (armed != null) return;                          // plan 待 Post 执行
+        if (armed != null) return;                          // plan 已提交，等待本 tick Pre-Flying callback 消费
         if (moveStop.get() && isPlayerMoving()) return;     // 移动暂停
 
         WorldSchematic worldSchematic = SchematicWorldHandler.getSchematicWorld();
@@ -765,10 +772,7 @@ public class Printer extends Module {
             }
             if (armed != null) {
                 publishRenderPlan(armed.plan());
-                if (rotate.get()) {
-                    ActionPlan.Interaction inter = armed.plan().interaction();
-                    Rotations.requestPreMovementToward(inter.hitVec(), armed.rotationPriority(), null);
-                }
+                scheduleArmedExecution(armed);
                 return; // plan 已就绪，本 tick 不再启动容器
             }
             // armed == null：本轮无可用候选或等待切换，容器 IDLE 可趁隙启动
@@ -801,7 +805,7 @@ public class Printer extends Module {
     private void tickProviderOnly() {
         tickCounter++;
 
-        if (armed != null) return;  // 已有 plan 待 Post 执行
+        if (armed != null) return;  // 已有 plan 在途，等待本 tick Pre-Flying callback 消费
 
         tasks.clear();
         previewCandidates.clear();
@@ -816,10 +820,47 @@ public class Printer extends Module {
             case SelectionResult.AwaitingPrep ignored -> {}
             case SelectionResult.None ignored -> resetSneakState();
         }
-        if (armed != null && rotate.get()) {
-            ActionPlan.Interaction inter = armed.plan().interaction();
-            Rotations.requestPreMovementToward(inter.hitVec(), armed.rotationPriority(), null);
+        if (armed != null) {
+            publishRenderPlan(armed.plan());
+            scheduleArmedExecution(armed);
         }
+    }
+
+    /**
+     * 为当前 armed 计划注册“Pre-Flying 执行回调”。
+     *
+     * <p>Why:
+     * <ul>
+     *   <li>Grim PacketOrderO 会在 Flying 后到 CLIENT_TICK_END 之间检查非异步包。</li>
+     *   <li>Printer 的 interact/swing 必须在 Flying 前发送，否则会被标记 type=INTERACT_BLOCK/HAND_SWING。</li>
+     *   <li>将副作用绑定到 Rotations callback，可确保“只有本 tick 旋转 winner”才执行交互，避免旋转仲裁失败时产生错位副作用。</li>
+     * </ul>
+     *
+     * <p>实现细节：
+     * - rotate=true: 朝命中点申请 pre-movement 旋转并在 callback 执行。
+     * - rotate=false: 不参与 Rotations 仲裁，在 SendMovementPacketsEvent.Pre 直接执行。
+     */
+    private void scheduleArmedExecution(ArmedAction action) {
+        if (mc.player == null) return;
+
+        if (!rotate.get()) return;
+
+        ActionPlan.Interaction inter = action.plan().interaction();
+        Rotations.requestPreMovementToward(inter.hitVec(), action.rotationPriority(), () -> commitArmedAction(action));
+    }
+
+    /**
+     * 提交当前 armed 动作。
+     * 只允许消费仍然活跃的同一实例，避免陈旧 callback 或多路径重复执行旧计划。
+     */
+    private void commitArmedAction(ArmedAction action) {
+        if (armed != action) return;
+
+        if (isPlanStillValid(action)) {
+            executePlan(action);
+        }
+
+        armed = null;
     }
 
     // ==================== 候选评分权重 ====================
@@ -1033,30 +1074,34 @@ public class Printer extends Module {
         };
     }
 
-    // ==================== 阶段 2: SendMovementPacketsEvent.Post 执行放置 ====================
+    // ==================== 阶段 2: SendMovementPacketsEvent.Pre 提交副作用 ====================
 
     /**
-     * 【方案B - 阶段2】在 movement packet 发出后立即放置
+     * 容器打开副作用也必须位于 Pre-Flying，避免 PacketOrderO 窗口。
      *
-     * 执行顺序：ClientPlayerEntity.sendMovementPackets() TAIL
-     * 此时本 tick 的 movement packet 已经发出（Rotations 已预应用正确的 yaw/pitch），
-     * 立即发送 place packet，确保 place 与 movement 在同一 tick 内完成。
+     * <p>注意：标准放置路径不在这里直接执行，而是由 scheduleArmedExecution()
+     * 注册到 Rotations callback 中触发；这里仅处理容器子系统的 open 交互。
+     */
+    @EventHandler
+    private void onSendMovementPacketsPre(SendMovementPacketsEvent.Pre event) {
+        if (fillContainers.get() && containerFillManager.shouldExecuteOpenDirectly()) {
+            containerFillManager.executeOpen();
+        }
+
+        if (armed != null && !rotate.get()) {
+            commitArmedAction(armed);
+        }
+    }
+
+    /**
+     * 【阶段2-清理】Post 阶段只做兜底清理，不再发送交互包。
      *
-     * 旋转的预应用和视角恢复现在由 Rotations 协调器统一管理。
+     * <p>如果本 tick 的 rotation 仲裁中当前计划未成为 winner，其 callback 不会执行；
+     * 为避免 armed 永久滞留，这里在 Post 统一清空，让下一 tick 重新规划/重提请求。
      */
     @EventHandler
     private void onSendMovementPacketsPost(SendMovementPacketsEvent.Post event) {
-        if (armed != null && mc.player != null) {
-            if (isPlanStillValid(armed)) {
-                executePlan(armed);
-            }
-            armed = null;
-        }
-
-        // 容器打开：ARMED_OPEN 态时，movement packet（含旋转）已发出，执行 interactBlock
-        if (fillContainers.get() && containerFillManager.executeOpen()) {
-            // interactBlock 已发送，无需额外操作
-        }
+        armed = null;
     }
 
     /**
@@ -1091,11 +1136,11 @@ public class Printer extends Module {
      * 验证动作计划在执行时是否仍然有效
      * 使用当前 eyePos 重新验证几何条件，防止 movement 后 plan 过期
      */
-    private boolean isPlanStillValid(ArmedAction armed) {
+    private boolean isPlanStillValid(ArmedAction action) {
         if (mc.player == null || mc.world == null) return false;
 
-        ActionPlan plan = armed.plan();
-        Hand hand = armed.hand();
+        ActionPlan plan = action.plan();
+        Hand hand = action.hand();
         ActionPlan.Interaction inter = plan.interaction();
         Vec3d currentEye = mc.player.getEyePos();
 
@@ -1121,6 +1166,12 @@ public class Printer extends Module {
                     mc.world, mc.player, losTarget)) {
                 return false;
             }
+
+            // 2.5 临门二次校验（old-position + current-ray）
+            // 机制：在 Pre-Flying 执行前，使用“上一 movement 位置”作为射线起点，
+            // 用“本次 movement 已确定的朝向射线”验证其是否穿过计划要求的目标面。
+            // 注意：这里校验的是“射线几何是否穿过目标面”，而不是“首个命中必须无遮挡”。
+            if (!passesFinalOldPoseFaceGate(plan)) return false;
         }
 
         // 3. 通用：潜行条件
@@ -1136,6 +1187,85 @@ public class Printer extends Module {
             case ActionPlan.UseBlock ub -> isUseBlockStillValid(ub, hand);
             case ActionPlan.UseItemOnBlock ui -> isUseItemOnBlockStillValid(ui, hand);
             case ActionPlan.UseItemInAir ua -> isUseItemInAirStillValid(ua, hand);
+        };
+    }
+
+    /** 最终射线快照：old-eye 起点 + current-ray 方向。 */
+    private record OldPoseRay(Vec3d oldEye, Vec3d rayDir) {}
+
+    /**
+     * 临门二次校验：old-position + current-ray 必须穿过计划要求的面。
+     *
+     * <p>此处不做“无遮挡首命中”判断，而只验证更贴近反作弊语义的几何事实：
+     * 由 old-eye 发出的当前视线射线，是否真的穿过 {@code interactPos + clickedFace} 对应的那一张面。
+     */
+    private boolean passesFinalOldPoseFaceGate(ActionPlan plan) {
+        if (plan instanceof ActionPlan.UseItemInAir) return true;
+        if (mc.player == null) return false;
+
+        ActionPlan.Interaction inter = plan.interaction();
+        OldPoseRay posedRay = snapshotOldPoseCurrentRay();
+        if (posedRay == null) return false;
+
+        Double distance = intersectFaceDistance(posedRay.oldEye(), posedRay.rayDir(), inter.interactPos(), inter.clickedFace());
+        if (distance == null) return false;
+
+        double maxRayLength = placeRange.get() + 1.0;
+        if (distance < 0.0 || distance > maxRayLength) return false;
+
+        Vec3d intersection = posedRay.oldEye().add(posedRay.rayDir().multiply(distance));
+        return isPointOnInteractionFace(intersection, inter.interactPos(), inter.clickedFace());
+    }
+
+    /**
+     * 构建 old-position + current-ray 射线快照。
+     *
+     * <p>起点使用玩家上一 movement 位置（lastX/lastY/lastZ + 当前眼高），
+     * 朝向使用当前拍（Pre-Flying 前已确定）的 rotation 向量。
+     */
+    private OldPoseRay snapshotOldPoseCurrentRay() {
+        if (mc.player == null) return null;
+
+        double eyeHeight = mc.player.getEyeHeight(mc.player.getPose());
+        Vec3d oldEye = new Vec3d(mc.player.lastX, mc.player.lastY + eyeHeight, mc.player.lastZ);
+        Vec3d rayDir = mc.player.getRotationVec(1.0f);
+        if (rayDir.lengthSquared() <= 1.0E-8) return null;
+
+        return new OldPoseRay(oldEye, rayDir.normalize());
+    }
+
+    private Double intersectFaceDistance(Vec3d origin, Vec3d rayDir, BlockPos interactPos, Direction face) {
+        final double epsilon = 1.0E-8;
+
+        return switch (face) {
+            case DOWN -> intersectPlane(origin.y, rayDir.y, interactPos.getY(), epsilon);
+            case UP -> intersectPlane(origin.y, rayDir.y, interactPos.getY() + 1.0, epsilon);
+            case NORTH -> intersectPlane(origin.z, rayDir.z, interactPos.getZ(), epsilon);
+            case SOUTH -> intersectPlane(origin.z, rayDir.z, interactPos.getZ() + 1.0, epsilon);
+            case WEST -> intersectPlane(origin.x, rayDir.x, interactPos.getX(), epsilon);
+            case EAST -> intersectPlane(origin.x, rayDir.x, interactPos.getX() + 1.0, epsilon);
+        };
+    }
+
+    private Double intersectPlane(double originCoord, double dirCoord, double planeCoord, double epsilon) {
+        if (Math.abs(dirCoord) <= epsilon) return null;
+        return (planeCoord - originCoord) / dirCoord;
+    }
+
+    private boolean isPointOnInteractionFace(Vec3d point, BlockPos interactPos, Direction face) {
+        final double epsilon = 1.0E-6;
+
+        double minX = interactPos.getX() - epsilon;
+        double maxX = interactPos.getX() + 1.0 + epsilon;
+        double minY = interactPos.getY() - epsilon;
+        double maxY = interactPos.getY() + 1.0 + epsilon;
+        double minZ = interactPos.getZ() - epsilon;
+        double maxZ = interactPos.getZ() + 1.0 + epsilon;
+
+        return switch (face) {
+            case DOWN, UP -> point.x >= minX && point.x <= maxX && point.z >= minZ && point.z <= maxZ;
+            case NORTH, SOUTH -> point.x >= minX && point.x <= maxX && point.y >= minY && point.y <= maxY;
+            case WEST, EAST -> point.y >= minY && point.y <= maxY && point.z >= minZ && point.z <= maxZ;
         };
     }
 

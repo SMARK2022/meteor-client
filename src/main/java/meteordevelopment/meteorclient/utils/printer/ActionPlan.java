@@ -20,7 +20,7 @@ import java.util.function.Predicate;
  *
  * 两阶段架构中的角色：
  * - Pre tick: 由 {@link PrinterBehavior} 创建
- * - Post movement: 由 Printer 执行
+ * - Pre-Flying: 由 Printer / Rotations callback 执行
  *
  * 内含三组紧密关联的类型：
  * - 策略枚举：{@link SneakPolicy}、{@link HandPolicy}

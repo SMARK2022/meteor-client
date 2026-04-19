@@ -27,11 +27,12 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  * 标准行为处理<b>方块状态</b>差异（单 tick 无状态），
  * 本管理器处理<b>容器内容</b>差异（多 tick 有状态）。
  *
- * <h2>架构核心：容器打开完全接入 Printer 的旋转/后发包体系</h2>
+ * <h2>架构核心：容器打开完全接入 Printer 的旋转 / Pre-Flying 发包体系</h2>
  * <pre>
  * Tick N     [PREPARING]   清除 sneak + 停止 sprint → 规划交互面/点
- * Tick N+1   [ARMED_OPEN]  Rotations.requestPreMovement → 等待 Post-movement
- *            → Printer 在 SendMovementPacketsEvent.Post 里调用 executeOpen()
+ * Tick N+1   [ARMED_OPEN]  若 rotate=true：Rotations.requestPreMovement(callback=executeOpen)
+ *            → winner callback 在 Pre-Flying 执行 open
+ *            若 rotate=false：Printer 在 SendMovementPacketsEvent.Pre 里直接调用 executeOpen()
  *            → interactBlock 发出，进入 OPENING
  * Tick N+1+RTT [onInventorySync]  同 tick 内批量 QUICK_MOVE + CLOSE_WINDOW
  * Tick N+2+RTT [COOLDOWN]  恢复 → IDLE
@@ -41,7 +42,7 @@ import static meteordevelopment.meteorclient.MeteorClient.mc;
  * <ul>
  *   <li><b>PacketOrderF</b>: sprint 切换与 interactBlock 分 tick → PREPARING 隔离</li>
  *   <li><b>Sneak→Use 语义</b>: 潜行右键容器 = 绕过 onUse → 开不了容器 → 必须 REQUIRE_NOT_SNEAK</li>
- *   <li><b>Movement 对齐</b>: interactBlock 与 look packet 同 tick → Rotations + Post-movement</li>
+ *   <li><b>Movement 对齐</b>: interactBlock 与 look packet 同 tick → Rotations + Pre-Flying</li>
  *   <li><b>MultiActionsC/D</b>: CLICK_WINDOW / CLOSE_WINDOW 时 !sprinting → 全程压制</li>
  *   <li><b>PacketOrderA</b>: 全部使用 QUICK_MOVE，不混用其他点击类型</li>
  * </ul>
@@ -57,7 +58,7 @@ public class ContainerFillManager {
      * 五态状态机。
      *
      * <pre>
-     * IDLE ──pickTarget──→ PREPARING ──(plan ok)──→ ARMED_OPEN ──(post-movement)──→ OPENING
+    * IDLE ──pickTarget──→ PREPARING ──(plan ok)──→ ARMED_OPEN ──(pre-flying open)──→ OPENING
      *                       (unsneak+停sprint)       (旋转提交)     (interactBlock)
      *                                                                  │ inventorySync → fill+close
      *                                                                  │ timeout
@@ -69,7 +70,7 @@ public class ContainerFillManager {
         IDLE,
         /** 已选定目标，清理输入态（sneak→off, sprint→off），规划交互面 */
         PREPARING,
-        /** 交互已规划完成，旋转已提交，等待 Printer 在 Post-movement 中执行 */
+        /** 交互已规划完成，等待在 Pre-Flying 时机执行 open */
         ARMED_OPEN,
         /** 已发送 interactBlock，等待服务端 WINDOW_ITEMS 回包 */
         OPENING,
@@ -136,9 +137,16 @@ public class ContainerFillManager {
     /**
      * ARMED_OPEN 阶段的交互规划。
      * <p>由 {@link InteractionPlanner#planSelfInteraction} 生成，
-     * Printer 在 {@code SendMovementPacketsEvent.Post} 中读取并执行。
+        * rotate=true 时在 Rotations winner callback 中执行；
+        * rotate=false 时由 Printer 在 {@code SendMovementPacketsEvent.Pre} 中读取并执行。
      */
     private ActionPlan.Interaction armedInteraction;
+
+        /**
+        * ARMED_OPEN 对应的打开路径是否依赖旋转仲裁。
+        * rotate=true 时由 Rotations winner callback 执行；rotate=false 时由 Printer 直接执行。
+        */
+        private boolean armedOpenUsesRotation;
 
     /**
      * 容器屏幕抑制标志。
@@ -264,18 +272,18 @@ public class ContainerFillManager {
                 }
 
                 state = State.ARMED_OPEN;
+                armedOpenUsesRotation = rotateEnabled;
 
-                // 提交旋转请求（如果启用），本 tick movement 会包含正确的 yaw/pitch
-                if (rotateEnabled) {
-                    Rotations.requestPreMovement(
-                        armedInteraction.yaw(), armedInteraction.pitch(), 25, null
-                    );
-                }
+                // rotate=true：在 ARMED_OPEN 中每 tick 重提 request，
+                // 直到本请求赢得仲裁并在 Pre-Flying callback 中 executeOpen。
             }
 
             case ARMED_OPEN -> {
-                // 等待 Printer 在 SendMovementPacketsEvent.Post 中调用 executeOpen()。
-                // 正常情况下本态只存活 1 tick。
+                if (armedOpenUsesRotation && armedInteraction != null) {
+                    Rotations.requestPreMovement(
+                        armedInteraction.yaw(), armedInteraction.pitch(), 25, this::executeOpen
+                    );
+                }
             }
 
             case OPENING -> {
@@ -296,9 +304,11 @@ public class ContainerFillManager {
     // ==================== Printer 执行钩子 ====================
 
     /**
-     * 由 Printer 在 {@code SendMovementPacketsEvent.Post} 中调用。
+    * rotate=false 时由 Printer 在 {@code SendMovementPacketsEvent.Pre} 中直接调用；
+    * rotate=true 时由 Rotations winner callback 在 Pre-Flying 调用。
      *
-     * <p>此时 movement packet（含旋转）已经发出，可以安全发送 interactBlock。
+    * <p>此时旋转已经应用到本拍玩家朝向，且 movement packet 尚未发出，
+    * 可以安全发送 interactBlock，避免 PacketOrderO 窗口。
      * 交互使用 {@link #armedInteraction} 中规划好的面、命中点、方向。
      *
      * @return true 表示确实执行了容器打开（Printer 据此跳过其他操作）
@@ -351,6 +361,11 @@ public class ContainerFillManager {
     /** Printer 在 OpenScreenEvent 中检查此标志以决定是否抑制容器 GUI。 */
     public boolean shouldSuppressScreen() {
         return suppressScreen;
+    }
+
+    /** Printer 在 Pre-Flying 中检查此标志，决定是否走“无旋转直接打开”路径。 */
+    public boolean shouldExecuteOpenDirectly() {
+        return state == State.ARMED_OPEN && !armedOpenUsesRotation;
     }
 
     // ==================== 查询接口 ====================
@@ -444,6 +459,7 @@ public class ContainerFillManager {
         preparingStartTick = 0;
         suppressScreen = false;
         armedInteraction = null;
+        armedOpenUsesRotation = false;
         schematicCache.clear();
         containerSnapshots.clear();
         thisTickScanned.clear();
