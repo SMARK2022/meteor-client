@@ -852,12 +852,17 @@ public class CrystalAura extends Module {
         // Post 执行面：保证交互包尽量贴近本 tick 的最终位姿。
         // 顺序固定为 break -> place，且受 attackedThisTick 互斥门控，规避同 tick attack+place 的包序风险。
         if (targets.isEmpty()) {
+            if (placeRenderTimer > 0) renderDamage = 0;
             attackedThisTick = false;
             return;
         }
 
         if (!didRotateThisTick) doBreak();
         if (!didRotateThisTick) doPlace();
+
+        // 渲染数字与本 tick 的世界状态同步：
+        // planner 的候选伤害是“提交时快照值”，这里在主线程用当前位置重算一次，避免文本延迟。
+        refreshRenderDamageLive();
 
         // 在本 tick 所有动作结束后再清理攻击标记，确保 fastBreak 标记在同 tick 内持续有效。
         attackedThisTick = false;
@@ -1366,13 +1371,14 @@ public class CrystalAura extends Module {
         if (chosen == null) return;
 
         BlockPos pos = new BlockPos(chosen.x(), chosen.y(), chosen.z());
+        final double finalDamage = chosen.damage();
         BlockHitResult result = resolveCrystalHit(pos);
         if (result == null) return;
 
         SupportPlan supportPlan = isSupportChoice ? resolveSupportHit(pos) : null;
         if (isSupportChoice && supportPlan == null) return;
 
-        updateRenderCandidate(pos, chosen.damage(), isSupportChoice);
+        updateRenderCandidate(pos, finalDamage, isSupportChoice);
 
         BlockPos supportBlock = isSupportChoice ? pos : null;
         if (supportPlan != null) {
@@ -1397,14 +1403,14 @@ public class CrystalAura extends Module {
             Rotations.rotateToward(hitTarget, 70, () -> {
                 // Why: rotateToward 可能跨 tick 执行。若期间世界版本漂移过大，说明 proposal 已过时，直接丢弃。
                 if (planner.getWorldVersion() - capturedWorldVersion > 5) return;
-                if (placeCrystal(result, chosen.damage(), supportBlock) && supportBlock == null) {
+                if (placeCrystal(result, finalDamage, supportBlock) && supportBlock == null) {
                     placeTimer += getEffectivePlaceDelay();
                 }
             });
             return;
         }
 
-        if (placeCrystal(result, chosen.damage(), supportBlock) && supportBlock == null) {
+        if (placeCrystal(result, finalDamage, supportBlock) && supportBlock == null) {
             placeTimer += getEffectivePlaceDelay();
         }
     }
@@ -1847,6 +1853,22 @@ public class CrystalAura extends Module {
 
     private boolean intersectsWithEntities(Box box) {
         return EntityUtils.intersectsWithEntity(box, entity -> !entity.isSpectator() && !removed.contains(entity.getId()));
+    }
+
+    /**
+     * 用当前主线程世界态刷新渲染伤害值。
+     * Why: 显示层不应直接复用 planner 的历史快照结果，否则会出现“方块已变但数字仍旧”的迟滞感。
+     */
+    private void refreshRenderDamageLive() {
+        if (!renderDamageText.get()) return;
+        if (renderMode.get() == RenderMode.None || placeRenderTimer <= 0) return;
+        if (targets.isEmpty()) {
+            renderDamage = 0;
+            return;
+        }
+
+        ((IVec3d) vec3d).meteor$set(placeRenderPos.getX() + 0.5, placeRenderPos.getY() + 1, placeRenderPos.getZ() + 0.5);
+        renderDamage = getDamageToTargets(vec3d, placeRenderPos, false, renderIsSupport && support.get() == SupportMode.Fast);
     }
 
     // 渲染系统
