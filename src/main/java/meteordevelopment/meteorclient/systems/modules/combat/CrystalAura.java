@@ -1466,23 +1466,36 @@ public class CrystalAura extends Module {
      * 调用方可把返回的 plan 直接传给 placeCrystal，避免二次求解（修正 5）。
      */
     private SupportPlan resolveSupportHit(BlockPos pos) {
-        if (mc.player == null || mc.world == null) return null;
-        if (BlockUtils.getPlaceSide(pos) == null) return null;
+    if (mc.player == null || mc.world == null) return null;
 
-        if (supportSafePlacement.get()) {
-            // 修正 4: checkLos 参数与上游统一
-            net.minecraft.block.BlockState obsidianState = Blocks.OBSIDIAN.getDefaultState();
-            PlacementContext ctx = PlacementContext.of(
-                mc.world, pos, obsidianState, mc.player, true, strictPlaceLOS.get(), placeRange.get()
-            );
-            PlacementOption option = ResolverRegistry.resolve(ctx);
-            if (option == null || option.hitVec() == null) return null;
-            return new SupportPlan(option.getInteractPos(pos), option.getClickedFace(), option.hitVec());
-        } else {
-            // 传统路径: 只需确认 getPlaceSide 有效（已在上面检查）
-            return new SupportPlan(null, null, null);
-        }
+    // 获取一个合法的邻居方块交互面
+    Direction side = BlockUtils.getPlaceSide(pos);
+    if (side == null) return null;
+
+    if (supportSafePlacement.get()) {
+        // 开启了安全放置：调用高级的 NCP/LOS 解析器
+        net.minecraft.block.BlockState obsidianState = Blocks.OBSIDIAN.getDefaultState();
+        PlacementContext ctx = PlacementContext.of(
+            mc.world, pos, obsidianState, mc.player, true, strictPlaceLOS.get(), placeRange.get()
+        );
+        PlacementOption option = ResolverRegistry.resolve(ctx);
+        if (option == null || option.hitVec() == null) return null;
+        return new SupportPlan(option.getInteractPos(pos), option.getClickedFace(), option.hitVec());
+    } else {
+        // 关闭了安全放置：我们也必须提供合法的 interactPos, face 和 hitVec
+        BlockPos interactPos = pos.offset(side);
+        Direction clickedFace = side.getOpposite();
+
+        // 计算点击落在邻居方块表面中心的向量坐标
+        Vec3d hitVec = new Vec3d(
+            interactPos.getX() + 0.5 + clickedFace.getOffsetX() * 0.5,
+            interactPos.getY() + 0.5 + clickedFace.getOffsetY() * 0.5,
+            interactPos.getZ() + 0.5 + clickedFace.getOffsetZ() * 0.5
+        );
+
+        return new SupportPlan(interactPos, clickedFace, hitVec);
     }
+}
 
     private boolean placeCrystal(BlockHitResult result, double damage, BlockPos supportBlock) {
         return placeCrystal(result, damage, supportBlock, -1);
