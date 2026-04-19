@@ -203,6 +203,8 @@ public class CrystalPlanner {
     public void submitScan(Candidate[] candidates, TargetSnap[] targets, TargetSnap self, ScanSettings settings) {
         if (!snapshotReady) return;
 
+        // latest-wins：主线程每次提交都覆盖旧请求，后台只处理“当前最有价值”的一份输入。
+        // Why: 战斗态环境变化快，处理历史请求只会放大 stale 结果。
         pendingCandidates = candidates;
         pendingTargets = targets;
         pendingSelf = self;
@@ -214,6 +216,14 @@ public class CrystalPlanner {
 
     // ============================== 后台线程（禁止访问 mc.world）==============================
 
+    /**
+     * 常驻后台循环：事件触发 + 10ms 合并窗口。
+     *
+     * Why:
+     * - 不使用 while 自旋，空闲时阻塞等待，避免吃满单核。
+     * - 高频 block update 时按窗口合并，防止每个包都触发一轮全扫描。
+     * - 每轮只吃最新请求序号，主动丢弃中间态，降低过时解概率。
+     */
     private void runLoop() {
         long lastRunNs = 0;
 

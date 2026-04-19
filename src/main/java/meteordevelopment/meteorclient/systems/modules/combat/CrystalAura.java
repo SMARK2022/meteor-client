@@ -5,7 +5,6 @@
 
 package meteordevelopment.meteorclient.systems.modules.combat;
 
-import com.google.common.util.concurrent.AtomicDouble;
 import it.unimi.dsi.fastutil.ints.*;
 import it.unimi.dsi.fastutil.longs.LongSet;
 import meteordevelopment.meteorclient.events.entity.EntityAddedEvent;
@@ -39,7 +38,6 @@ import meteordevelopment.meteorclient.utils.render.NametagUtils;
 import meteordevelopment.meteorclient.utils.render.RenderUtils;
 import meteordevelopment.meteorclient.utils.render.color.Color;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
-import meteordevelopment.meteorclient.utils.world.BlockIterator;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.meteorclient.utils.world.TickRate;
 import meteordevelopment.meteorclient.utils.printer.BlockUtilHelper;
@@ -69,7 +67,6 @@ import org.joml.Vector3d;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
-import java.util.concurrent.atomic.AtomicReference;
 
 public class CrystalAura extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
@@ -709,13 +706,6 @@ public class CrystalAura extends Module {
     private int baseCacheScanRange;
     private int baseCacheCenterX, baseCacheCenterY, baseCacheCenterZ;
 
-    // 放置方案缓存 —— 分摊扫描开销到 2–3 tick（mio 方案模式）
-    private final BlockPos.Mutable proposalPos = new BlockPos.Mutable();
-    private boolean proposalIsSupport;
-    private double proposalDamage;
-    private boolean hasProposal;
-    private int proposalAge;
-
     // 异步规划器 —— 将完整扫描委派给后台线程 (CrystalPlanner)
     private final CrystalPlanner planner = new CrystalPlanner();
 
@@ -745,7 +735,6 @@ public class CrystalAura extends Module {
         targetBreakCount.clear();
         targetBreakCooldown.clear();
         baseCacheDirty = true;
-        hasProposal = false;
         planner.reset();
 
         bestTargetDamage = 0;
@@ -850,17 +839,27 @@ public class CrystalAura extends Module {
         // Set player eye pos
         ((IVec3d) playerEyePos).meteor$set(mc.player.getPos().x, mc.player.getPos().y + mc.player.getEyeHeight(mc.player.getPose()), mc.player.getPos().z);
 
-        // Find targets, break and place
+        // 时间线约束：Pre 只做“读世界 + 提交规划”。
+        // Why: Grim 在 Flying 后回溯校验交互包，若在 Pre 直接发包，结果与当 tick 最终位置可能错位。
+        // 因此将副作用放到 Post，Pre 保持纯规划，避免 stale 结果在旋转排队后落到错误时刻。
         findTargets();
 
-        if (!targets.isEmpty()) {
-            if (!didRotateThisTick) doBreak();
-            if (!didRotateThisTick) doPlace();
+        if (!targets.isEmpty()) captureAndSubmitAsyncScan();
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST)
+    private void onPostTick(TickEvent.Post event) {
+        // Post 执行面：保证交互包尽量贴近本 tick 的最终位姿。
+        // 顺序固定为 break -> place，且受 attackedThisTick 互斥门控，规避同 tick attack+place 的包序风险。
+        if (targets.isEmpty()) {
+            attackedThisTick = false;
+            return;
         }
 
-        // F4: attackedThisTick 在 tick 末尾重置
-        // fastBreak (EntityAddedEvent 可能在 tick 前触发) 设置的标志
-        // 在 doBreak + doPlace 期间保持有效，防止同 tick 重复攻击/攻击+放置
+        if (!didRotateThisTick) doBreak();
+        if (!didRotateThisTick) doPlace();
+
+        // 在本 tick 所有动作结束后再清理攻击标记，确保 fastBreak 标记在同 tick 内持续有效。
         attackedThisTick = false;
     }
 
@@ -1155,7 +1154,6 @@ public class CrystalAura extends Module {
     @EventHandler
     private void onInteractItem(InteractItemEvent event) {
         planner.consumeResult(); // 废弃旧结果
-        hasProposal = false;
     }
 
     /**
@@ -1179,9 +1177,6 @@ public class CrystalAura extends Module {
     private void onBlockUpdate(BlockUpdateEvent event) {
         if (mc.player == null) return;
         BlockPos pos = event.pos;
-
-        // Invalidate placement proposal if block changed near proposal position
-        if (hasProposal && pos.isWithinDistance(proposalPos, 3)) hasProposal = false;
 
         // Incremental blast-resistance snapshot update for async planner
         planner.updateBlock(pos.getX(), pos.getY(), pos.getZ(),
@@ -1316,79 +1311,70 @@ public class CrystalAura extends Module {
         );
     }
 
-    // 方案验证 —— 仅 2 次伤害计算替代完整扫描（~80 次）
-
-    private boolean quickValidateProposal() {
-        // Base block still valid?
-        net.minecraft.block.BlockState state = mc.world.getBlockState(proposalPos);
-        if (proposalIsSupport) {
-            if (!state.isReplaceable()) return false;
-        } else {
-            if (!state.isOf(Blocks.BEDROCK) && !state.isOf(Blocks.OBSIDIAN)) return false;
-        }
-
-        // Air above still clear?
-        blockPos.set(proposalPos).move(0, 1, 0);
-        if (!mc.world.getBlockState(blockPos).isAir()) return false;
-
-        // Range still OK?
-        ((IVec3d) vec3d).meteor$set(proposalPos.getX() + 0.5, proposalPos.getY() + 1, proposalPos.getZ() + 0.5);
-        if (isOutOfRange(vec3d, blockPos, true)) return false;
-
-        // Self-damage still safe?
-        float selfDamage = DamageUtils.crystalDamage(mc.player, vec3d, false, proposalPos);
-        float effectiveMaxDmg = maxDamage.get().floatValue();
-        if (TickRate.INSTANCE.getTickRate() < 18) effectiveMaxDmg *= 0.85f;
-        if (selfDamage > effectiveMaxDmg || (antiSuicide.get() && selfDamage >= (EntityUtils.getTotalHealth(mc.player) - safetyMargin.get()))) return false;
-
-        // Target damage still meets threshold?
-        float damage = getDamageToTargets(vec3d, proposalPos, false, proposalIsSupport && support.get() == SupportMode.Fast);
-        double minimumDamage = shouldFacePlace() ? Math.min(minDamage.get(), 1.5) : minDamage.get();
-        if (damage < minimumDamage) return false;
-
-        // Damage ratio check
-        if (minDamageRatio.get() > 0 && selfDamage >= 1.0f && damage / selfDamage < minDamageRatio.get()) return false;
-
-        // Entity intersection — support 时额外检查 Y 层（黑曜石放置位置）
-        if (proposalIsSupport) {
-            double sx = proposalPos.getX(), sy = proposalPos.getY(), sz = proposalPos.getZ();
-            ((IBox) box).meteor$set(sx, sy, sz, sx + 1, sy + 1, sz + 1);
-            if (intersectsWithEntities(box)) return false;
-        }
-
-        double x = proposalPos.getX(), y = proposalPos.getY() + 1, z = proposalPos.getZ();
-        ((IBox) box).meteor$set(x, y, z, x + 1, y + (placement112.get() ? 1 : 2), z + 1);
-        if (intersectsWithEntities(box)) return false;
-
-        proposalDamage = damage;
-        return true;
-    }
+    // 放置流程
 
     /**
-     * 尝试执行当前 proposal —— LOS/support 实时重验 + 旋转/放置。
-     * @return true = 已安排动作（rotation scheduled 或直接放置/yawStep 推进），false = 硬失败
+     * 响应式放置主流程（Post 阶段执行）。
+     *
+     * Why:
+     * 1. 主线程不再做全量同步 fallback 扫描，避免重复算法和维护分叉。
+     * 2. 仅消费 planner 的最新结果，并用“年龄 + 世界版本漂移”做门控，阻断过期 proposal。
+     * 3. 旋转回调加入 worldVersion 捕获，防止 rotate 排队期间环境剧变导致旧包落地。
+     *
+     * Timeline:
+     * Pre 提交扫描 -> 后台 10ms 窗口合并计算 -> Post 消费结果并执行发包。
      */
-    private boolean executeProposal() {
-        BlockHitResult result = resolveCrystalHit(proposalPos);
-        if (result == null) {
-            hasProposal = false;
-            return false;
+    private void doPlace() {
+        if (!doPlace.get() || placeTimer > 0) return;
+        if (attackedThisTick) return;
+        if (shouldPause(PauseMode.Place)) return;
+        if (placing && placingTimer > 0) return;
+        if (!InvUtils.testInHotbar(Items.END_CRYSTAL)) return;
+        boolean supportAvailable = support.get() != SupportMode.Disabled && InvUtils.testInHotbar(Items.OBSIDIAN);
+        if (autoSwitch.get() != AutoSwitchMode.None) {
+            if (noGapSwitch.get() && autoSwitch.get() == AutoSwitchMode.Normal && offItem != Items.END_CRYSTAL) {
+                if (mainItem == Items.ENCHANTED_GOLDEN_APPLE
+                || offItem == Items.ENCHANTED_GOLDEN_APPLE
+                || mainItem == Items.GOLDEN_APPLE
+                || offItem == Items.GOLDEN_APPLE) return;
+            }
+            if (noBowSwitch.get() && (mainItem == Items.BOW || offItem == Items.BOW)) return;
+        } else if (mainItem != Items.END_CRYSTAL && offItem != Items.END_CRYSTAL) return;
+
+        for (Entity entity : mc.world.getEntities()) {
+            if (getBreakDamage(entity, false) > 0) return;
         }
 
-        // 修正 1: support 候选必须通过 obsidian resolver 预验证, 保存 plan 供旋转使用
-        SupportPlan supportPlan = proposalIsSupport ? resolveSupportHit(proposalPos) : null;
-        if (proposalIsSupport && supportPlan == null) {
-            hasProposal = false;
-            return false;
+        CrystalPlanner.ResultSet asyncRes = planner.consumeResult();
+        if (asyncRes == null || !planner.isResultFresh(asyncRes, 35, 6)) return;
+
+        CrystalPlanner.PlaceResult directRes = asyncRes.direct();
+        CrystalPlanner.PlaceResult supportRes = asyncRes.support();
+
+        CrystalPlanner.PlaceResult chosen = null;
+        boolean isSupportChoice = false;
+        if (directRes != null && supportRes != null && supportAvailable) {
+            isSupportChoice = shouldPreferSupport(supportRes.damage(), directRes.damage());
+            chosen = isSupportChoice ? supportRes : directRes;
+        } else if (directRes != null) {
+            chosen = directRes;
+        } else if (supportAvailable) {
+            chosen = supportRes;
+            isSupportChoice = true;
         }
 
-        // crystal hit + support 预验证均通过后才更新渲染 —— 保证橙框=真的能执行
-        updateRenderCandidate(proposalPos, proposalDamage, proposalIsSupport);
+        if (chosen == null) return;
 
-        BlockPos supportBlock = proposalIsSupport ? proposalPos.toImmutable() : null;
+        BlockPos pos = new BlockPos(chosen.x(), chosen.y(), chosen.z());
+        BlockHitResult result = resolveCrystalHit(pos);
+        if (result == null) return;
 
-        // F8: support 时旋转目标必须朝向邻居方块放置面 (与 placeSupportSafe 发包方向一致)
-        // 非 support 时朝向水晶放置面
+        SupportPlan supportPlan = isSupportChoice ? resolveSupportHit(pos) : null;
+        if (isSupportChoice && supportPlan == null) return;
+
+        updateRenderCandidate(pos, chosen.damage(), isSupportChoice);
+
+        BlockPos supportBlock = isSupportChoice ? pos : null;
         if (supportPlan != null) {
             ((IVec3d) vec3d).meteor$set(supportPlan.hitVec().x, supportPlan.hitVec().y, supportPlan.hitVec().z);
         } else {
@@ -1402,235 +1388,25 @@ public class CrystalAura extends Module {
         if (rotate.get()) {
             double yaw = Rotations.getYaw(vec3d);
             double pitch = Rotations.getPitch(vec3d);
+            if (yawStepMode.get() != YawStepMode.Break && !doYawSteps(yaw, pitch)) return;
 
-            if (yawStepMode.get() == YawStepMode.Break || doYawSteps(yaw, pitch)) {
-                setRotation(true, vec3d, 0, 0);
-                Vec3d hitTarget = new Vec3d(vec3d.x, vec3d.y, vec3d.z);
-                // W2 修正: placeTimer 仅在 placeCrystal 成功时递增
-                Rotations.rotateToward(hitTarget, 70, () -> {
-                    if (!hasProposal) return; // proposal 已被后续 tick 失效
-                    if (placeCrystal(result, proposalDamage, supportBlock) && supportBlock == null)
-                        placeTimer += getEffectivePlaceDelay();
-                });
-            }
-            // yawStep 阻塞时 doYawSteps 已发送步进旋转包 → 属于有效动作
-        } else {
-            if (placeCrystal(result, proposalDamage, supportBlock) && supportBlock == null)
-                placeTimer += getEffectivePlaceDelay();
-        }
-        return true;
-    }
+            setRotation(true, vec3d, 0, 0);
+            Vec3d hitTarget = new Vec3d(vec3d.x, vec3d.y, vec3d.z);
+            long capturedWorldVersion = planner.getWorldVersion();
 
-    // 放置流程
-
-    private void doPlace() {
-        if (!doPlace.get() || placeTimer > 0) return;
-        // F3: 本 tick 已攻击则跳过放置 —— 避免同 tick attack+place 触发 Grim PacketOrderI/J
-        if (attackedThisTick) return;
-        if (shouldPause(PauseMode.Place)) return;
-
-        // 等待水晶生成确认时不发送冗余放置包
-        // RusherHack/mio 模式：低 TPS 时零浪费包
-        if (placing && placingTimer > 0) return;
-
-        // Return if there are no crystals in hotbar or offhand
-        if (!InvUtils.testInHotbar(Items.END_CRYSTAL)) return;
-
-        // 修正 3: Support 早期物品检查 —— 无黑曜石时 support 全链路不触发
-        boolean supportAvailable = support.get() != SupportMode.Disabled && InvUtils.testInHotbar(Items.OBSIDIAN);
-
-        // Return if there are no crystals in either hand and auto switch mode is none
-        if (autoSwitch.get() != AutoSwitchMode.None) {
-            if (noGapSwitch.get() && autoSwitch.get() == AutoSwitchMode.Normal && offItem != Items.END_CRYSTAL) {
-                if (mainItem == Items.ENCHANTED_GOLDEN_APPLE
-                || offItem == Items.ENCHANTED_GOLDEN_APPLE
-                || mainItem == Items.GOLDEN_APPLE
-                || offItem == Items.GOLDEN_APPLE) return;
-            }
-            if (noBowSwitch.get() && (mainItem == Items.BOW || offItem == Items.BOW)) return;
-        } else if (mainItem != Items.END_CRYSTAL && offItem != Items.END_CRYSTAL) return;
-
-        // Check for multiplace
-        for (Entity entity : mc.world.getEntities()) {
-            if (getBreakDamage(entity, false) > 0) return;
-        }
-
-        // === Async 结果消费 → 仅写入 proposal（不直接放置，伤害排序基于过时快照） ===
-        CrystalPlanner.ResultSet asyncRes = planner.consumeResult();
-        // 新鲜度门控：超过窗口或世界变化过大时直接丢弃，避免 support 重复发包与过时最优解。
-        if (asyncRes != null && !planner.isResultFresh(asyncRes, 45, 8)) asyncRes = null;
-        if (asyncRes != null) {
-            CrystalPlanner.PlaceResult directRes = asyncRes.direct();
-            CrystalPlanner.PlaceResult supportRes = asyncRes.support();
-
-            CrystalPlanner.PlaceResult chosen = null;
-            boolean isSup = false;
-            if (directRes != null && supportRes != null && supportAvailable) {
-                isSup = shouldPreferSupport(supportRes.damage(), directRes.damage());
-                chosen = isSup ? supportRes : directRes;
-            } else if (directRes != null) {
-                chosen = directRes;
-            } else if (supportAvailable) {
-                chosen = supportRes;
-                isSup = true;
-            }
-
-            if (chosen != null) {
-                proposalPos.set(chosen.x(), chosen.y(), chosen.z());
-                proposalIsSupport = isSup;
-                proposalDamage = chosen.damage();
-                hasProposal = true;
-                proposalAge = 0;
-            }
-        }
-
-        // Proposal 快速路径：实时重算伤害 + 实时 LOS 验证（2 次伤害计算 vs 80+）
-        if (hasProposal && proposalAge < 6) {
-            if (quickValidateProposal()) {
-                proposalAge++;
-                // W1 修正: executeProposal 成功才跳过同步扫描；失败则回落全量扫描
-                if (executeProposal()) {
-                    captureAndSubmitAsyncScan();
-                    return;
-                }
-                // proposal LOS/support 不可达 → 回落同步扫描（本 tick 不浪费）
-            } else {
-                hasProposal = false;
-            }
-        }
-
-        // 提交下一轮 async 扫描（结果仅作为 proposal seed）
-        captureAndSubmitAsyncScan();
-
-        // 同步扫描：本 tick 实时数据全量扫描，保证全局最优可达位置
-        final AtomicDouble bestDirectDamage = new AtomicDouble(0);
-        final AtomicDouble bestSupportDamage = new AtomicDouble(0);
-        final AtomicReference<BlockHitResult> bestDirectHit = new AtomicReference<>();
-        final AtomicReference<BlockHitResult> bestSupportHit = new AtomicReference<>();
-        final AtomicReference<BlockPos> bestDirectPos = new AtomicReference<>();
-        final AtomicReference<BlockPos> bestSupportPos = new AtomicReference<>();
-
-        refreshBaseCacheIfNeeded();
-
-        BlockIterator.register((int) Math.ceil(placeRange.get()), (int) Math.ceil(placeRange.get()), (bp, blockState) -> {
-            if (!validBasePosCache.contains(BlockPos.asLong(bp.getX(), bp.getY(), bp.getZ()))) return;
-
-            boolean hasBlock = blockState.isOf(Blocks.BEDROCK) || blockState.isOf(Blocks.OBSIDIAN);
-
-            ((IVec3d) vec3d).meteor$set(bp.getX() + 0.5, bp.getY() + 1, bp.getZ() + 0.5);
-            blockPos.set(bp).move(0, 1, 0);
-            if (isOutOfRange(vec3d, blockPos, true)) return;
-
-            // LOS/NCP 实时验证 —— 不可达则跳过
-            BlockHitResult hit = resolveCrystalHit(bp);
-            if (hit == null) return;
-
-            // 自伤检测
-            float selfDamage = DamageUtils.crystalDamage(mc.player, vec3d, false, bp);
-            float effectiveMaxDmg = maxDamage.get().floatValue();
-            if (TickRate.INSTANCE.getTickRate() < 18) effectiveMaxDmg *= 0.85f;
-            if (selfDamage > effectiveMaxDmg || (antiSuicide.get() && selfDamage >= (EntityUtils.getTotalHealth(mc.player) - safetyMargin.get()))) return;
-
-            // 目标伤害
-            float damage = getDamageToTargets(vec3d, bp, false, !hasBlock && support.get() == SupportMode.Fast);
-            boolean shouldFacePlace = shouldFacePlace();
-            double minimumDamage = Math.min(minDamage.get(), shouldFacePlace ? 1.5 : minDamage.get());
-            if (damage < minimumDamage) return;
-
-            // Damage ratio check
-            if (minDamageRatio.get() > 0 && selfDamage >= 1.0f && damage / selfDamage < minDamageRatio.get()) return;
-
-            // 碰撞检测
-            double x = bp.getX();
-            double y = bp.getY() + 1;
-            double z = bp.getZ();
-            ((IBox) box).meteor$set(x, y, z, x + 1, y + (placement112.get() ? 1 : 2), z + 1);
-            if (intersectsWithEntities(box)) return;
-
-            if (hasBlock) {
-                if (damage > bestDirectDamage.get()) {
-                    bestDirectDamage.set(damage);
-                    bestDirectHit.set(hit);
-                    bestDirectPos.set(bp.toImmutable());
-                }
-            } else if (supportAvailable) {
-                // 修正 1: support 候选必须通过与执行相同的 obsidian resolver 预验证
-                if (resolveSupportHit(bp) == null) return;
-                if (damage > bestSupportDamage.get()) {
-                    bestSupportDamage.set(damage);
-                    bestSupportHit.set(hit);
-                    bestSupportPos.set(bp.toImmutable());
-                }
-            }
-        });
-
-        // 放置 —— 同步扫描的全局最优结果，已 LOS 验证
-        BlockIterator.after(() -> {
-            boolean isSup = false;
-            BlockHitResult result;
-            BlockPos pos;
-            double dmg;
-
-            if (bestDirectPos.get() != null && bestSupportPos.get() != null && supportAvailable) {
-                isSup = shouldPreferSupport(bestSupportDamage.get(), bestDirectDamage.get());
-            } else if (bestDirectPos.get() == null && bestSupportPos.get() != null && supportAvailable) {
-                isSup = true;
-            }
-
-            if (isSup) {
-                result = bestSupportHit.get();
-                pos = bestSupportPos.get();
-                dmg = bestSupportDamage.get();
-            } else {
-                result = bestDirectHit.get();
-                pos = bestDirectPos.get();
-                dmg = bestDirectDamage.get();
-            }
-
-            if (result == null || pos == null) return;
-
-            // 同步扫描的 support 候选已在 BlockIterator 回调中通过 resolveSupportHit 验证
-            // 故此处渲染 = 真的能执行
-            updateRenderCandidate(pos, dmg, isSup);
-
-            proposalPos.set(pos);
-            proposalIsSupport = isSup;
-            proposalDamage = dmg;
-            hasProposal = true;
-            proposalAge = 0;
-
-            BlockPos supportBlock = isSup ? pos : null;
-
-            // F8: support 时旋转目标必须朝向邻居方块放置面 (与 placeSupportSafe 发包方向一致)
-            SupportPlan syncSupportPlan = isSup ? resolveSupportHit(pos) : null;
-            if (isSup && syncSupportPlan == null) return; // support 放置面消失
-
-            if (syncSupportPlan != null) {
-                ((IVec3d) vec3d).meteor$set(syncSupportPlan.hitVec().x, syncSupportPlan.hitVec().y, syncSupportPlan.hitVec().z);
-            } else {
-                ((IVec3d) vec3d).meteor$set(
-                    result.getBlockPos().getX() + 0.5 + result.getSide().getVector().getX() * 0.5,
-                    result.getBlockPos().getY() + 0.5 + result.getSide().getVector().getY() * 0.5,
-                    result.getBlockPos().getZ() + 0.5 + result.getSide().getVector().getZ() * 0.5);
-            }
-
-            if (rotate.get()) {
-                double yaw = Rotations.getYaw(vec3d);
-                double pitch = Rotations.getPitch(vec3d);
-                if (yawStepMode.get() == YawStepMode.Break || doYawSteps(yaw, pitch)) {
-                    setRotation(true, vec3d, 0, 0);
-                    Vec3d hitTarget = new Vec3d(vec3d.x, vec3d.y, vec3d.z);
-                    // W2 修正: placeTimer 仅在 placeCrystal 成功时递增
-                    Rotations.rotateToward(hitTarget, 70, () -> {
-                        if (placeCrystal(result, dmg, supportBlock) && supportBlock == null)
-                            placeTimer += getEffectivePlaceDelay();
-                    });
-                }
-            } else {
-                if (placeCrystal(result, dmg, supportBlock) && supportBlock == null)
+            Rotations.rotateToward(hitTarget, 70, () -> {
+                // Why: rotateToward 可能跨 tick 执行。若期间世界版本漂移过大，说明 proposal 已过时，直接丢弃。
+                if (planner.getWorldVersion() - capturedWorldVersion > 5) return;
+                if (placeCrystal(result, chosen.damage(), supportBlock) && supportBlock == null) {
                     placeTimer += getEffectivePlaceDelay();
-            }
-        });
+                }
+            });
+            return;
+        }
+
+        if (placeCrystal(result, chosen.damage(), supportBlock) && supportBlock == null) {
+            placeTimer += getEffectivePlaceDelay();
+        }
     }
 
     /**
