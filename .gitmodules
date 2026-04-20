@@ -9,7 +9,7 @@
 [submodule "addon/meteor-rejects"]
 	path = addon/meteor-rejects
 	url = https://github.com/SMARK2022/meteor-rejects.git
-	branch = master
+	branch = 1.21.8-smark
 [submodule "addon/Lotus-Repackage"]
 	path = addon/Lotus-Repackage
 	url = https://github.com/SMARK2022/Lotus-Repackage.git
