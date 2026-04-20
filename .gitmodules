@@ -13,4 +13,4 @@
 [submodule "addon/Lotus-Repackage"]
 	path = addon/Lotus-Repackage
 	url = https://github.com/SMARK2022/Lotus-Repackage.git
-	branch = master
+	branch = 1.21.8-smark
