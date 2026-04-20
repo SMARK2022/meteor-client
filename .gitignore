@@ -18,3 +18,5 @@ logs
 !.idea/copyright/*
 !.idea/scopes/*
 ref
+*.vscode
+*.metals
