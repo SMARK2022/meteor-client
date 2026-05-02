@@ -14,3 +14,7 @@
 	path = addon/Lotus-Repackage
 	url = https://github.com/SMARK2022/Lotus-Repackage.git
 	branch = 1.21.8-smark
+[submodule "addon/RustElytraClient"]
+	path = addon/RustElytraClient
+	url = https://github.com/SMARK2022/RustElytraClient.git
+	branch = 1.21.8-smark
