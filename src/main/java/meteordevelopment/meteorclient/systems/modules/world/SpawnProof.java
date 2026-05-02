@@ -1,4 +1,4 @@
-package meteordevelopment.meteorclient.systems.modules.player;
+package meteordevelopment.meteorclient.systems.modules.world;
 
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
@@ -10,9 +10,11 @@ import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Categories;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.systems.modules.player.Printer;
 import meteordevelopment.meteorclient.utils.printer.PrinterBehavior;
 import meteordevelopment.meteorclient.utils.printer.PrinterTaskProvider;
 import meteordevelopment.meteorclient.utils.printer.SpawnCheckHelper;
+import meteordevelopment.meteorclient.utils.render.RenderUtils;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.block.*;
@@ -124,6 +126,13 @@ public class SpawnProof extends Module implements PrinterTaskProvider {
         .visible(renderOverlay::get)
         .build());
 
+    private final Setting<Boolean> tracers = sgRender.add(new BoolSetting.Builder()
+        .name("tracers")
+        .description("Draws tracer lines to highlighted spawnable surfaces.")
+        .defaultValue(false)
+        .visible(renderOverlay::get)
+        .build());
+
     // ==================== 内部状态 ====================
 
     // 实时扫描（Printer 消费）
@@ -155,7 +164,7 @@ public class SpawnProof extends Module implements PrinterTaskProvider {
     // ==================== 生命周期 ====================
 
     public SpawnProof() {
-        super(Categories.Player, "spawn-proof",
+        super(Categories.World, "spawn-proof",
             "Scans hostile mob spawnable surfaces and works with Printer to auto-place spawn proof blocks.");
     }
 
@@ -501,6 +510,7 @@ public class SpawnProof extends Module implements PrinterTaskProvider {
 
             event.renderer.box(box, fc, lc, ShapeMode.Lines, 0);
             event.depthRenderer.box(box, ghostColor, ghostColor, ShapeMode.Sides, 0);
+            if (tracers.get()) event.renderer.line(RenderUtils.center.x, RenderUtils.center.y, RenderUtils.center.z, pos.getX() + 0.5, y, pos.getZ() + 0.5, lc);
         }
     }
 

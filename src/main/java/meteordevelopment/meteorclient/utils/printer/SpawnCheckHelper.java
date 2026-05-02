@@ -17,7 +17,7 @@ import net.minecraft.world.World;
  *   <li>y-1  地面 {@code allowsSpawning(CREEPER)}</li>
  *   <li>y    身体 {@code isClearForSpawn(ZOMBIE)}</li>
  *   <li>y+1  头部 {@code isClearForSpawn(ZOMBIE)}</li>
- *   <li>block light == 0 (1.18+ hostile 刷怪光照规则)</li>
+     *   <li>block light == 0（忽略天光，只按方块光计算防刷需求）</li>
  * </ol>
  *
  * <p>CREEPER 作为地面刷怪参照实体（标准 hostile 地面检查），
@@ -35,10 +35,7 @@ public final class SpawnCheckHelper {
      */
     public static boolean canHostileSpawnAt(World world, BlockPos pos) {
         if (!isGeometricSpawnable(world, pos)) return false;
-        // 1.18+ hostile 刷怪条件: max(block_light, sky_light - sky_darkening) == 0
-        // 午夜 sky_darkening 最大 = 11; sky_light > 11 → adjusted > 0 → 不刷怪
-        if (world.getLightLevel(LightType.BLOCK, pos) > 0) return false;
-        return world.getLightLevel(LightType.SKY, pos) <= 11;
+        return world.getLightLevel(LightType.BLOCK, pos) == 0;
     }
 
     /**

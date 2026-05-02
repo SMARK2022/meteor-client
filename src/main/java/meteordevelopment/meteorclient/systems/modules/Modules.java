@@ -449,7 +449,6 @@ public class Modules extends System<Modules> {
         add(new Printer());
         add(new Reach());
         add(new Rotation());
-        add(new SpawnProof());
         add(new SpeedMine());
     }
 
@@ -548,7 +547,7 @@ public class Modules extends System<Modules> {
         add(new Nuker());
         add(new PacketMine());
         add(new StashFinder());
-        add(new SpawnProofer());
+        add(new SpawnProof());
         add(new Timer());
         add(new VeinMiner());
 
