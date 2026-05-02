@@ -139,6 +139,7 @@ public class SpawnProof extends Module implements PrinterTaskProvider {
     private int aDx, aDz, aY, aMinY, aMaxY, aHRange;
     private int aFound;
     private long aChecked;
+    private final BlockPos.Mutable analysisPos = new BlockPos.Mutable();
 
     private BlockPos afkCenter;
     private List<BlockPos> renderHighlights = Collections.emptyList();
@@ -341,7 +342,7 @@ public class SpawnProof extends Module implements PrinterTaskProvider {
             int wx = afkCenter.getX() + aDx, wz = afkCenter.getZ() + aDz;
             if (!mc.world.isChunkLoaded(wx >> 4, wz >> 4)) { advanceColumn(); continue; }
 
-            BlockPos pos = new BlockPos(wx, aY, wz);
+            BlockPos pos = analysisPos.set(wx, aY, wz);
             aChecked++; i++;
 
             if (!SpawnCheckHelper.quickRejectNotSpawnable(mc.world, pos)) {

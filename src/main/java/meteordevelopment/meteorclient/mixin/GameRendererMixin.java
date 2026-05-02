@@ -106,7 +106,7 @@ public abstract class GameRendererMixin implements IGameRenderer {
 
         if (renderer == null) renderer = new Renderer3D(MeteorRenderPipelines.WORLD_COLORED_LINES, MeteorRenderPipelines.WORLD_COLORED);
         if (depthRenderer == null) depthRenderer = new Renderer3D(MeteorRenderPipelines.WORLD_COLORED_LINES_DEPTH, MeteorRenderPipelines.WORLD_COLORED_DEPTH);
-        Render3DEvent event = Render3DEvent.get(matrixStack, renderer, depthRenderer, tickDelta, camera.getPos().x, camera.getPos().y, camera.getPos().z);
+        Render3DEvent event = Render3DEvent.get(matrixStack, renderer, depthRenderer, projection, view, tickDelta, camera.getPos().x, camera.getPos().y, camera.getPos().z);
 
         // Call utility classes
 

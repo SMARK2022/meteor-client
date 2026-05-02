@@ -229,6 +229,7 @@ public class ESP extends Module {
 
         for (Entity entity : mc.world.getEntities()) {
             if (target != entity && shouldSkip(entity)) continue;
+            if ((mode.get() == Mode.Box || mode.get() == Mode.Wireframe) && !event.isVisible(entity.getBoundingBox())) continue;
             if (target == entity || mode.get() == Mode.Box || mode.get() == Mode.Wireframe) drawBoundingBox(event, entity);
             count++;
         }

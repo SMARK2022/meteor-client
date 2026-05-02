@@ -354,7 +354,7 @@ public class Nametags extends Module {
 
             EntityType<?> type = entity.getType();
 
-            if (NametagUtils.to2D(pos, scale.get())) {
+            if (NametagUtils.to2D(pos, scale.get()) && isOnScreen(pos)) {
                 if (type == EntityType.PLAYER) renderNametagPlayer(event, (PlayerEntity) entity, shadow);
                 else if (type == EntityType.ITEM) renderNametagItem(((ItemEntity) entity).getStack(), shadow);
                 else if (type == EntityType.ITEM_FRAME || type == EntityType.GLOW_ITEM_FRAME)
@@ -366,6 +366,11 @@ public class Nametags extends Module {
                 else renderGenericNametag(entity, shadow);
             }
         }
+    }
+
+    private boolean isOnScreen(Vector3d pos) {
+        return pos.x >= 0 && pos.x <= mc.getWindow().getFramebufferWidth()
+            && pos.y >= 0 && pos.y <= mc.getWindow().getFramebufferHeight();
     }
 
     private int getRenderCount() {

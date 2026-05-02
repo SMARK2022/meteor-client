@@ -66,6 +66,15 @@ public class VoidESP extends Module {
         .build()
     );
 
+    private final Setting<Integer> scanInterval = sgGeneral.add(new IntSetting.Builder()
+        .name("scan-interval")
+        .description("How often to scan for void holes, in ticks.")
+        .defaultValue(5)
+        .min(1)
+        .sliderRange(1, 20)
+        .build()
+    );
+
     // Render
 
     private final Setting<ShapeMode> shapeMode = sgRender.add(new EnumSetting.Builder<ShapeMode>()
@@ -93,14 +102,28 @@ public class VoidESP extends Module {
 
     private final Pool<Void> voidHolePool = new Pool<>(Void::new);
     private final List<Void> voidHoles = new ArrayList<>();
+    private int scanTimer;
 
     public VoidESP() {
         super(Categories.Render, "void-esp", "Renders holes in bedrock layers that lead to the void.");
     }
 
+    @Override
+    public void onActivate() {
+        scanTimer = scanInterval.get();
+    }
+
+    @Override
+    public void onDeactivate() {
+        clearHoles();
+    }
+
     @EventHandler
     private void onTick(TickEvent.Post event) {
-        voidHoles.clear();
+        if (++scanTimer < scanInterval.get()) return;
+        scanTimer = 0;
+
+        clearHoles();
         if (mc.world.getDimensionEntry() == DimensionTypes.THE_END) return;
 
         int px = mc.player.getBlockPos().getX();
@@ -119,6 +142,11 @@ public class VoidESP extends Module {
                 }
             }
         }
+    }
+
+    private void clearHoles() {
+        voidHolePool.freeAll(voidHoles);
+        voidHoles.clear();
     }
 
     @EventHandler

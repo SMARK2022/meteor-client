@@ -243,6 +243,7 @@ public class StorageESP extends Module {
     @EventHandler
     private void onRender(Render3DEvent event) {
         count = 0;
+        boolean meshStarted = false;
 
         for (BlockEntity blockEntity : Utils.blockEntities()) {
             // Check if the block has been interacted with (opened)
@@ -265,11 +266,7 @@ public class StorageESP extends Module {
                 if (dist <= fadeDistance.get() * fadeDistance.get()) a = dist / (fadeDistance.get() * fadeDistance.get());
 
                 if (a < 0.075) continue;
-
-                // Only start a mesh when there's something to render
-                if (count == 0 && mode.get() == Mode.Shader) {
-                    mesh.begin();
-                }
+                boolean visible = event.isVisible(blockEntity.getPos().getX(), blockEntity.getPos().getY(), blockEntity.getPos().getZ(), blockEntity.getPos().getX() + 1, blockEntity.getPos().getY() + 1, blockEntity.getPos().getZ() + 1);
 
                 int prevLineA = lineColor.a;
                 int prevSideA = sideColor.a;
@@ -279,6 +276,19 @@ public class StorageESP extends Module {
 
                 if (tracers.get()) {
                     event.renderer.line(RenderUtils.center.x, RenderUtils.center.y, RenderUtils.center.z, blockEntity.getPos().getX() + 0.5, blockEntity.getPos().getY() + 0.5, blockEntity.getPos().getZ() + 0.5, lineColor);
+                }
+
+                if (!visible) {
+                    lineColor.a = prevLineA;
+                    sideColor.a = prevSideA;
+                    if (tracers.get()) count++;
+                    continue;
+                }
+
+                // Only start a mesh when there's something to render
+                if (!meshStarted && mode.get() == Mode.Shader) {
+                    mesh.begin();
+                    meshStarted = true;
                 }
 
                 if (mode.get() == Mode.Box) {
@@ -296,7 +306,7 @@ public class StorageESP extends Module {
             }
         }
 
-        if (mode.get() == Mode.Shader && count > 0) {
+        if (mode.get() == Mode.Shader && meshStarted) {
             PostProcessShaders.STORAGE_OUTLINE.endRender(() -> MeshRenderer.begin()
                 .attachments(mc.getFramebuffer())
                 .clearColor(Color.CLEAR)

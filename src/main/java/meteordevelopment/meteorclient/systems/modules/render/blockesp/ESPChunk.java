@@ -80,6 +80,8 @@ public class ESPChunk {
     }
 
     public void render(Render3DEvent event) {
+        if (!event.isVisible(x * 16, mc.world.getBottomY(), z * 16, x * 16 + 16, mc.world.getTopYInclusive() + 1, z * 16 + 16)) return;
+
         if (blocks != null) {
             for (ESPBlock block : blocks.values()) block.render(event);
         }

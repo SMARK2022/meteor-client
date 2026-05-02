@@ -228,7 +228,7 @@ public class TunnelESP extends Module {
     @EventHandler
     private void onRender3D(Render3DEvent event) {
         synchronized (chunks) {
-            for (TChunk chunk : chunks.values()) chunk.render(event.renderer);
+            for (TChunk chunk : chunks.values()) chunk.render(event);
         }
     }
 
@@ -268,8 +268,10 @@ public class TunnelESP extends Module {
             this.marked = true;
         }
 
-        public void render(Renderer3D renderer) {
+        public void render(Render3DEvent event) {
             if (positions == null) return;
+
+            if (!event.isVisible(x * 16, mc.world.getBottomY(), z * 16, x * 16 + 16, mc.world.getTopYInclusive() + 1, z * 16 + 16)) return;
 
             // Manual iteration to avoid boxing
             for (IntIterator it = positions.iterator(); it.hasNext();) {
@@ -290,7 +292,7 @@ public class TunnelESP extends Module {
                 x += this.x * 16;
                 z += this.z * 16;
 
-                renderer.box(x, y, z, x + 1, y + height.get(), z + 1, sideColor.get(), lineColor.get(), shapeMode.get(), excludeDir);
+                event.renderer.box(x, y, z, x + 1, y + height.get(), z + 1, sideColor.get(), lineColor.get(), shapeMode.get(), excludeDir);
             }
         }
 
